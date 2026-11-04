@@ -95,6 +95,43 @@ class HarpTests(unittest.TestCase):
         answer = harp_mcp.response({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         names = {tool["name"] for tool in answer["result"]["tools"]}
         self.assertIn("terminal_root", names)
+        self.assertIn("launch_control_center", names)
+        self.assertIn("wait_for_session", names)
+
+    def test_control_center_reopens_without_exposing_its_token(self):
+        with patch.object(harp_mcp, "_control_record", return_value={"port": 8765, "token": "private-token"}), \
+             patch.object(harp_mcp.webbrowser, "open", return_value=True) as browser:
+            result = json.loads(harp_mcp.launch_control_center())
+        self.assertEqual(result["url"], "http://127.0.0.1:8765/")
+        self.assertNotIn("private-token", json.dumps(result))
+        browser.assert_called_once_with("http://127.0.0.1:8765/#token=private-token")
+
+    def test_web_config_can_save_model_before_target(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            config_path = Path(temp) / "harp.json"
+            state = object.__new__(harp_web.HARPWebState)
+            state.lock = threading.RLock()
+            payload = {"studio": {"model": "example/model:Q4_K_P", "port": 8888,
+                                  "context": 32768, "cache_k": "q8_0", "cache_v": "q8_0", "parallel": 1}}
+            with patch.object(harp_web, "CONFIG", config_path):
+                saved = state.save_config(payload)
+                self.assertEqual(saved["target"], "")
+                self.assertEqual(saved["local"]["model"], "example/model")
+                with self.assertRaises(ValueError):
+                    harp.load_config(config_path)
+                saved = state.save_config({"target": "10.10.11.123"})
+                self.assertEqual(harp.load_config(config_path)["target"], "10.10.11.123")
+
+    def test_codex_picks_up_gui_started_hybrid_session(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            runs = Path(temp) / "runs"
+            path = runs / "20261103-120000-abcdef"
+            path.mkdir(parents=True)
+            self.make_session(path)
+            with patch.object(harp_mcp, "RUNS", runs):
+                result = harp_mcp.wait_for_session("2020-01-01T00:00:00+00:00", 1)
+            self.assertIn(str(path.resolve()), result)
+            self.assertIn("Hybrid session ready", result)
 
     def test_vpn_mode_requires_exact_target_ip(self):
         config = json.loads(Path("harp.htb.example.json").read_text())

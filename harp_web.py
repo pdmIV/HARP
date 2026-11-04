@@ -31,6 +31,7 @@ RUNS = ROOT / "runs"
 CONFIG = ROOT / "harp.json"
 WEB = ROOT / "web"
 HEARTBEAT = ROOT / ".gui_heartbeat"
+CONTROL_STATE = ROOT / ".control_center.json"
 KV_TYPES = ("f16", "bf16", "q8_0", "q4_0")
 SESSION_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 KEY_PATTERN = re.compile(r"API Key:\s*(sk-unsloth-[A-Za-z0-9_-]+)")
@@ -75,6 +76,34 @@ def studio_settings(cfg: dict) -> dict:
     default = {"model": local["model"], "port": urlparse(local["base_url"]).port or 8888,
                "context": 32768, "cache_k": "bf16", "cache_v": "bf16", "parallel": 1}
     return {**default, **(cfg.get("studio") or {})}
+
+
+def draft_config() -> dict:
+    """Load the GUI draft, including before the first valid target is supplied."""
+    if CONFIG.is_file():
+        return json.loads(CONFIG.read_text(encoding="utf-8"))
+    cfg = json.loads((ROOT / "harp.htb.example.json").read_text(encoding="utf-8"))
+    cfg["target"] = ""
+    cfg["local"]["model"] = ""
+    return cfg
+
+
+def prepare_runtime(cfg: dict) -> None:
+    """Create the dedicated bridge and image on first GUI run."""
+    try:
+        harp.docker("network", "inspect", cfg["network"])
+    except RuntimeError:
+        if cfg.get("network_policy") != "vpn_bridge":
+            raise
+        harp.docker("network", "create", cfg["network"], timeout=30)
+    harp.check_network(cfg, starting=True)
+    try:
+        harp.docker("image", "inspect", harp.IMAGE)
+    except RuntimeError:
+        built = subprocess.run(["docker", "build", "-f", "Dockerfile.kali", "-t", harp.IMAGE, "."],
+                               cwd=ROOT, capture_output=True, text=True, timeout=900)
+        if built.returncode:
+            raise RuntimeError("Kali image build failed: " + (built.stderr or built.stdout)[-3000:])
 
 
 def session_path(session_id: str) -> Path:
@@ -219,7 +248,7 @@ class HARPWebState:
 
     def save_config(self, payload: dict) -> dict:
         with self.lock:
-            cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+            cfg = draft_config()
             studio = payload.get("studio") or studio_settings(cfg)
             build_launch_args(studio)
             for key in ("target", "network", "network_policy", "scan_ports", "objective",
@@ -236,14 +265,21 @@ class HARPWebState:
             temporary = CONFIG.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
             try:
-                harp.load_config(temporary)
+                # Model settings may be saved before the operator enters a target.
+                if not cfg["target"]:
+                    validation = {**cfg, "target": "10.10.10.10"}
+                    temporary.write_text(json.dumps(validation), encoding="utf-8")
+                    harp.load_config(temporary)
+                    temporary.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                else:
+                    harp.load_config(temporary)
                 temporary.replace(CONFIG)
             finally:
                 temporary.unlink(missing_ok=True)
             return cfg
 
     def start_model(self) -> str:
-        cfg = harp.load_config(CONFIG)
+        cfg = draft_config()
         settings = studio_settings(cfg)
         args = build_launch_args(settings)
         if api_port_open(int(settings["port"])):
@@ -412,7 +448,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 cursor = int(query.get("cursor", ["0"])[0])
                 model_cursor = int(query.get("model_cursor", ["0"])[0])
                 state = self.server.state
-                cfg = harp.load_config(CONFIG)
+                cfg = draft_config()
                 port = int(studio_settings(cfg)["port"])
                 payload = {"config": cfg, "sessions": state.session_list(),
                            "selected": state.session_view(selected, cursor) if selected else None,
@@ -420,6 +456,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                                      "owned_running": bool(state.model_process and state.model_process.poll() is None),
                                      "logs": state.model_logs_since(model_cursor)}}
                 self._json(200, payload)
+            elif parsed.path == "/api/health":
+                self._json(200, {"ready": True})
             elif parsed.path.startswith("/api/jobs/"):
                 job_id = parsed.path.removeprefix("/api/jobs/")
                 with self.server.state.lock:
@@ -479,7 +517,15 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 if mode not in ("hybrid", "local-only", "frontier-only"):
                     raise ValueError("Invalid experiment mode")
                 cfg = harp.load_config(CONFIG)
-                job = state.submit("start session", lambda: harp.start_session(cfg, RUNS, mode).name)
+                if mode != "frontier-only":
+                    if not cfg["local"]["model"]:
+                        raise ValueError("Choose a local model in the Local model tab first")
+                    if not api_port_open(int(studio_settings(cfg)["port"])):
+                        raise ValueError("Start the local model in the Local model tab first")
+                def start_job():
+                    prepare_runtime(cfg)
+                    return harp.start_session(cfg, RUNS, mode).name
+                job = state.submit("start session", start_job)
                 self._json(202, {"job": job})
                 return
             match = re.fullmatch(r"/api/sessions/([^/]+)/([a-z-]+)", path)
@@ -567,6 +613,10 @@ def main():
     state = HARPWebState()
     server = HARPHTTPServer(("127.0.0.1", args.port), state)
     url = f"http://127.0.0.1:{server.server_port}/#token={state.token}"
+    temporary = CONTROL_STATE.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps({"port": server.server_port, "token": state.token,
+                                     "pid": os.getpid()}), encoding="utf-8")
+    temporary.replace(CONTROL_STATE)
     print(f"HARP Command Center: http://127.0.0.1:{server.server_port}/")
     if not args.no_browser:
         print("Opening a private browser tab. Keep this terminal running.")
@@ -581,6 +631,12 @@ def main():
     finally:
         server.server_close()
         state.close()
+        try:
+            record = json.loads(CONTROL_STATE.read_text(encoding="utf-8"))
+            if record.get("token") == state.token:
+                CONTROL_STATE.unlink(missing_ok=True)
+        except (OSError, ValueError):
+            pass
 
 
 if __name__ == "__main__":

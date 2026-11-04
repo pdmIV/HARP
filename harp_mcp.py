@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import contextlib
+from datetime import datetime
 import io
 import json
+import os
+import subprocess
 import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.request import Request, urlopen
+import webbrowser
 
 import harp
 import harp_artifacts
@@ -16,6 +21,74 @@ import harp_artifacts
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 GUI_HEARTBEAT = ROOT / ".gui_heartbeat"
+CONTROL_STATE = ROOT / ".control_center.json"
+
+
+def _control_record() -> dict | None:
+    try:
+        record = json.loads(CONTROL_STATE.read_text(encoding="utf-8"))
+        port = int(record["port"])
+        token = str(record["token"])
+        if not 1024 <= port <= 65535 or not token:
+            return None
+        request = Request(f"http://127.0.0.1:{port}/api/health", headers={"X-HARP-Token": token})
+        with urlopen(request, timeout=1) as response:
+            if response.status != 200:
+                return None
+        return {"port": port, "token": token}
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def launch_control_center() -> str:
+    """Start or reopen the browser dashboard without exposing its control token."""
+    opened_at = harp.now()
+    record = _control_record()
+    if record is None:
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+        process = subprocess.Popen([sys.executable, str(ROOT / "harp_web.py"), "--no-browser"],
+                                   cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL, creationflags=flags,
+                                   start_new_session=os.name != "nt")
+        for _ in range(100):
+            record = _control_record()
+            if record:
+                break
+            if process.poll() is not None:
+                raise RuntimeError("HARP command center exited during startup")
+            time.sleep(0.1)
+        if record is None:
+            raise RuntimeError("HARP command center did not become ready")
+    url = f"http://127.0.0.1:{record['port']}/#token={record['token']}"
+    if not webbrowser.open(url):
+        raise RuntimeError("The command center is running, but the browser did not open. Run python harp_web.py from the project folder.")
+    return json.dumps({"status": "opened", "url": f"http://127.0.0.1:{record['port']}/",
+                       "opened_at": opened_at,
+                       "next": "Operator sets model and target in browser and starts Hybrid session. Call wait_for_session with after=opened_at."})
+
+
+def wait_for_session(after: str, timeout_seconds: int = 1200) -> str:
+    """Wait for the operator to start a new hybrid run in the dashboard."""
+    try:
+        cutoff = datetime.fromisoformat(after)
+    except ValueError as error:
+        raise ValueError("after must be the timestamp returned by launch_control_center") from error
+    if cutoff.tzinfo is None:
+        raise ValueError("after must include a timezone")
+    if not 1 <= timeout_seconds <= 1200:
+        raise ValueError("timeout_seconds must be 1 through 1200")
+    end = time.monotonic() + timeout_seconds
+    while time.monotonic() < end:
+        for path in sorted(RUNS.glob("*/session.json"), reverse=True):
+            try:
+                state = harp.load_session(path.parent)
+                started = datetime.fromisoformat(state["started_at"])
+                if started >= cutoff and state["status"] == "active" and state["mode"] == "hybrid":
+                    return f"Hybrid session ready: {path.parent.resolve()}\n" + inspect_session(str(path.parent))
+            except (OSError, ValueError, KeyError):
+                continue
+        time.sleep(1)
+    return "No new hybrid session appeared before the wait timed out. Reopen the command center or call wait_for_session again with the same after timestamp."
 
 
 def run_path(session: str) -> Path:
@@ -164,6 +237,9 @@ def finish_session(session: str, success: str) -> str:
 
 
 TOOLS = {
+    "launch_control_center": (launch_control_center, "Open the local HARP web command center so the operator can configure the model and target and start a session.", {}, []),
+    "wait_for_session": (wait_for_session, "Wait for a new Hybrid session started in the web command center, then return its path and reconnaissance.",
+                         {"after": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1200, "default": 1200}}, ["after"]),
     "start_session": (start_session, "Start Kali and deterministic reconnaissance in a selected experiment mode.",
                       {"mode": {"type": "string", "enum": ["local-only", "frontier-only", "hybrid"], "default": "hybrid"}}, []),
     "inspect_session": (inspect_session, "Read recon, recent observations, progress, and metrics.",

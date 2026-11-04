@@ -45,18 +45,18 @@ Containers are a practical boundary, not a guarantee against a container escape 
 
 5. Restart Codex in this workspace to load the project MCP configuration. `codex mcp get harp` shows whether the server is enabled. The MCP adapter uses only Python's standard library.
 
-Codex can then call `start_session`, `inspect_session`, `terminal`, `delegate_local`, `mark_success`, and `finish_session`. The same operations have a CLI for debugging:
+Codex can then call `launch_control_center`, `wait_for_session`, `inspect_session`, `terminal`, `delegate_local`, `mark_success`, and `finish_session`. `start_session` remains available for an explicitly requested headless run.
 
 ## Start a hybrid run with Codex
 
 The Codex chat is the frontier-model oracle; the web command center is the live monitor and approval surface; Unsloth serves the local worker. HARP does not need an OpenAI API key for this route.
 
-1. Start Docker Desktop's Linux engine. Build the Kali image with `docker build -f Dockerfile.kali -t harp-kali:latest .` if it is not already built.
-2. Connect the authorized Hack The Box VPN on Windows. Create the outbound bridge with `docker network create harp_vpn` if it does not exist. Copy `harp.htb.example.json` to the ignored `harp.json`, set the exact authorized target IP, and run `python harp.py doctor`.
-3. Start the selected model's Unsloth API on the configured loopback port with server-side tools disabled. The **Local model** tab can launch it with the selected context and KV-cache settings; an already running server is reused. Store the API key with `python set_unsloth_key.py` if needed. Keep the API key out of chat.
-4. Run `python harp_web.py` from this project folder and leave that terminal open. The browser app at `http://127.0.0.1:8765` shows plans, tool activity, flags, metrics, and root approval requests.
-5. In the ChatGPT desktop app, open **Codex** on this trusted local project folder and start a new Codex chat. Choose an eligible GPT-6 model from the model picker, then enable or verify Daybreak for that chat if your account offers it. Daybreak is an access setting, not necessarily a separate model name. The Codex terminal documents `/daybreak` for eligible accounts and models; the desktop control may differ. Confirm that the `harp` MCP server is available; from PowerShell, `codex mcp list` also reports its configured status. If you just changed `.codex/config.toml`, reopen the project or restart Codex so it reloads the server.
-6. Ask Codex: *Use HARP in hybrid mode against the target configured in `harp.json`. Call `start_session(mode="hybrid")`, review reconnaissance, publish your operator plan with `record_oracle_plan`, delegate bounded tasks to the local model, inspect terminal evidence, request approval for necessary root commands, capture both flags, and finish the session.* Codex should use HARP's MCP tools for target work. The GUI observes the same session; starting another session in the GUI would create a separate run.
+1. Start Docker Desktop's Linux engine and connect the authorized Hack The Box VPN on Windows.
+2. In the ChatGPT desktop app, open **Codex** on this trusted local project folder and start a new Codex chat. Choose an eligible GPT-6 model and enable or verify Daybreak if your account offers it. Daybreak is an access setting, not necessarily a separate model name. Confirm that the `harp` MCP server is available; `codex mcp list` also reports its configured status. If you just changed `.codex/config.toml`, reopen the project or restart Codex.
+3. Tell Codex **"Launch HARP."** It calls `launch_control_center`, which starts or reopens the web command center in your browser. Codex then waits for you to start a Hybrid session in the browser; it does not start a separate run.
+4. In **Local model**, enter your Unsloth model ID and context/KV-cache settings, then select **Launch model**. An already running server is reused. HARP captures a generated Unsloth key and encrypts it for your Windows account. If you started Unsloth separately, store its key with `python set_unsloth_key.py`. Keep the key out of chat.
+5. In **Configuration**, select **Use HTB VPN profile**, enter the exact authorized target IP, and save. Choose **Hybrid** on Overview and click **Start session**. HARP creates the dedicated VPN bridge and builds the Kali image on first use, then runs deterministic reconnaissance. The new run appears in the session list.
+6. Codex's `wait_for_session` tool picks up that run and its reconnaissance. Codex can publish an operator plan, delegate bounded local tasks, inspect terminal evidence, request root approval when needed, capture both flags, and finish the run. Keep the browser open to monitor events and approve commands.
 
 The `.codex/config.toml` in this checkout names `S:\HARP` explicitly. If you clone the repository elsewhere, update its `args` and `cwd` paths to that clone before opening Codex. An ordinary ChatGPT chat without this local Codex workspace and MCP server cannot operate HARP through these tools.
 
@@ -69,7 +69,7 @@ cd S:\HARP
 python harp_web.py
 ```
 
-The launcher opens a browser on `127.0.0.1:8765`. The control API requires a private token held in that browser tab; other pages cannot control HARP merely by reaching localhost. Keep the Python process running while using the app. `python harp_gui.py` remains a compatibility launch command. The interface has light and dark themes, responsive layouts, and side navigation for Overview, Flags, Artifacts, Local model, and Configuration.
+The launcher opens a browser on `127.0.0.1:8765`. Codex can launch it through `launch_control_center`; the direct Python command remains available. The control API requires a private token held in that browser tab; other pages cannot control HARP merely by reaching localhost. The interface has light and dark themes, responsive layouts, and side navigation for Overview, Flags, Artifacts, Local model, and Configuration.
 
 **Overview** follows each session's event log, showing deterministic recon, explicit oracle plan updates, delegated objectives, local model actions and short stated reasons, terminal output, approvals, and outcomes. It also shows elapsed time, model calls, terminal calls, token usage, and flag progress. Codex's private reasoning is not available to the app; the project MCP tool `record_oracle_plan` publishes a concise operator-facing plan, and [AGENTS.md](AGENTS.md) tells Codex to use it when the strategy changes.
 
@@ -98,9 +98,7 @@ Use the full directory printed by `start` in place of `runs\SESSION_DIRECTORY`. 
 Docker Desktop [routes outbound container traffic through its Windows backend](https://docs.docker.com/desktop/features/networking/), and [documents VPN support](https://docs.docker.com/desktop/features/networking/networking-how-tos/). Starting OpenVPN on Windows is the simplest route here because the worker remains an ordinary, unprivileged Linux container. VPN client settings can still block Docker traffic, so check target reachability from **inside** the container before a real assessment.
 
 1. Connect the authorized Hack The Box VPN on Windows.
-2. Create a dedicated outbound bridge once: `docker network create harp_vpn`.
-3. Copy [harp.htb.example.json](harp.htb.example.json) to `harp.json`. Replace the target with the authorized machine IP. Adjust the scan ports and objective for the experiment.
-4. Run `python harp.py doctor`, then `python harp.py start --mode hybrid`. A successful scan of the expected target service is the connectivity check. If the scan finds nothing, verify VPN routing and target state before delegating.
+2. In the GUI, choose **Use HTB VPN profile**, set the exact authorized target IP, and start a Hybrid session. HARP creates `harp_vpn` and builds the Kali image if needed. A successful scan of the expected target service is the connectivity check. If the scan finds nothing, verify VPN routing and target state before delegating.
 
 HARP refuses host networking, an internal bridge selected as a VPN bridge, and a VPN bridge already occupied by other containers. In VPN mode, Docker networking does not enforce the target IP; the target name, prompts, and experiment procedure define the authorized scope. Use only environments you are authorized to test.
 

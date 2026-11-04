@@ -6,3 +6,4 @@ __pycache__/
 .deps/
 .secrets/
 .gui_heartbeat
+.control_center.json

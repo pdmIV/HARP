@@ -463,6 +463,13 @@
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
   $("artifactFilter").addEventListener("change", () => renderArtifacts(true));
   $("saveModel").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
+  $("htbProfile").addEventListener("click", () => {
+    $("networkInput").value = "harp_vpn";
+    $("networkPolicy").value = "vpn_bridge";
+    showPage("settings");
+    $("targetInput").focus();
+    toast("Enter the authorized HTB target IP, then save configuration");
+  });
   $("saveConfig").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("startSession").addEventListener("click", async () => {
     try { await saveConfig(false); await action("/api/sessions/start", {mode: $("modeSelect").value}); }
