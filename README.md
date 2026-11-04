@@ -1,4 +1,9 @@
 # HARP: WSL backed Kali prototype
+<p align="center">
+  <img src="assets/harp-banner.png"
+       alt="HARP — Hierarchical AI-Agent Penetration Testing"
+       width="100%">
+</p>
 
 This prototype makes **Codex the oracle** and an Unsloth Desktop model the local worker. It does not call an OpenAI API. Codex connects to HARP through the project MCP server and can inspect a session, issue terminal commands, or delegate a bounded objective to the local model. HARP starts with deterministic reconnaissance, turns Nmap XML into a compact service list, and stores the full transcript and Markdown notes for review.
 
