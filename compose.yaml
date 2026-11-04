@@ -1,0 +1,22 @@
+services:
+  target:
+    build:
+      context: ./lab-target
+    networks:
+      - lab
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 32
+    mem_limit: 64m
+
+networks:
+  lab:
+    name: harp_lab
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated

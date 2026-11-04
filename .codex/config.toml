@@ -1,0 +1,9 @@
+[mcp_servers.harp]
+command = "python"
+args = ["S:\\HARP\\harp_mcp.py"]
+cwd = "S:\\HARP"
+tool_timeout_sec = 1500
+default_tools_approval_mode = "auto"
+
+[mcp_servers.harp.tools.terminal_root]
+approval_mode = "approve"

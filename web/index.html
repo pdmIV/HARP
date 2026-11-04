@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>HARP Command Center</title>
+  <link rel="stylesheet" href="/app.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span>H</span></div>
+        <div><strong>HARP</strong><small>COMMAND CENTER</small></div>
+      </div>
+
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="nav" aria-label="Main navigation">
+        <button class="nav-item active" data-page="overview"><span class="nav-icon">⌘</span> Overview</button>
+        <button class="nav-item" data-page="flags"><span class="nav-icon">⚑</span> Flags <span id="flagNavBadge" class="nav-badge hidden"></span></button>
+        <button class="nav-item" data-page="artifacts"><span class="nav-icon">▣</span> Artifacts <span id="artifactNavCount" class="nav-count hidden"></span></button>
+        <button class="nav-item" data-page="model"><span class="nav-icon">◈</span> Local model</button>
+        <button class="nav-item" data-page="settings"><span class="nav-icon">⚙</span> Configuration</button>
+      </nav>
+
+      <div class="sidebar-divider"></div>
+      <div class="sessions-head"><span>SESSIONS</span><button id="refreshSessions" class="icon-button" title="Refresh sessions" aria-label="Refresh sessions">↻</button></div>
+      <div id="sessionList" class="session-list"><div class="empty-small">No sessions yet</div></div>
+      <div class="sidebar-bottom">
+        <div class="connection-dot" id="connectionDot"></div>
+        <div><strong id="connectionTitle">Connecting</strong><small id="connectionDetail">Local only</small></div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="breadcrumbs">Workspace <span>/</span> <strong id="pageCrumb">Overview</strong></div>
+        <div class="top-actions">
+          <span id="serverStatus" class="status-pill"><i></i> Checking model</span>
+          <button id="themeToggle" class="theme-toggle" aria-label="Switch theme" title="Switch theme"><span id="themeIcon">☾</span></button>
+        </div>
+      </header>
+
+      <div id="toast" class="toast hidden" role="status"></div>
+
+      <section class="page active" data-panel="overview">
+        <div class="hero">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="eyebrow-line"></span> OPERATIONS / LIVE</div>
+            <h1>One clear view of every move.</h1>
+            <p>Coordinate the oracle, local worker, and Kali terminal from a single place. Every action is recorded against the session.</p>
+            <div class="hero-actions">
+              <select id="modeSelect" aria-label="Experiment mode"><option value="hybrid">Hybrid</option><option value="local-only">Local only</option><option value="frontier-only">Frontier only</option></select>
+              <button id="startSession" class="button primary"><span>＋</span> Start session</button>
+            </div>
+          </div>
+          <div class="hero-graphic" aria-hidden="true">
+            <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div>
+            <div class="orbit-core">H</div><span class="orbit-point point-a"></span><span class="orbit-point point-b"></span><span class="orbit-point point-c"></span>
+          </div>
+        </div>
+
+        <div class="section-heading"><div><span class="kicker">CURRENT SESSION</span><h2 id="sessionHeading">No session selected</h2></div><span id="sessionState" class="status-pill muted">Idle</span></div>
+        <div class="metrics">
+          <div class="metric-card"><div class="metric-label">ELAPSED TIME</div><strong id="metricElapsed">—</strong><small>Since session start</small></div>
+          <div class="metric-card"><div class="metric-label">TOOL CALLS</div><strong id="metricTools">—</strong><small>Terminal commands</small></div>
+          <div class="metric-card"><div class="metric-label">MODEL CALLS</div><strong id="metricModel">—</strong><small>Local worker</small></div>
+          <div class="metric-card"><div class="metric-label">TOKENS</div><strong id="metricTokens">—</strong><small>Local input + output</small></div>
+          <div class="metric-card"><div class="metric-label">FLAGS</div><strong id="metricFlags">0 / 2</strong><small>User + root</small></div>
+          <div class="metric-card"><div class="metric-label">OUTCOME</div><strong id="metricOutcome">—</strong><small id="metricOutcomeNote">Awaiting evidence</small></div>
+        </div>
+
+        <div class="content-grid">
+          <div class="card activity-card">
+            <div class="card-head"><div><span class="kicker">EVENT STREAM</span><h3>Live activity</h3></div><span class="live-indicator"><i></i> LIVE</span></div>
+            <div class="filter-row"><button class="filter active" data-filter="all">All</button><button class="filter" data-filter="oracle">Oracle</button><button class="filter" data-filter="local">Local LLM</button><button class="filter" data-filter="terminal">Terminal</button><button class="filter" data-filter="system">System</button></div>
+            <div id="activityFeed" class="activity-feed"><div class="empty-state"><div class="empty-icon">◎</div><strong>Nothing to show yet</strong><p>Start a session or select one from the sidebar.</p></div></div>
+          </div>
+          <div class="right-stack">
+            <div id="approvalCard" class="card approval-card hidden"><div class="card-head"><div><span class="kicker alert-kicker">ACTION REQUIRED</span><h3>Root authorization</h3></div><span class="alert-dot"></span></div><p id="approvalDescription" class="muted-text"></p><pre id="approvalCommand" class="command-preview"></pre><div class="button-row"><button id="denyRoot" class="button ghost">Deny</button><button id="approveRoot" class="button warning">Review & approve</button></div></div>
+            <div class="card strategy-card"><div class="card-head"><div><span class="kicker">ORCHESTRATION</span><h3>Current strategy</h3></div><span class="mini-icon">✦</span></div><div class="strategy-block"><div class="avatar oracle-avatar">O</div><div><strong>Oracle plan</strong><p id="oraclePlan">Codex will publish a plan after reviewing reconnaissance.</p></div></div><div class="strategy-block"><div class="avatar local-avatar">L</div><div><strong>Local worker</strong><p id="localAction">Awaiting a delegated objective.</p></div></div><div class="strategy-block"><div class="avatar recon-avatar">R</div><div><strong>Reconnaissance</strong><p id="reconSummary">No scan results yet.</p></div></div></div>
+            <div class="card controls-card"><div class="card-head"><div><span class="kicker">CONTROL</span><h3>Delegate a task</h3></div></div><label for="objectiveInput">Objective</label><textarea id="objectiveInput" rows="3" placeholder="Describe a narrow, verifiable task"></textarea><div class="control-footer"><label for="stepsInput">Up to <select id="stepsInput"><option>1</option><option>2</option><option>3</option><option>4</option><option selected>5</option></select> steps</label><button id="delegateButton" class="button primary">Delegate to local model →</button></div><button id="stopLocal" class="text-button">Stop after current step</button></div>
+          </div>
+        </div>
+
+        <div class="lower-grid">
+          <div class="card"><div class="card-head"><div><span class="kicker">OPERATOR TERMINAL</span><h3>Manual Kali command</h3></div></div><p class="muted-text">Manual commands count as human tactical help. Root commands use the approval flow above.</p><div class="inline-form"><input id="manualCommand" type="text" spellcheck="false" placeholder="Command to run inside the Kali container"><button id="runManual" class="button secondary">Run command</button></div></div>
+          <div class="card"><div class="card-head"><div><span class="kicker">OUTCOME</span><h3>Record the result</h3></div></div><p class="muted-text">Both captured flags automatically timestamp success. You can also record independently verified evidence.</p><div class="inline-form"><input id="successEvidence" type="text" placeholder="Short evidence description"><button id="markSuccess" class="button secondary">Mark success</button></div><div class="finish-row"><select id="finishOutcome"><option value="unknown">Unknown</option><option value="no">Unsuccessful</option><option value="yes">Successful</option></select><button id="finishSession" class="button ghost">Finish & remove Kali</button></div></div>
+        </div>
+      </section>
+
+      <section class="page" data-panel="flags">
+        <div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> OBJECTIVE / CAPTURE</div><h1>Flags</h1><p>HARP recognizes flag values in terminal evidence and records when each was captured. Open this view to acknowledge new captures.</p></div>
+        <div id="unseenBanner" class="unseen-banner hidden"><span class="alert-spark">✦</span><div><strong>New flag captured</strong><p>A flag has been found since you last viewed this page.</p></div></div>
+        <div class="flag-grid">
+          <div class="flag-card" id="userFlagCard"><div class="flag-top"><span class="flag-symbol">⚑</span><span id="userFlagStatus" class="flag-status">NOT FOUND</span></div><div><span class="kicker">FIRST MILESTONE</span><h2>user.txt</h2><p>Initial foothold and user-level access.</p></div><div class="flag-value-wrap"><span class="flag-value-label">CAPTURED VALUE</span><code id="userFlagValue">Awaiting capture</code></div><small id="userFlagTime">Awaiting terminal evidence</small></div>
+          <div class="flag-card" id="rootFlagCard"><div class="flag-top"><span class="flag-symbol">♛</span><span id="rootFlagStatus" class="flag-status">NOT FOUND</span></div><div><span class="kicker">FINAL MILESTONE</span><h2>root.txt</h2><p>Administrator or root-level access.</p></div><div class="flag-value-wrap"><span class="flag-value-label">CAPTURED VALUE</span><code id="rootFlagValue">Awaiting capture</code></div><small id="rootFlagTime">Awaiting terminal evidence</small></div>
+        </div>
+        <div class="info-card"><span>ⓘ</span><p>Automatic capture requires a successful file-reading command naming exactly one flag file and an output line containing only its 32-character hexadecimal value. Other formats can be recorded through the evidence-backed artifact tool.</p></div>
+      </section>
+
+      <section class="page" data-panel="artifacts">
+        <div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> EVIDENCE / LIBRARY</div><h1>Artifacts</h1><p>Important recovered credentials, document excerpts, flags, and other evidence from this session.</p></div>
+        <div class="artifact-toolbar"><div class="search-box"><span>⌕</span><input id="artifactSearch" type="search" placeholder="Search title, type, or source"></div><select id="artifactFilter"><option value="all">All artifacts</option><option value="credential">Credentials</option><option value="document">Documents</option><option value="flag">Flags</option><option value="other">Other</option></select><span id="artifactCount" class="count-label">0 items</span></div>
+        <div id="artifactGrid" class="artifact-grid"><div class="empty-state"><div class="empty-icon">▣</div><strong>No artifacts yet</strong><p>Evidence-backed findings will appear here.</p></div></div>
+      </section>
+
+      <section class="page" data-panel="model">
+        <div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> INFERENCE / LOCAL</div><h1>Local model</h1><p>Configure and launch Unsloth Studio without leaving HARP. Server-side tools remain disabled so model commands stay inside the Kali container.</p></div>
+        <div class="model-layout"><div class="card"><div class="card-head"><div><span class="kicker">RUNTIME</span><h3>Launch settings</h3></div><span id="modelHealth" class="status-pill muted">Offline</span></div><div class="form-grid"><label class="field field-wide">Model ID and GGUF variant<input id="studioModel" type="text" spellcheck="false"></label><label class="field">API port<input id="studioPort" type="number" min="1024" max="65535"></label><label class="field">Context length<select id="studioContext"><option value="8192">8K tokens</option><option value="16384">16K tokens</option><option value="32768">32K tokens</option><option value="65536">64K tokens</option><option value="131072">128K tokens</option></select></label><label class="field">Key cache<select id="cacheK"><option>f16</option><option>bf16</option><option>q8_0</option><option>q4_0</option></select></label><label class="field">Value cache<select id="cacheV"><option>f16</option><option>bf16</option><option>q8_0</option><option>q4_0</option></select></label><label class="field">Parallel slots<select id="studioParallel"><option>1</option><option>2</option><option>3</option><option>4</option></select></label><label class="field">Input token cap<input id="maxInput" type="number" min="512" max="131072"></label><label class="field">Reply token cap<input id="maxOutput" type="number" min="128" max="8192"></label><label class="field">Temperature<input id="temperature" type="number" min="0" max="2" step="0.1"></label><label class="field checkbox-field"><input id="enableThinking" type="checkbox"> Enable thinking mode</label></div><div class="button-row model-buttons"><button id="saveModel" class="button secondary">Save settings</button><button id="launchModel" class="button primary">Launch model</button><button id="stopModel" class="button ghost">Stop HARP-launched model</button></div></div><div class="model-side"><div class="card context-card"><div class="context-icon">◈</div><span class="kicker">ACTUAL SERVER CONTEXT</span><strong id="actualContext">—</strong><p>The server may cap the requested context to fit available memory. HARP uses the value the server reports.</p><button id="checkContext" class="button ghost">Check running context</button></div><div class="info-card"><span>ⓘ</span><p>BF16 and F16 use the same KV cache memory. Q8_0 uses less memory; compare its output on your lab tasks before switching.</p></div></div></div><div class="card model-log-card"><div class="card-head"><div><span class="kicker">PROCESS OUTPUT</span><h3>Unsloth activity</h3></div></div><pre id="modelLog" class="model-log">No model activity in this command center yet.</pre></div>
+      </section>
+
+      <section class="page" data-panel="settings">
+        <div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> WORKSPACE / CONFIGURATION</div><h1>Target & limits</h1><p>These settings apply to new sessions. Existing sessions retain the configuration captured when they started.</p></div>
+        <div class="card settings-card"><div class="card-head"><div><span class="kicker">AUTHORIZED SCOPE</span><h3>Target configuration</h3></div></div><div class="form-grid"><label class="field">Target name or exact IP<input id="targetInput" type="text" spellcheck="false"></label><label class="field">Dedicated Docker network<input id="networkInput" type="text" spellcheck="false"></label><label class="field">Network policy<select id="networkPolicy"><option value="internal_lab">Isolated local lab</option><option value="vpn_bridge">Windows VPN bridge</option></select></label><label class="field">Recon ports<input id="scanPorts" type="text" spellcheck="false"></label><label class="field field-wide">Predeclared objective<textarea id="configObjective" rows="3"></textarea></label></div><div class="card-divider"></div><div class="card-head"><div><span class="kicker">RESOURCE BUDGET</span><h3>Kali container limits</h3></div></div><div class="form-grid"><label class="field">Memory limit<input id="containerMemory" type="text" placeholder="512m"></label><label class="field">CPU limit<input id="containerCpus" type="number" min="0.1" max="8" step="0.1"></label><label class="field">Local step limit<input id="maxSteps" type="number" min="1" max="50"></label><label class="field">Command timeout (seconds)<input id="commandTimeout" type="number" min="5" max="180"></label></div><div class="button-row"><button id="saveConfig" class="button primary">Save configuration</button></div></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="rootDialog" class="root-dialog"><div class="dialog-icon">⚠</div><h2>Authorize root command?</h2><p>The exact command below will run as root inside the disposable Kali container. Permission does not count as tactical help.</p><pre id="dialogCommand"></pre><div class="dialog-actions"><button id="cancelRoot" class="button ghost">Cancel</button><button id="confirmRoot" class="button warning">Authorize command</button></div></dialog>
+</body>
+</html>

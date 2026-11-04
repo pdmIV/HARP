@@ -1,0 +1,8 @@
+harp.json
+runs/
+__pycache__/
+*.pyc
+.venv/
+.deps/
+.secrets/
+.gui_heartbeat
