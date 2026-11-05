@@ -1,5 +1,8 @@
 {
   "target": "REPLACE_WITH_AUTHORIZED_TARGET_IP",
+  "runtime": "wsl",
+  "wsl_distro": "kali-linux",
+  "wsl_user": "kali",
   "network": "harp_vpn",
   "network_policy": "vpn_bridge",
   "scan_ports": "21-23,25,53,80,88,135,139,389,443,445,1433,2049,3306,3389,5985,5986,8000,8080,8443",

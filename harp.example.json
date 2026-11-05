@@ -9,6 +9,13 @@
   "command_timeout_seconds": 45,
   "container_memory": "512m",
   "container_cpus": "1.0",
+  "oracle": {
+    "provider": "nvidia_nim",
+    "model": "meta/llama-3.1-8b-instruct",
+    "max_cycles": 12,
+    "steps_per_cycle": 6,
+    "max_tokens": 800
+  },
   "local": {
     "base_url": "http://127.0.0.1:8888/v1",
     "model": "REPLACE_WITH_UNSLOTH_MODEL_ID",

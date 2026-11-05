@@ -21,11 +21,17 @@ def list_artifacts(run_dir: Path) -> list[dict]:
     if not path.is_file():
         return []
     result = []
+    seen = set()
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         for line in stream:
             try:
                 item = json.loads(line)
                 if isinstance(item, dict) and item.get("id"):
+                    # Older runs may have saved the same evidence under different titles.
+                    identity = (item.get("kind"), item.get("value")) if item.get("kind") != "flag" else ("flag", item.get("title"), item.get("value"))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
                     result.append(item)
             except json.JSONDecodeError:
                 continue
@@ -43,7 +49,7 @@ def register_artifact(run_dir: Path, *, kind: str, title: str, value: str,
     if kind == "flag" and title not in FLAG_NAMES:
         raise ValueError("Flag title must be user.txt or root.txt")
     for item in list_artifacts(run_dir):
-        if item["kind"] == kind and item["title"] == title and item["value"] == value:
+        if item["kind"] == kind and item["value"] == value and (kind != "flag" or item["title"] == title):
             return item
     from harp import append_event, now
     record = {"id": artifact_id or uuid.uuid4().hex, "at": now(), "kind": kind, "title": title,
@@ -59,12 +65,13 @@ def register_artifact(run_dir: Path, *, kind: str, title: str, value: str,
 
 
 def capture_document_file(run_dir: Path, session: dict, container_path: str, title: str) -> dict:
-    """Copy one regular /workspace file through bounded stdout, without a host mount."""
+    """Copy one regular session-workspace file through bounded stdout."""
+    workspace = session.get("workspace", "/workspace")
     path = PurePosixPath(container_path)
-    if (not container_path.startswith("/workspace/") or ".." in path.parts
+    if (not container_path.startswith(workspace.rstrip("/") + "/") or ".." in path.parts
             or any(ord(c) < 32 for c in container_path) or len(container_path) > 500
             or len(path.name) > 160):
-        raise ValueError("Document path must be a normal file under /workspace")
+        raise ValueError("Document path must be a normal file under the Kali session workspace")
     if session.get("status") != "active":
         raise ValueError("Documents can be captured only from an active Kali session")
     import harp
@@ -72,7 +79,7 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
     script = (
         "import os,stat,sys\n"
         "p=os.path.realpath(sys.argv[1])\n"
-        "if not p.startswith('/workspace/'): sys.exit(2)\n"
+        "if not p.startswith(sys.argv[2].rstrip('/')+'/'): sys.exit(2)\n"
         "fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW)\n"
         "s=os.fstat(fd)\n"
         "if not stat.S_ISREG(s.st_mode) or s.st_size>8388608: sys.exit(3)\n"
@@ -84,11 +91,10 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
         " sys.stdout.buffer.write(b)\n"
         "if left==0: sys.exit(4)\n"
     )
-    result = subprocess.run(["docker", "exec", "--user", "10001:10001", terminal.name,
-                             "python3", "-c", script, container_path],
+    result = subprocess.run(terminal.file_argv(script, container_path) + [workspace],
                             capture_output=True, timeout=30)
     if result.returncode:
-        raise RuntimeError("Could not capture a regular document under /workspace (8 MiB maximum)")
+        raise RuntimeError("Could not capture a regular document under the Kali session workspace (8 MiB maximum)")
     data = result.stdout
     if len(data) > 8388608:
         raise ValueError("Document exceeds 8 MiB maximum")
@@ -103,7 +109,7 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
     stored.write_bytes(data)
     try:
         record = register_artifact(run_dir, kind="document", title=title, value=value,
-                                   source=container_path, evidence="Copied regular file from Kali /workspace",
+                                   source=container_path, evidence="Copied regular file from Kali session workspace",
                                    evidence_backed=True, artifact_id=artifact_id,
                                    attachment={"filename": filename, "size": len(data), "sha256": digest})
     except Exception:

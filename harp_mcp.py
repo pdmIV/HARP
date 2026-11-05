@@ -113,6 +113,7 @@ def inspect_session(session: str) -> str:
     state = harp.load_session(run_path(session))
     return json.dumps({"summary": harp.summarize(state), "recon": state["recon"],
                        "http_probes": state.get("http_probes", []),
+                       "smb_probes": state.get("smb_probes", []),
                        "flags": harp_artifacts.flag_status(run_path(session)),
                        "artifacts": harp_artifacts.list_artifacts(run_path(session)),
                        "recent_observations": state["observations"][-4:],
@@ -205,8 +206,8 @@ def record_oracle_plan(session: str, plan: str) -> str:
     return "Oracle plan recorded for the command center."
 
 
-def delegate_local(session: str, objective: str, steps: int = 5) -> str:
-    return captured(lambda: harp.delegate(run_path(session), objective, steps))
+def delegate_local(session: str, objective: str, steps: int | None = None, unbridled: bool = False) -> str:
+    return captured(lambda: harp.delegate(run_path(session), objective, steps, unbridled=unbridled))
 
 
 def mark_human_intervention(session: str) -> str:
@@ -238,7 +239,7 @@ def finish_session(session: str, success: str) -> str:
 
 TOOLS = {
     "launch_control_center": (launch_control_center, "Open the local HARP web command center so the operator can configure the model and target and start a session.", {}, []),
-    "wait_for_session": (wait_for_session, "Wait for a new Hybrid session started in the web command center, then return its path and reconnaissance.",
+    "wait_for_session": (wait_for_session, "Wait for a new Hybrid session started in the web command center. Startup Nmap reconnaissance completes before this returns; use its compact structured findings to publish an oracle plan before any local delegation.",
                          {"after": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1200, "default": 1200}}, ["after"]),
     "start_session": (start_session, "Start Kali and deterministic reconnaissance in a selected experiment mode.",
                       {"mode": {"type": "string", "enum": ["local-only", "frontier-only", "hybrid"], "default": "hybrid"}}, []),
@@ -255,12 +256,13 @@ TOOLS = {
                          "kind": {"type": "string", "enum": ["credential", "document", "other", "flag"]},
                          "title": {"type": "string"}, "value": {"type": "string"}},
                         ["session", "kind", "title", "value"]),
-    "capture_document": (capture_document, "Preserve one regular file under Kali /workspace (8 MiB maximum) as a downloadable document artifact.",
+    "capture_document": (capture_document, "Preserve one regular file under the active Kali session workspace (8 MiB maximum) as a downloadable document artifact.",
                          {"session": {"type": "string"}, "path": {"type": "string"},
                           "title": {"type": "string"}}, ["session", "path", "title"]),
-    "delegate_local": (delegate_local, "Give Unsloth a narrow objective and bounded autonomous terminal steps; stop on stagnation.",
+    "delegate_local": (delegate_local, "Give Unsloth one narrow objective. The configured local step limit applies afresh to each delegation; total local steps remain a statistic. Unbridled=true removes step, model-call, and repetition limits until done, operator stop, or another required stop. Review terminal evidence and the stop reason afterward.",
                        {"session": {"type": "string"}, "objective": {"type": "string"},
-                        "steps": {"type": "integer", "minimum": 1, "maximum": 5, "default": 5}},
+                        "steps": {"type": "integer", "minimum": 1},
+                        "unbridled": {"type": "boolean", "default": False}},
                        ["session", "objective"]),
     "mark_human_intervention": (mark_human_intervention, "Record human tactical help, not permission approval.",
                                 {"session": {"type": "string"}}, ["session"]),

@@ -17,3 +17,42 @@
 .live-indicator.muted{color:var(--muted)}
 .artifact-download{margin-top:13px;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:700px){.sidebar .sessions-head{display:flex;margin-top:15px}.sidebar .session-list{display:flex;overflow-x:auto;min-height:0;margin-top:7px}.sidebar .session-item{min-width:165px}.sidebar .empty-small{white-space:nowrap}}
+.button.danger{background:var(--red);color:#fff;box-shadow:0 7px 17px color-mix(in srgb,var(--red) 25%,transparent)}
+.button.danger:hover{background:color-mix(in srgb,var(--red) 85%,#000)}
+.session-row{position:relative;min-width:0;border:1px solid transparent;border-radius:11px}
+.session-row:hover{background:var(--surface-2)}
+.session-row.selected{background:var(--accent-soft);border-color:color-mix(in srgb,var(--accent) 18%,transparent)}
+.session-row .session-item{width:100%;min-width:0;padding-right:40px}
+.session-row .session-item:hover,.session-row .session-item.selected{background:transparent;border-color:transparent}
+.session-delete{position:absolute;right:6px;top:50%;transform:translateY(-50%) translateX(5px);opacity:0;pointer-events:none;width:28px;height:28px;border:0;border-radius:8px;background:var(--red);color:#fff;font-size:20px;line-height:1;transition:opacity .15s,transform .15s}
+.session-row:hover .session-delete,.session-row:focus-within .session-delete{opacity:1;pointer-events:auto;transform:translateY(-50%) translateX(0)}
+.session-delete:hover{filter:brightness(.9)}
+@media(hover:none){.session-delete{opacity:1;pointer-events:auto;transform:translateY(-50%) translateX(0)}}
+.benchmark-card{margin-top:16px}.benchmark-results{display:grid;gap:8px;margin-top:16px}.benchmark-row{display:flex;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;min-width:0}.benchmark-model{font-size:12px;font-weight:700;overflow-wrap:anywhere;flex:1;min-width:0}.benchmark-time{color:var(--green);font-size:11px;font-weight:700}.benchmark-failed{color:var(--amber);font-size:11px;font-weight:700}.benchmark-row .button{min-height:30px;padding:0 10px;font-size:11px}
+
+.recon-progress{margin-bottom:16px;display:grid;gap:12px;border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+.recon-progress-head,.verbose-toolbar{display:flex;align-items:center;justify-content:space-between;gap:20px}
+.recon-progress-head h3,.verbose-toolbar h3{margin:5px 0 0}
+.recon-progress-head strong,.verbose-toolbar>strong{font-variant-numeric:tabular-nums;font-size:24px;color:var(--accent);white-space:nowrap}
+.recon-progress p{margin:0}
+.recon-current-command,.verbose-command,.verbose-output,.verbose-raw pre{display:block;background:var(--terminal);color:var(--code);border:1px solid var(--line);border-radius:9px;padding:11px 13px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.recon-progress .button{justify-self:start}
+.verbose-card{display:grid;gap:18px}
+.verbose-toolbar{border-bottom:1px solid var(--line);padding-bottom:16px}
+.verbose-toolbar p{margin:5px 0 0}
+.verbose-controls{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px}
+.verbose-controls select{min-width:170px}
+.verbose-follow{display:flex;align-items:center;gap:7px;margin-left:auto;color:var(--text)}
+.verbose-follow input{min-height:auto}
+.verbose-feed{display:grid;align-content:start;gap:9px;max-height:70vh;min-height:300px;overflow:auto;padding-right:4px}
+.verbose-entry{border:1px solid var(--line);border-radius:10px;background:var(--surface-2);padding:0 13px}
+.verbose-entry-summary{display:grid;grid-template-columns:90px minmax(130px,190px) minmax(0,1fr);align-items:center;gap:12px;min-height:48px;cursor:pointer;list-style-position:inside}
+.verbose-entry-summary time{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums}
+.verbose-entry-summary strong{font-size:12px}
+.verbose-entry-summary span{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.verbose-entry[open]{padding-bottom:12px}
+.verbose-entry .verbose-command,.verbose-entry .verbose-output{margin:9px 0 0}
+.verbose-raw{margin-top:10px;color:var(--muted);font-size:11px}
+.verbose-raw summary{cursor:pointer}
+.verbose-raw pre{max-height:420px}
+@media(max-width:700px){.verbose-entry-summary{grid-template-columns:1fr;gap:3px;padding:8px 0}.recon-progress-head,.verbose-toolbar{align-items:flex-start}.verbose-controls{flex-wrap:wrap}.verbose-follow{margin-left:0}}

@@ -1,10 +1,10 @@
 FROM kalilinux/kali-rolling
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    nmap curl ca-certificates dnsutils iproute2 netcat-openbsd \
-    smbclient ldap-utils enum4linux-ng python3-impacket evil-winrm \
+    nmap libcap2-bin curl ca-certificates dnsutils iproute2 netcat-openbsd \
+    smbclient ldap-utils enum4linux-ng python3-impacket evil-winrm netexec \
     whatweb gobuster openssh-client \
-    && setcap -r /usr/lib/nmap/nmap \
+    && setcap cap_net_raw+ep /usr/lib/nmap/nmap \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 harp
 

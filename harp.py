@@ -1,4 +1,4 @@
-"""HARP lab runner: deterministic recon, bounded model loop, isolated Kali terminal."""
+"""HARP lab runner: deterministic recon and bounded model loop."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import argparse
 import copy
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import queue
+import shlex
 import re
 import subprocess
 import sys
@@ -42,7 +44,27 @@ When you recover a credential, document excerpt, or other useful artifact, you m
 "artifact":{"kind":"credential|document|other","title":"short label","value":"exact observed value"}
 to your JSON action. HARP records it only if that value appears in terminal evidence.
 You have a limited step budget. Avoid repeating commands. No interactive programs.
+Follow the delegated objective exactly. Before using smbclient mget, disable prompts with
+"prompt off;". For remote filenames containing spaces, use double quotes inside smbclient -c.
 """
+
+
+def system_prompt(session: dict) -> str:
+    if session.get("runtime") != "wsl":
+        return SYSTEM
+    return SYSTEM.replace(
+        "You are a security testing assistant operating only inside an authorized, isolated lab.",
+        "You are a security testing assistant operating only on the authorized target."
+    ).replace(
+        "The terminal is a disposable Kali container on a closed lab network. The only intended target",
+        "The terminal uses the operator's existing Kali WSL instance. The only intended target"
+    ).replace(
+        "Use small, verifiable steps. Do not access other hosts, the Docker gateway, or the host OS.",
+        "Use small, verifiable steps. Do not access other hosts, Windows mounts, or the host OS."
+    ).replace("refer to your Kali container, not the authorized target.",
+              "refer to your Kali WSL instance, not the authorized target.") + (
+        "\nWork only under " + session["workspace"] + ". Do not access /mnt or other home directories."
+    )
 
 
 def now() -> str:
@@ -70,9 +92,18 @@ def checked_ports(value: str) -> str:
 def load_config(path: Path) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8"))
     checked_name(cfg["target"], "target")
-    checked_name(cfg["network"], "network")
-    if not cfg["network"].startswith("harp_"):
-        raise ValueError("Use a dedicated Docker network named harp_...")
+    runtime = cfg.get("runtime", "docker")
+    if runtime not in ("docker", "wsl"):
+        raise ValueError("Runtime must be docker or wsl")
+    if runtime == "docker":
+        checked_name(cfg["network"], "network")
+        if not cfg["network"].startswith("harp_"):
+            raise ValueError("Use a dedicated Docker network named harp_...")
+    else:
+        checked_name(cfg.get("wsl_distro", "kali-linux"), "WSL distribution")
+        checked_name(cfg.get("wsl_user", "kali"), "WSL user")
+        if cfg.get("network_policy", "internal_lab") != "vpn_bridge":
+            raise ValueError("WSL runtime requires the VPN network policy; it cannot provide Docker's isolated lab network")
     if cfg.get("network_policy", "internal_lab") not in ("internal_lab", "vpn_bridge"):
         raise ValueError("network_policy must be internal_lab or vpn_bridge")
     if cfg.get("network_policy", "internal_lab") == "vpn_bridge":
@@ -83,16 +114,17 @@ def load_config(path: Path) -> dict:
         if target_ip.is_loopback or target_ip.is_link_local or target_ip.is_multicast or target_ip.is_unspecified:
             raise ValueError("VPN target cannot be a local or special IP address")
     checked_ports(cfg["scan_ports"])
-    if not 1 <= int(cfg["max_steps"]) <= 50:
-        raise ValueError("max_steps must be 1 through 50")
+    if int(cfg["max_steps"]) < 1:
+        raise ValueError("max_steps must be positive")
     if not 1 <= int(cfg.get("max_model_calls", 30)) <= 100:
         raise ValueError("max_model_calls must be 1 through 100")
     if not 5 <= int(cfg["command_timeout_seconds"]) <= 180:
         raise ValueError("command_timeout_seconds must be 5 through 180")
-    if not re.fullmatch(r"[1-9][0-9]*(?:[kmg])", cfg["container_memory"]):
-        raise ValueError("Invalid container_memory")
-    if not 0.1 <= float(cfg["container_cpus"]) <= 8:
-        raise ValueError("Invalid container_cpus")
+    if runtime == "docker":
+        if not re.fullmatch(r"[1-9][0-9]*(?:[kmg])", cfg["container_memory"]):
+            raise ValueError("Invalid container_memory")
+        if not 0.1 <= float(cfg["container_cpus"]) <= 8:
+            raise ValueError("Invalid container_cpus")
     model = cfg["local"]
     url = urlparse(model["base_url"])
     if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.path.rstrip("/") != "/v1":
@@ -107,6 +139,16 @@ def load_config(path: Path) -> dict:
         raise ValueError("Local max_input_tokens must be 512 through 131072")
     if "enable_thinking" in model and not isinstance(model["enable_thinking"], bool):
         raise ValueError("Local enable_thinking must be true or false")
+    oracle = cfg.get("oracle", {"provider": "codex"})
+    if oracle.get("provider") not in ("codex", "nvidia_nim"):
+        raise ValueError("Oracle provider must be codex or nvidia_nim")
+    if oracle.get("provider") == "nvidia_nim":
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(oracle.get("model", ""))):
+            raise ValueError("Choose a NVIDIA NIM model ID")
+        if not 1 <= int(oracle.get("max_cycles", 12)) <= 50:
+            raise ValueError("Oracle max_cycles must be 1 through 50")
+        if not 1 <= int(oracle.get("steps_per_cycle", 6)) <= int(cfg["max_steps"]):
+            raise ValueError("Oracle steps_per_cycle must fit the local step limit")
     return cfg
 
 
@@ -139,6 +181,8 @@ class KaliTerminal:
         self.started = False
         self.event_dir: Path | None = None
         self.print_stdout = True
+        self.recon_mode = False
+        self.recon_stage = "Preparing Kali"
 
     def __enter__(self):
         check_network(self.cfg, starting=True)
@@ -148,7 +192,7 @@ class KaliTerminal:
             "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=32m",
             "--tmpfs", "/workspace:rw,nosuid,nodev,size=64m,uid=10001,gid=10001",
             "--cap-drop", "ALL", "--cap-add", "NET_RAW",
-            "--security-opt", "no-new-privileges=true",
+            # Nmap's file capability grants NET_RAW to that binary only; NNP would block it.
             "--pids-limit", "64", "--memory", self.cfg["container_memory"],
             "--cpus", str(self.cfg["container_cpus"]), "--user", "10001:10001",
             "--env", "HOME=/workspace", "--env", "XDG_CACHE_HOME=/workspace/.cache",
@@ -182,9 +226,16 @@ class KaliTerminal:
     def run(self, command: str, timeout: int, *, live: bool = True, as_root: bool = False) -> dict:
         if not command or len(command) > 1000 or any(ord(c) < 32 and c != "\t" for c in command):
             raise ValueError("Command is empty, too long, or contains control characters")
-        argv = ["docker", "exec", "--user", "0:0" if as_root else "10001:10001",
-                "--workdir", "/workspace", self.name,
-                "timeout", "-s", "KILL", f"{timeout}s", "/bin/sh", "-lc", command]
+        if self.recon_mode and self.event_dir and (self.event_dir / ".stop_session").exists():
+            raise RuntimeError("Reconnaissance stopped by operator")
+        argv = self.command_argv(command, timeout, as_root)
+        if self.recon_mode and self.event_dir:
+            append_event(self.event_dir, {"type": "recon_command_started",
+                                          "stage": self.recon_stage, "command": command})
+            session = load_session(self.event_dir)
+            session["recon_stage"] = self.recon_stage
+            session["recon_command"] = command
+            save_session(self.event_dir, session)
         started = time.monotonic()
         proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         lines: queue.Queue[bytes | None] = queue.Queue()
@@ -214,9 +265,6 @@ class KaliTerminal:
                 if self.print_stdout:
                     sys.stdout.write(decoded)
                     sys.stdout.flush()
-                if self.event_dir is not None:
-                    append_event(self.event_dir, {"type": "terminal_output", "command": command,
-                                                  "text": decoded[:4000]})
             if size < MAX_OUTPUT:
                 part = item[: MAX_OUTPUT - size]
                 chunks.append(part)
@@ -226,7 +274,9 @@ class KaliTerminal:
         except subprocess.TimeoutExpired:
             proc.kill()
             code = -1
-        return {
+        if proc.stdout is not None:
+            proc.stdout.close()
+        result = {
             "command": command,
             "exit_code": code,
             "seconds": round(time.monotonic() - started, 2),
@@ -234,6 +284,27 @@ class KaliTerminal:
             "truncated": size >= MAX_OUTPUT,
             "as_root": as_root,
         }
+        if self.recon_mode and self.event_dir:
+            append_event(self.event_dir, {"type": "recon_command_finished",
+                                          "stage": self.recon_stage, "command": command,
+                                          "exit_code": code, "seconds": result["seconds"]})
+            session = load_session(self.event_dir)
+            session["recon_tool_calls"] = session.get("recon_tool_calls", 0) + 1
+            session["recon_stage"] = self.recon_stage
+            session["recon_command"] = None
+            save_session(self.event_dir, session)
+            if (self.event_dir / ".stop_session").exists():
+                raise RuntimeError("Reconnaissance stopped by operator")
+        return result
+
+    def command_argv(self, command: str, timeout: int, as_root: bool) -> list[str]:
+        return ["docker", "exec", "--user", "0:0" if as_root else "10001:10001",
+                "--workdir", "/workspace", self.name,
+                "timeout", "-s", "KILL", f"{timeout}s", "/bin/sh", "-lc", command]
+
+    def file_argv(self, script: str, path: str) -> list[str]:
+        return ["docker", "exec", "--user", "10001:10001", self.name,
+                "python3", "-c", script, path]
 
     def stats(self) -> dict | None:
         try:
@@ -241,6 +312,58 @@ class KaliTerminal:
                                      self.name, timeout=15))
         except (RuntimeError, ValueError, subprocess.TimeoutExpired):
             return None
+
+
+class WslTerminal(KaliTerminal):
+    """Run through HARP's audited terminal interface in an existing Kali WSL distro."""
+
+    def __init__(self, cfg: dict):
+        super().__init__(cfg)
+        self.distro = cfg.get("wsl_distro", "kali-linux")
+        self.user = cfg.get("wsl_user", "kali")
+        self.workspace = f"/home/{self.user}/.local/share/harp/runs/{self.name}"
+
+    def _base(self, as_root: bool = False) -> list[str]:
+        return ["wsl.exe", "--distribution", self.distro, "--user",
+                "root" if as_root else self.user, "--exec"]
+
+    def __enter__(self):
+        checked_name(self.distro, "WSL distribution")
+        checked_name(self.user, "WSL user")
+        probe = subprocess.run(self._base() + ["/bin/sh", "-lc",
+                               "command -v nmap && command -v nxc && command -v timeout && command -v python3"],
+                               capture_output=True, text=True, timeout=30)
+        if probe.returncode:
+            raise RuntimeError("Kali WSL must have nmap, nxc, timeout, and python3 installed")
+        create = subprocess.run(self._base() + ["mkdir", "-m", "700", "-p", self.workspace],
+                                capture_output=True, text=True, timeout=30)
+        if create.returncode:
+            raise RuntimeError("Could not create HARP workspace in Kali WSL: " + create.stderr[-300:])
+        self.started = True
+        return self
+
+    def __exit__(self, *_exc):
+        # Existing Kali files belong to the operator; HARP never destroys the distro.
+        pass
+
+    @classmethod
+    def attach(cls, cfg: dict, name: str):
+        checked_name(name, "WSL session")
+        terminal = cls(cfg)
+        terminal.name = name
+        terminal.workspace = f"/home/{terminal.user}/.local/share/harp/runs/{name}"
+        terminal.started = True
+        return terminal
+
+    def command_argv(self, command: str, timeout: int, as_root: bool) -> list[str]:
+        script = f"cd {shlex.quote(self.workspace)} && {command}"
+        return self._base(as_root) + ["timeout", "-s", "KILL", f"{timeout}s", "/bin/sh", "-lc", script]
+
+    def file_argv(self, script: str, path: str) -> list[str]:
+        return self._base() + ["python3", "-c", script, path]
+
+    def stats(self) -> dict | None:
+        return None
 
 
 def parse_nmap_xml(raw: str) -> list[dict]:
@@ -262,6 +385,44 @@ def parse_nmap_xml(raw: str) -> list[dict]:
                 "version": service.get("version", "") if service is not None else "",
             })
     return findings
+
+
+def nmap_port_groups(ports: list[int], max_chars: int = 650) -> list[str]:
+    """Compress open ports into bounded -p arguments for version scans."""
+    values = sorted(set(ports))
+    ranges = []
+    if values:
+        start = previous = values[0]
+        for port in values[1:]:
+            if port == previous + 1:
+                previous = port
+                continue
+            ranges.append(str(start) if start == previous else f"{start}-{previous}")
+            start = previous = port
+        ranges.append(str(start) if start == previous else f"{start}-{previous}")
+    groups, current = [], ""
+    for value in ranges:
+        candidate = f"{current},{value}" if current else value
+        if len(candidate) > max_chars and current:
+            groups.append(current)
+            current = value
+        else:
+            current = candidate
+    if current:
+        groups.append(current)
+    return groups
+
+
+AD_TCP_PORTS = (53, 88, 135, 139, 389, 445, 464, 593, 636, 3268, 3269, 5985, 5986)
+
+
+def active_directory_hint(findings: list[dict]) -> bool:
+    ports = {item["port"] for item in findings if item.get("protocol") == "tcp"}
+    return 445 in ports and (135 in ports or 389 in ports or 88 in ports)
+
+
+def needs_deeper_vpn_scan(findings: list[dict]) -> bool:
+    return active_directory_hint(findings) and len({item["port"] for item in findings}) < 8
 
 
 def parse_http_response(raw: str) -> dict:
@@ -291,6 +452,35 @@ def deterministic_http_probes(terminal: KaliTerminal, target: str, findings: lis
                  **parse_http_response(result["output"])}
         probes.append(probe)
         append_event(run_dir, {"type": "deterministic_http_probe", "result": result, "probe": probe})
+    return probes
+
+
+def windows_smb_detected(findings: list[dict]) -> bool:
+    smb_open = any(item.get("port") in (139, 445) and item.get("protocol") == "tcp"
+                   for item in findings)
+    if any("samba" in str(item.get("product", "")).lower() for item in findings
+           if item.get("port") in (139, 445)):
+        return False
+    windows_hint = any("windows" in " ".join(str(item.get(key, "")) for key in
+                            ("service", "product", "version")).lower()
+                       or "microsoft-ds" in str(item.get("service", "")).lower()
+                       or "msrpc" in str(item.get("service", "")).lower()
+                       for item in findings)
+    return smb_open and windows_hint
+
+
+def deterministic_smb_probes(terminal: KaliTerminal, target: str, findings: list[dict],
+                             run_dir: Path) -> list[dict]:
+    if not windows_smb_detected(findings):
+        return []
+    probes = []
+    for option in ("--shares", "--users", "--rid-brute"):
+        command = f"nxc smb {target} -u '.' -p '' {option}"
+        result = terminal.run(command, 45, live=False)
+        probe = {"option": option, "exit_code": result["exit_code"],
+                 "output_excerpt": result["output"][:6000], "truncated": result["truncated"]}
+        probes.append(probe)
+        append_event(run_dir, {"type": "deterministic_smb_probe", "result": result, "probe": probe})
     return probes
 
 
@@ -348,7 +538,7 @@ def count_chat_tokens(model: dict, system: str, user: str) -> int:
     return int(result["input_tokens"])
 
 
-def fit_context(model: dict, context: dict, budget: int) -> tuple[str, int, bool]:
+def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -> tuple[str, int, bool]:
     output_chars, note_count, command_count = 3000, 12, 30
     for attempt in range(7):
         reduced = copy.deepcopy(context)
@@ -361,7 +551,7 @@ def fit_context(model: dict, context: dict, budget: int) -> tuple[str, int, bool
         ]
         reduced["prior_commands"] = reduced["prior_commands"][-command_count:]
         user = json.dumps(reduced)
-        tokens = count_chat_tokens(model, SYSTEM, user)
+        tokens = count_chat_tokens(model, system, user)
         if tokens <= budget:
             return user, tokens, attempt > 0
         output_chars = max(200, output_chars // 2)
@@ -406,10 +596,73 @@ def json_object(text: str) -> dict:
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
-    value = json.loads(text)
+    decoder = json.JSONDecoder()
+    value, end = decoder.raw_decode(text)
+    remainder = text[end:].strip()
+    if remainder:
+        duplicate, duplicate_end = decoder.raw_decode(remainder)
+        if duplicate != value or remainder[duplicate_end:].strip():
+            raise ValueError("Reply contains conflicting or extra content")
     if not isinstance(value, dict):
         raise ValueError("Expected a JSON object")
     return value
+
+
+def null_auth_objective(objective: str) -> bool:
+    return bool(re.search(r"\b(?:null|anonymous|guest)\b", objective, re.I))
+
+
+def local_command_issue(command: str, target: str, objective: str,
+                        observations: list[dict] | None = None) -> str | None:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return "Shell quoting is incomplete; return a corrected single command."
+    if not parts:
+        return "Command is empty."
+    foreign_ips = {ip for ip in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", command)
+                   if ip != target and ip not in ("127.0.0.1", "0.0.0.0")}
+    if foreign_ips:
+        return "Command names an IP outside the authorized target."
+    smb_tools = {"smbclient", "nxc", "netexec", "crackmapexec", "cme", "rpcclient"}
+    uses_smb = any(Path(part).name.lower() in smb_tools for part in parts)
+    if uses_smb:
+        for index, part in enumerate(parts[:-1]):
+            if part in ("-U", "-u", "--user", "--username"):
+                identity = parts[index + 1]
+                if null_auth_objective(objective) and identity not in ("", ".", "%", ".%", "guest"):
+                    return "This task permits null or guest SMB authentication only; do not try named accounts."
+                if "%" in identity:
+                    password = identity.split("%", 1)[1]
+                    if password and observations is not None and not any(
+                            password in str(item.get("output", "")) for item in observations):
+                        return "The SMB password has no terminal evidence; do not guess credentials."
+            if part in ("-p", "--password"):
+                password = parts[index + 1]
+                if null_auth_objective(objective) and password:
+                    return "This task permits an empty SMB password only."
+                if password and observations is not None and not any(
+                        password in str(item.get("output", "")) for item in observations):
+                    return "The SMB password has no terminal evidence; do not guess credentials."
+        if null_auth_objective(objective) and any(part in ("-k", "--kerberos") for part in parts):
+            return "This task permits null or guest SMB authentication only."
+    allowed_shares = {share.lower() for share in re.findall(
+        r"//[^/\s]+/([A-Za-z0-9_$.-]+)", objective)}
+    command_shares = {share.lower() for share in re.findall(
+        r"//[^/\s]+/([A-Za-z0-9_$.-]+)", command)}
+    if allowed_shares and command_shares - allowed_shares:
+        return "SMB command names a share outside the oracle objective."
+    if "smbclient" in parts:
+        for index, part in enumerate(parts[:-1]):
+            if part != "-c":
+                continue
+            smb_commands = parts[index + 1]
+            if re.search(r"(?:^|;)\s*mget\b", smb_commands, re.I) and not re.search(
+                    r"(?:^|;)\s*prompt\s+off\b", smb_commands, re.I):
+                return "smbclient mget may prompt; add 'prompt off;' before mget."
+            if re.search(r"\bget\s+'[^']*\s[^']*'", smb_commands, re.I):
+                return "For a remote filename with spaces, use double quotes inside smbclient -c (for example: -c 'get \"file name.txt\"')."
+    return None
 
 
 def append_event(run_dir: Path, event: dict) -> None:
@@ -443,45 +696,138 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid") -> Path:
     run_dir.mkdir()
     started_epoch = time.time()
     started_at = now()
-    terminal = KaliTerminal(cfg)
+    terminal = WslTerminal(cfg) if cfg.get("runtime") == "wsl" else KaliTerminal(cfg)
+    session = {
+        "status": "recon", "mode": mode, "container": terminal.name, "config": cfg,
+        "runtime": cfg.get("runtime", "docker"),
+        "workspace": terminal.workspace if isinstance(terminal, WslTerminal) else "/workspace",
+        "kali_image_id": None, "target": cfg["target"],
+        "started_at": started_at, "started_epoch": started_epoch,
+        "recon_started_epoch": started_epoch, "recon_stage": "Preparing Kali",
+        "recon_tool_calls": 0, "recon": [], "http_probes": [], "smb_probes": [],
+        "local_steps": 0, "local_calls": [], "observations": [],
+        "memory_notes": [], "memory_queries": [], "oracle_actions": 0, "root_approvals": 0,
+        "oracle_usage": None, "human_intervention_at": None, "success": "unknown",
+        "time_to_success_seconds": None, "success_at": None, "success_epoch": None,
+    }
+    save_session(run_dir, session)
+    append_event(run_dir, {"type": "recon_started", "target": cfg["target"],
+                           "runtime": cfg.get("runtime", "docker")})
+    terminal.event_dir = run_dir
+    terminal.recon_mode = True
     try:
         terminal.__enter__()
         print(f"Kali terminal: {terminal.name}")
-        command = ("nmap -sT -Pn -n -sV --version-light --max-retries 1 "
-                   f"--host-timeout 90s -p {cfg['scan_ports']} -oX - {cfg['target']}")
-        scan = terminal.run(command, 100, live=False)
-        findings = parse_nmap_xml(scan["output"])
-        append_event(run_dir, {"type": "deterministic_recon", "result": scan, "findings": findings})
-        append_note(run_dir, "Deterministic reconnaissance", json.dumps(findings, indent=2))
+        vpn_scan = cfg.get("network_policy") == "vpn_bridge"
+        scan_type = "-sT" if isinstance(terminal, WslTerminal) else "-sS"
+        ports = "-p-" if vpn_scan else f"-p {cfg['scan_ports']}"
+        if vpn_scan:
+            discovery = (f"nmap {scan_type} -Pn -n --min-rate 2000 --max-rate 3000 --open "
+                         f"--host-timeout 180s {ports} -oX - {cfg['target']}")
+        else:
+            discovery = (f"nmap {scan_type} -Pn -n --open --max-retries 1 {ports} "
+                         f"--host-timeout 90s -oX - {cfg['target']}")
+        terminal.recon_stage = "Full TCP port sweep"
+        scan = terminal.run(discovery, 190 if vpn_scan else 100, live=False)
+        discovered = parse_nmap_xml(scan["output"])
+        append_event(run_dir, {"type": "port_discovery", "result": scan,
+                               "findings": [{"port": item["port"], "protocol": item["protocol"]}
+                                            for item in discovered]})
         if scan["exit_code"] != 0:
             raise RuntimeError(f"Reconnaissance failed (exit {scan['exit_code']})")
+        session = load_session(run_dir)
+        session["recon"] = discovered
+        save_session(run_dir, session)
+        if vpn_scan and needs_deeper_vpn_scan(discovered):
+            time.sleep(3)
+            deeper_command = (f"nmap {scan_type} -Pn -n --min-rate 700 --max-rate 1200 "
+                              f"--max-retries 3 --open --host-timeout 180s -p- -oX - {cfg['target']}")
+            terminal.recon_stage = "Deeper TCP port sweep"
+            deeper_scan = terminal.run(deeper_command, 190, live=False)
+            deeper = parse_nmap_xml(deeper_scan["output"])
+            append_event(run_dir, {"type": "deeper_port_discovery", "result": deeper_scan,
+                                   "findings": deeper})
+            discovered = list({item["port"]: item for item in [*discovered, *deeper]}.values())
+        if vpn_scan and active_directory_hint(discovered):
+            time.sleep(2)
+            supplement_ports = ",".join(map(str, AD_TCP_PORTS))
+            supplement_command = ("nmap -sT -Pn -n --open --max-retries 2 "
+                                  f"--host-timeout 60s -p {supplement_ports} -oX - {cfg['target']}")
+            terminal.recon_stage = "Active Directory port check"
+            supplement_scan = terminal.run(supplement_command, 70, live=False)
+            supplement = parse_nmap_xml(supplement_scan["output"])
+            append_event(run_dir, {"type": "ad_port_check", "result": supplement_scan,
+                                   "findings": supplement})
+            discovered = list({item["port"]: item for item in [*discovered, *supplement]}.values())
+        findings = []
+        for port_group in nmap_port_groups([item["port"] for item in discovered]):
+            command = (f"nmap {scan_type} -Pn -n -sV --version-light --max-retries 1 "
+                       f"--host-timeout 90s -p {port_group} -oX - {cfg['target']}")
+            terminal.recon_stage = "Service version detection"
+            version_scan = terminal.run(command, 100, live=False)
+            if version_scan["exit_code"] != 0:
+                raise RuntimeError(f"Version detection failed (exit {version_scan['exit_code']})")
+            group_findings = parse_nmap_xml(version_scan["output"])
+            append_event(run_dir, {"type": "deterministic_recon", "result": version_scan,
+                                   "findings": group_findings})
+            if not group_findings:
+                retry_command = ("nmap -sT -Pn -n -sV --version-light --max-retries 2 "
+                                 f"--scan-delay 500ms --host-timeout 90s -p {port_group} -oX - {cfg['target']}")
+                terminal.recon_stage = "Service version retry"
+                retry = terminal.run(retry_command, 100, live=False)
+                group_findings = parse_nmap_xml(retry["output"])
+                append_event(run_dir, {"type": "deterministic_recon_retry", "result": retry,
+                                       "findings": group_findings})
+            findings.extend(group_findings)
+        missing = [item for item in discovered if item["port"] not in
+                   {finding["port"] for finding in findings}]
+        if missing:
+            findings.extend(missing)
+            append_event(run_dir, {"type": "recon_fallback", "reason": "version_scan_filtered",
+                                   "findings": missing})
+        append_note(run_dir, "Deterministic reconnaissance", json.dumps(findings, indent=2))
+        terminal.recon_stage = "HTTP probes"
         http_probes = deterministic_http_probes(terminal, cfg["target"], findings, run_dir)
         if http_probes:
             append_note(run_dir, "Deterministic HTTP probes", json.dumps(http_probes, indent=2))
-        session = {
-            "status": "active", "mode": mode, "container": terminal.name, "config": cfg,
-            "kali_image_id": docker("inspect", "--format", "{{.Image}}", terminal.name),
-            "target": cfg["target"], "started_at": started_at, "started_epoch": started_epoch,
-            "recon": findings, "http_probes": http_probes,
-            "local_steps": 0, "local_calls": [], "observations": [],
-            "memory_notes": [], "memory_queries": [], "oracle_actions": 0, "root_approvals": 0,
-            "oracle_usage": None,
-            "human_intervention_at": None, "success": "unknown", "time_to_success_seconds": None,
-            "success_at": None, "success_epoch": None,
-        }
+        terminal.recon_stage = "SMB probes"
+        smb_probes = deterministic_smb_probes(terminal, cfg["target"], findings, run_dir)
+        if smb_probes:
+            append_note(run_dir, "Deterministic SMB probes", json.dumps(smb_probes, indent=2))
+        if (run_dir / ".stop_session").exists():
+            raise RuntimeError("Reconnaissance stopped by operator")
+        session = load_session(run_dir)
+        session.update(status="active", recon=findings, http_probes=http_probes,
+                       smb_probes=smb_probes, recon_stage="Complete",
+                       recon_finished_epoch=time.time(),
+                       kali_image_id=(None if isinstance(terminal, WslTerminal) else
+                                      docker("inspect", "--format", "{{.Image}}", terminal.name)))
+        terminal.recon_mode = False
+        append_event(run_dir, {"type": "recon_finished", "seconds": round(
+            session["recon_finished_epoch"] - started_epoch, 2), "services": len(findings)})
         save_session(run_dir, session)
         print("Structured findings:", json.dumps(findings))
         print("Session:", run_dir.resolve())
         return run_dir
-    except Exception:
+    except Exception as error:
+        terminal.recon_mode = False
         terminal.__exit__(None, None, None)
+        session = load_session(run_dir)
+        cancelled = (run_dir / ".stop_session").exists()
+        session.update(status="finished", recon_stage="Stopped" if cancelled else "Failed",
+                       startup_error="Stopped by operator" if cancelled else str(error)[:500],
+                       finished_at=now(), duration_seconds=round(time.time() - started_epoch, 2))
+        append_event(run_dir, {"type": "recon_cancelled" if cancelled else "recon_failed",
+                               "error": "Stopped by operator" if cancelled else str(error)[:500]})
+        save_session(run_dir, session)
         raise
 
 
 def terminal_for(session: dict) -> KaliTerminal:
     if session["status"] != "active":
         raise RuntimeError("Session is not active")
-    return KaliTerminal.attach(session["config"], session["container"])
+    terminal_class = WslTerminal if session.get("runtime", "docker") == "wsl" else KaliTerminal
+    return terminal_class.attach(session["config"], session["container"])
 
 
 def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
@@ -528,7 +874,8 @@ def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
         print(f"Exit code: {result['exit_code']}")
 
 
-def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False) -> None:
+def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet: bool = False,
+             unbridled: bool = False) -> None:
     session = load_session(run_dir)
     if session.get("mode", "hybrid") == "frontier-only":
         raise RuntimeError("Local delegation is disabled in frontier-only mode")
@@ -536,12 +883,10 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
     terminal.event_dir = run_dir
     terminal.print_stdout = not quiet
     cfg = session["config"]
-    if not 1 <= budget <= 5:
-        raise ValueError("Delegation budget must be 1 through 5 steps")
-    remaining = int(cfg["max_steps"]) - session["local_steps"]
-    if remaining <= 0:
-        raise RuntimeError("Session local step budget is exhausted")
-    budget = min(budget, remaining)
+    limit = int(cfg["max_steps"])
+    budget = limit if budget is None else budget
+    if budget < 1 or (not unbridled and budget > limit):
+        raise ValueError(f"Delegation budget must be 1 through {limit} steps")
     context_window = model_context_tokens(cfg["local"])
     prompt_budget = min(int(cfg["local"].get("max_input_tokens", 6000)),
                         context_window - int(cfg["local"].get("max_tokens", 700)) - 512)
@@ -550,23 +895,31 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
     session["model_context_tokens"] = context_window
     session["context_budget_tokens"] = prompt_budget
     session["oracle_actions"] += 1
-    append_event(run_dir, {"type": "delegation", "objective": objective, "budget": budget})
+    starting_model_calls = len(session["local_calls"])
+    append_event(run_dir, {"type": "delegation", "objective": objective,
+                           "budget": None if unbridled else budget, "unbridled": unbridled})
     stop_file = run_dir / ".stop_local"
+    session_stop_file = run_dir / ".stop_session"
+    if session_stop_file.is_file():
+        raise RuntimeError("Session stop was requested")
     stop_file.unlink(missing_ok=True)
     seen = {re.sub(r"\s+", " ", x["command"].strip().lower())
             for x in session["observations"] if x.get("origin") == "local"}
     previous_hash = None
     repeated_output = 0
     invalid = 0
+    structured_mode = False
+    validation_failures = 0
+    validation_feedback = ""
     failures = 0
     memory_results: list[dict] = []
     stop_reason = "step_budget"
     try:
-        for index in range(budget):
-            if stop_file.is_file():
+        for index in itertools.count() if unbridled else range(budget):
+            if stop_file.is_file() or session_stop_file.is_file():
                 stop_reason = "operator_stop"
                 break
-            if len(session["local_calls"]) >= int(cfg.get("max_model_calls", 30)):
+            if not unbridled and len(session["local_calls"]) - starting_model_calls >= int(cfg.get("max_model_calls", 30)):
                 stop_reason = "model_call_budget"
                 break
             step = session["local_steps"] + 1
@@ -574,7 +927,9 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
                 "target": session["target"], "target_os": "unknown until verified",
                 "delegated_objective": objective, "recon": session["recon"],
                 "http_probes": session.get("http_probes", []),
-                "step": step, "remaining": budget - index,
+                "smb_probes": session.get("smb_probes", []),
+                "last_command_feedback": validation_feedback,
+                "step": step, "remaining": None if unbridled else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
                 "memory_search_results": memory_results,
                 "recent_terminal_results": [
@@ -583,22 +938,30 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
                 ],
                 "prior_commands": [x["command"] for x in session["observations"]][-30:],
             }
-            fitted_user, prompt_tokens, compacted = fit_context(cfg["local"], context, prompt_budget)
+            action_model = ({**cfg["local"], "enable_thinking": False, "temperature": 0.2}
+                            if structured_mode else cfg["local"])
+            prompt = system_prompt(session)
+            fitted_user, prompt_tokens, compacted = fit_context(action_model, context, prompt_budget, prompt)
             session["max_prompt_tokens_seen"] = max(session.get("max_prompt_tokens_seen", 0), prompt_tokens)
             if compacted:
                 append_event(run_dir, {"type": "context_compaction", "step": step,
                                        "prompt_tokens": prompt_tokens, "budget_tokens": prompt_budget})
-            reply = api_chat(cfg["local"], SYSTEM, fitted_user, session["local_calls"])
+            reply = api_chat(action_model, prompt, fitted_user, session["local_calls"])
             try:
                 action = json_object(reply)
             except (json.JSONDecodeError, ValueError):
                 invalid += 1
                 append_event(run_dir, {"type": "invalid_local_reply", "text": reply[:2000]})
+                if invalid == 1 and not structured_mode:
+                    structured_mode = True
+                    append_event(run_dir, {"type": "local_response_mode_changed",
+                                           "reason": "retry_without_thinking"})
                 if invalid >= 2:
                     stop_reason = "invalid_replies"
                     break
                 continue
             invalid = 0
+            validation_feedback = ""
             if isinstance(action.get("artifact"), dict):
                 artifact = harp_artifacts.capture_model_artifact(run_dir, session, action["artifact"])
                 if artifact is None:
@@ -616,7 +979,7 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
             if isinstance(action.get("memory_query"), str):
                 query = action["memory_query"].strip().lower()[:100]
                 prior = session.setdefault("memory_queries", [])
-                if len(query) < 3 or query in prior or len(prior) >= 8:
+                if len(query) < 3 or (not unbridled and (query in prior or len(prior) >= 8)):
                     stop_reason = "repeated_or_excessive_memory_query"
                     break
                 prior.append(query)
@@ -647,10 +1010,29 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
                     break
                 continue
             normalized = re.sub(r"\s+", " ", command.strip().lower())
-            if normalized in seen:
+            if normalized in seen and not unbridled:
                 stop_reason = "repeated_command"
                 break
-            seen.add(normalized)
+            issue = local_command_issue(command, session["target"], objective,
+                                        session["observations"])
+            if issue is None:
+                syntax = terminal.run("sh -n -c " + shlex.quote(command), 5, live=False)
+                append_event(run_dir, {"type": "local_command_check", "step": step,
+                                       "result": syntax})
+                if syntax["exit_code"] != 0:
+                    issue = "Shell syntax check failed: " + syntax["output"][:500]
+            if issue:
+                validation_failures += 1
+                validation_feedback = issue
+                append_event(run_dir, {"type": "local_command_rejected", "step": step,
+                                       "command": command, "reason": issue})
+                if validation_failures >= 3:
+                    stop_reason = "command_validation_failed"
+                    break
+                continue
+            validation_failures = 0
+            if not unbridled:
+                seen.add(normalized)
             if not quiet:
                 print(f"\n[local step {step}] $ {command}")
             result = terminal.run(command, int(cfg["command_timeout_seconds"]))
@@ -665,10 +1047,15 @@ def delegate(run_dir: Path, objective: str, budget: int, *, quiet: bool = False)
             previous_hash = digest
             failures = failures + 1 if result["exit_code"] != 0 or not result["output"].strip() else 0
             save_session(run_dir, session)
-            if repeated_output >= 2:
+            if (null_auth_objective(objective) and result["exit_code"] != 0 and
+                    re.search(r"NT_STATUS_ACCESS_DENIED|STATUS_LOGON_FAILURE|NT_STATUS_LOGON_FAILURE",
+                              result["output"], re.I)):
+                stop_reason = "null_auth_denied"
+                break
+            if repeated_output >= 2 and not unbridled:
                 stop_reason = "repeated_output"
                 break
-            if failures >= 3:
+            if failures >= 3 and not unbridled:
                 stop_reason = "three_unproductive_commands"
                 break
     finally:
@@ -713,7 +1100,8 @@ def finish_session(run_dir: Path, success: str) -> None:
         session = load_session(run_dir)
     if session["success_epoch"] is not None and success != "yes":
         raise ValueError("Success was already verified; finish with --success yes")
-    docker("rm", "--force", session["container"])
+    if session.get("runtime", "docker") == "docker":
+        docker("rm", "--force", session["container"])
     session["status"] = "finished"
     session["finished_at"] = now()
     session["duration_seconds"] = round(time.time() - session["started_epoch"], 2)
@@ -729,6 +1117,10 @@ def finish_session(run_dir: Path, success: str) -> None:
 
 def summarize(session: dict) -> dict:
     calls = session["local_calls"]
+    recon_end = session.get("recon_finished_epoch")
+    if recon_end is None:
+        recon_end = time.time() if session["status"] == "recon" else (
+            session["started_epoch"] + session.get("duration_seconds", 0))
     memory_mib = []
     for observation in session["observations"]:
         sample = observation.get("resource_sample") or {}
@@ -737,14 +1129,19 @@ def summarize(session: dict) -> dict:
             memory_mib.append(float(match.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[match.group(2)])
     return {
         "status": session["status"], "mode": session.get("mode", "hybrid"), "target": session["target"],
+        "recon_stage": session.get("recon_stage"),
+        "recon_command": session.get("recon_command"),
+        "recon_elapsed_seconds": round(recon_end -
+                                       session.get("recon_started_epoch", session["started_epoch"]), 2),
         "kali_image_id": session.get("kali_image_id"),
         "success": session["success"],
         "success_before_human_intervention": session.get("success_before_human_intervention"),
         "time_to_success_seconds": session.get("time_to_success_seconds"),
         "success_evidence": session.get("success_evidence"),
         "local_steps": session["local_steps"], "local_model_calls": len(calls),
-        "terminal_tool_calls": len(session["observations"]) + (1 if session.get("recon") is not None else 0)
-                               + len(session.get("http_probes", [])),
+        "terminal_tool_calls": len(session["observations"]) + session.get("recon_tool_calls",
+            (1 if session.get("recon") is not None else 0)
+            + len(session.get("http_probes", [])) + len(session.get("smb_probes", []))),
         "local_input_tokens": sum(x["prompt_tokens"] for x in calls),
         "local_output_tokens": sum(x["completion_tokens"] for x in calls),
         "local_usage_complete": all(x.get("usage_reported", False) for x in calls) if calls else None,
@@ -778,7 +1175,7 @@ def main() -> None:
             p.add_argument("command_text")
         elif name == "delegate":
             p.add_argument("objective")
-            p.add_argument("--steps", type=int, default=5)
+            p.add_argument("--steps", type=int)
         elif name == "record-oracle-usage":
             p.add_argument("--input-tokens", type=int, required=True)
             p.add_argument("--output-tokens", type=int, required=True)
@@ -796,6 +1193,12 @@ def main() -> None:
     if args.command in ("doctor", "start"):
         cfg = load_config(args.config)
         if args.command == "doctor":
+            if cfg.get("runtime") == "wsl":
+                terminal = WslTerminal(cfg)
+                terminal.__enter__()
+                print("Kali WSL distribution:", terminal.distro)
+                print("Kali WSL user:", terminal.user)
+                return
             print("Docker server:", docker("version", "--format", "{{.Server.Version}}"))
             print("Kali image:", docker("image", "inspect", "--format", "{{.Id}}", IMAGE)[:24])
             check_network(cfg)

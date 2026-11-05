@@ -7,3 +7,4 @@ __pycache__/
 .secrets/
 .gui_heartbeat
 .control_center.json
+.kali_image_stamp

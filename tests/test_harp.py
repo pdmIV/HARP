@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -15,6 +16,7 @@ import harp_mcp
 import harp_secret
 import harp_web
 import harp_artifacts
+import harp_nim
 
 
 class DummyTerminal:
@@ -27,11 +29,99 @@ class DummyTerminal:
 
 
 class HarpTests(unittest.TestCase):
+    def test_new_session_is_visible_during_recon(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.10.5"
+        seen = []
+
+        class FakeTerminal:
+            name = "fake-kali"
+            event_dir = None
+            recon_mode = False
+            recon_stage = ""
+            def __init__(self, _cfg): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def run(self, command, _timeout, **_kwargs):
+                state = harp.load_session(self.event_dir)
+                seen.append((state["status"], state["recon_started_epoch"], command))
+                return {"command": command, "exit_code": 0, "seconds": 0.1,
+                        "output": "<nmaprun></nmaprun>", "truncated": False, "as_root": False}
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
+             patch.object(harp, "KaliTerminal", FakeTerminal), \
+             patch.object(harp, "docker", return_value="image-id"), \
+             patch.object(harp, "deterministic_http_probes", return_value=[]), \
+             patch.object(harp, "deterministic_smb_probes", return_value=[]):
+            run_dir = harp.start_session(cfg, Path(temp))
+            state = harp.load_session(run_dir)
+            events = [json.loads(line) for line in (run_dir / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(seen[0][0], "recon")
+            self.assertEqual(state["status"], "active")
+            self.assertTrue(any(event["type"] == "recon_started" for event in events))
+            self.assertTrue(any(event["type"] == "recon_finished" for event in events))
+
+    def test_recon_command_events_appear_before_and_after_local_execution(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            harp.save_session(path, {"status": "recon", "recon_tool_calls": 0})
+            terminal = harp.KaliTerminal({})
+            terminal.event_dir = path
+            terminal.recon_mode = True
+            terminal.recon_stage = "Port sweep"
+            with patch.object(terminal, "command_argv", return_value=[sys.executable, "-c", "print('check')"]):
+                result = terminal.run("nmap -p 80 10.10.10.5", 5, live=False)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual([event["type"] for event in events],
+                             ["recon_command_started", "recon_command_finished"])
+            self.assertEqual(harp.load_session(path)["recon_tool_calls"], 1)
+            self.assertEqual(result["exit_code"], 0)
+
+    def test_recon_stop_preserves_a_finished_session_record(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.10.5"
+        created = []
+
+        class StoppingTerminal:
+            name = "fake-kali"
+            event_dir = None
+            recon_mode = False
+            recon_stage = ""
+            def __init__(self, _cfg): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def run(self, command, _timeout, **_kwargs):
+                created.append(self.event_dir)
+                (self.event_dir / ".stop_session").touch()
+                return {"command": command, "exit_code": 0, "seconds": 0.1,
+                        "output": "<nmaprun></nmaprun>", "truncated": False, "as_root": False}
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
+             patch.object(harp, "KaliTerminal", StoppingTerminal), \
+             patch.object(harp, "deterministic_http_probes", return_value=[]), \
+             patch.object(harp, "deterministic_smb_probes", return_value=[]):
+            with self.assertRaisesRegex(RuntimeError, "stopped by operator"):
+                harp.start_session(cfg, Path(temp))
+            state = harp.load_session(created[0])
+            events = [json.loads(line) for line in (created[0] / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(state["status"], "finished")
+            self.assertTrue(any(event["type"] == "recon_cancelled" for event in events))
+
     def test_nmap_preprocessing_keeps_only_open_ports(self):
         xml = '<nmaprun><host><ports><port protocol="tcp" portid="445"><state state="open"/><service name="microsoft-ds"/></port><port protocol="tcp" portid="22"><state state="closed"/></port></ports></host></nmaprun>'
         self.assertEqual(harp.parse_nmap_xml(xml), [
             {"port": 445, "protocol": "tcp", "service": "microsoft-ds", "product": "", "version": ""}
         ])
+
+    def test_ad_port_check_requires_smb_and_domain_hint(self):
+        findings = [{"port": port, "protocol": "tcp"} for port in (53, 135, 139, 445)]
+        self.assertTrue(harp.active_directory_hint(findings))
+        self.assertIn(88, harp.AD_TCP_PORTS)
+        self.assertIn(5985, harp.AD_TCP_PORTS)
+        self.assertFalse(harp.active_directory_hint([{"port": 445, "protocol": "tcp"}]))
+        self.assertTrue(harp.needs_deeper_vpn_scan(findings))
+        self.assertFalse(harp.needs_deeper_vpn_scan(findings + [
+            {"port": port, "protocol": "tcp"} for port in (88, 389, 464, 593)]))
 
     def make_session(self, directory):
         cfg = json.loads(Path("harp.example.json").read_text())
@@ -79,6 +169,249 @@ class HarpTests(unittest.TestCase):
     def test_http_probe_extracts_status_and_body(self):
         self.assertEqual(harp.parse_http_response("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nWelcome"),
                          {"status": 200, "body_excerpt": "Welcome"})
+
+    def test_windows_smb_recon_runs_dot_user_probes(self):
+        findings = [{"port": 445, "protocol": "tcp", "service": "microsoft-ds",
+                     "product": "Microsoft Windows", "version": ""}]
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            probes = harp.deterministic_smb_probes(DummyTerminal(), "10.10.10.5", findings, path)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+        self.assertEqual([probe["option"] for probe in probes],
+                         ["--shares", "--users", "--rid-brute"])
+        self.assertEqual([event["result"]["command"] for event in events], [
+            f"nxc smb 10.10.10.5 -u '.' -p '' {option}"
+            for option in ("--shares", "--users", "--rid-brute")])
+
+    def test_smb_recon_skips_non_windows_and_samba(self):
+        linux = [{"port": 445, "protocol": "tcp", "service": "microsoft-ds",
+                  "product": "Samba smbd", "version": ""}]
+        no_smb = [{"port": 135, "protocol": "tcp", "service": "msrpc",
+                   "product": "Microsoft Windows RPC", "version": ""}]
+        self.assertFalse(harp.windows_smb_detected(linux))
+        self.assertFalse(harp.windows_smb_detected(no_smb))
+
+    def test_nim_context_keeps_useful_smb_evidence_compact(self):
+        probes = [{"option": "--shares", "exit_code": 0,
+                   "output_excerpt": "[*] Initializing database\nShare Permissions\nHR READ\n"},
+                  {"option": "--rid-brute", "exit_code": 0,
+                   "output_excerpt": "512: Domain Admins (SidTypeGroup)\n1104: sample.user (SidTypeUser)\n"}]
+        compact = harp_nim.compact_smb_probes(probes)
+        self.assertIn("HR READ", compact[0]["summary"])
+        self.assertNotIn("Initializing database", compact[0]["summary"])
+        self.assertIn("sample.user", compact[1]["summary"])
+        self.assertNotIn("Domain Admins", compact[1]["summary"])
+
+    def test_nim_speed_test_requires_usable_plan(self):
+        reply = {"choices": [{"message": {"content":
+                 '{"plan":"Review SMB","objective":"List shares","stop":false}'}}]}
+        with patch.object(harp_nim, "request", return_value=reply) as request:
+            result = harp_nim.benchmark_one("example/fast-model")
+        self.assertTrue(result["usable"])
+        self.assertEqual(request.call_args.kwargs["timeout_seconds"], 90)
+        self.assertNotIn("10.129.", str(request.call_args))
+
+    def test_nim_ultra_requests_visible_reply_without_reasoning(self):
+        self.assertEqual(harp_nim.oracle_model_options("nvidia/nemotron-3-ultra-550b-a55b"),
+                         {"reasoning_effort": "none"})
+        self.assertEqual(harp_nim.oracle_model_options("example/fast-model"), {})
+
+    def test_nim_plan_carries_null_auth_boundary_to_worker(self):
+        objective = harp_nim.bound_objective(
+            "Enumerate the HR share using a null SMB session.", "List files in the HR share.")
+        self.assertIn("null or guest authentication only", objective)
+        self.assertEqual(harp_nim.bound_objective("Inspect HTTP", "Read the page"), "Read the page")
+
+    def test_oracle_probe_is_read_only_and_target_scoped(self):
+        session = {"target": "10.10.10.5", "observations": []}
+        self.assertIsNone(harp_nim.oracle_probe_issue(
+            "nxc smb 10.10.10.5 -u . -p '' --shares", session, "Null SMB session only"))
+        self.assertIsNotNone(harp_nim.oracle_probe_issue(
+            "nxc smb 10.10.10.5 -u . -p '' --shares; curl other", session, "Null SMB session only"))
+        self.assertIsNotNone(harp_nim.oracle_probe_issue(
+            "nxc smb 10.10.10.6 -u . -p '' --shares", session, "Null SMB session only"))
+        self.assertIsNone(harp_nim.oracle_probe_issue(
+            "ldapsearch -x -H ldap://10.10.10.5 -b dc=lab,dc=local '(objectClass=user)'",
+            session, "Enumerate LDAP users anonymously"))
+        self.assertIsNotNone(harp_nim.oracle_probe_issue(
+            "nxc smb 10.10.10.5 -u . -p '' --shares -x id", session, "Null SMB session only"))
+
+    def test_nim_replans_after_unproductive_worker(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                          "max_cycles": 3, "steps_per_cycle": 2}
+            harp.save_session(path, state)
+            first = {"plan": "List services", "objective": "List services once", "stop": False}
+            second = {"plan": "Stop after review", "objective": "", "stop": True}
+            replies = [{"choices": [{"message": {"content": json.dumps(item)}}]}
+                       for item in (first, second)]
+
+            def failed_delegate(run_dir, _objective, _steps, *, quiet):
+                current = harp.load_session(run_dir)
+                current["last_delegate_stop"] = "three_unproductive_commands"
+                current["observations"].append({"command": "nmap target", "exit_code": 1,
+                                                "output": "No useful result"})
+                harp.save_session(run_dir, current)
+
+            with patch.object(harp_nim, "request", side_effect=replies) as request, \
+                 patch.object(harp, "delegate", side_effect=failed_delegate):
+                harp_nim.run(path)
+            self.assertEqual(request.call_count, 2)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertTrue(any(item.get("type") == "oracle_nim_recovery" for item in events))
+
+    def test_nim_can_run_one_scoped_probe_during_recovery(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["last_delegate_stop"] = "three_unproductive_commands"
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                          "max_cycles": 2, "steps_per_cycle": 2}
+            harp.save_session(path, state)
+            probe = "nxc smb target -u . -p '' --shares"
+            decisions = [
+                {"plan": "Check null SMB access", "objective": "", "oracle_command": probe,
+                 "stop": False},
+                {"plan": "Evidence reviewed", "objective": "", "stop": True},
+            ]
+            replies = [{"choices": [{"message": {"content": json.dumps(item)}}]}
+                       for item in decisions]
+            with patch.object(harp_nim, "request", side_effect=replies), \
+                 patch.object(harp, "direct_exec") as terminal:
+                harp_nim.run(path)
+            terminal.assert_called_once_with(path, probe, quiet=True)
+
+    def test_nim_corrects_rejected_probe_without_stopping(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["last_delegate_stop"] = "null_auth_denied"
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                          "max_cycles": 3, "steps_per_cycle": 2}
+            harp.save_session(path, state)
+            invalid = "nxc smb target -u . -p '' --shares -x id"
+            valid = "ldapsearch -x -H ldap://target -b dc=lab,dc=local '(objectClass=user)'"
+            decisions = [
+                {"plan": "Check LDAP", "objective": "", "oracle_command": invalid, "stop": False},
+                {"plan": "Check LDAP", "objective": "", "oracle_command": valid, "stop": False},
+                {"plan": "Evidence reviewed", "objective": "", "stop": True},
+            ]
+            replies = [{"choices": [{"message": {"content": json.dumps(item)}}]}
+                       for item in decisions]
+            with patch.object(harp_nim, "request", side_effect=replies) as request, \
+                 patch.object(harp, "direct_exec") as terminal:
+                harp_nim.run(path)
+            terminal.assert_called_once_with(path, valid, quiet=True)
+            self.assertEqual(request.call_count, 3)
+            second_context = json.loads(request.call_args_list[1].args[1]["messages"][1]["content"])
+            self.assertIn("probe_feedback", second_context)
+
+    def test_nim_resume_keeps_cycle_budget_and_probe_feedback(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["last_delegate_stop"] = "null_auth_denied"
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                          "max_cycles": 3, "steps_per_cycle": 2}
+            harp.save_session(path, state)
+            harp.append_event(path, {"type": "oracle_nim_request", "cycle": 1})
+            harp.append_event(path, {"type": "oracle_nim_recovery", "reason": "null_auth_denied", "attempt": 1})
+            harp.append_event(path, {"type": "oracle_nim_request", "cycle": 2})
+            harp.append_event(path, {"type": "oracle_nim_stopped", "reason": "probe_rejected",
+                                     "detail": "Probe option was too broad"})
+            reply = {"choices": [{"message": {"content": json.dumps(
+                {"plan": "Review", "objective": "", "stop": True})}}]}
+            with patch.object(harp_nim, "request", return_value=reply) as request:
+                harp_nim.run(path)
+            self.assertEqual(request.call_count, 1)
+            context = json.loads(request.call_args.args[1]["messages"][1]["content"])
+            self.assertEqual(context["cycle"], 3)
+            self.assertEqual(context["probe_feedback"]["reason"], "Probe option was too broad")
+
+    def test_local_reply_accepts_identical_duplicate_json_only(self):
+        action = '{"thought":"list share","command":"smbclient -N //target/HR -c ls","done":false}'
+        self.assertEqual(harp.json_object(action + "\n" + action)["thought"], "list share")
+        with self.assertRaises(ValueError):
+            harp.json_object(action + '\n{"command":"different"}')
+
+    def test_local_command_check_catches_smbclient_prompt_and_quoting(self):
+        objective = "Download files from //10.10.10.5/HR"
+        self.assertIn("prompt", harp.local_command_issue(
+            'smbclient -N //10.10.10.5/HR -c "recurse; mget *"', "10.10.10.5", objective))
+        self.assertIn("double quotes", harp.local_command_issue(
+            'smbclient -N //10.10.10.5/HR -c "get \'Notice from HR.txt\'"', "10.10.10.5", objective))
+        self.assertIsNone(harp.local_command_issue(
+            "smbclient -N //10.10.10.5/HR -c 'get \"Notice from HR.txt\"'", "10.10.10.5", objective))
+        self.assertIn("outside", harp.local_command_issue(
+            "nxc smb 10.10.10.6 --shares", "10.10.10.5", objective))
+
+    def test_null_smb_task_rejects_named_account_and_guessed_password(self):
+        target = "10.10.10.5"
+        objective = "List the HR share using null authentication only"
+        self.assertIn("named accounts", harp.local_command_issue(
+            'smbclient //10.10.10.5/HR -U "sample.user%guess" -c ls',
+            target, objective, []))
+        self.assertIn("empty SMB password", harp.local_command_issue(
+            "nxc smb 10.10.10.5 -u . -p guess --shares", target, objective, []))
+        self.assertIsNone(harp.local_command_issue(
+            "nxc smb 10.10.10.5 -u . -p '' --shares", target, objective, []))
+        self.assertIn("no terminal evidence", harp.local_command_issue(
+            'smbclient //10.10.10.5/HR -U "sample.user%guess" -c ls',
+            target, "Use the known account", []))
+
+    def test_null_smb_access_denied_returns_control_after_one_step(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            reply = json.dumps({"thought": "List share", "command": "smbclient -N //target/HR -c ls",
+                                "done": False})
+
+            def run(command, _timeout, **_kwargs):
+                denied = not command.startswith("sh -n")
+                return {"command": command, "exit_code": 1 if denied else 0,
+                        "seconds": 0.1, "output": "NT_STATUS_ACCESS_DENIED" if denied else "",
+                        "truncated": False, "as_root": False}
+
+            terminal = SimpleNamespace(run=run, stats=lambda: None)
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=reply):
+                harp.delegate(path, "List //target/HR using null authentication", 3, quiet=True)
+            state = harp.load_session(path)
+            self.assertEqual(state["local_steps"], 1)
+            self.assertEqual(state["last_delegate_stop"], "null_auth_denied")
+
+    def test_rejected_local_command_is_not_executed(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            bad = '{"thought":"download","command":"smbclient -N //target/HR -c \\"mget *\\"","done":false}'
+            good = '{"thought":"list","command":"smbclient -N //target/HR -c \\"ls\\"","done":false}'
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=[bad, good]):
+                harp.delegate(path, "List //target/HR", 2, quiet=True)
+            state = harp.load_session(path)
+            commands = [item["command"] for item in state["observations"]]
+            self.assertEqual(commands, ['smbclient -N //target/HR -c "ls"'])
+
+    def test_session_stop_marker_prevents_new_delegation(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            (path / ".stop_session").touch()
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192):
+                with self.assertRaisesRegex(RuntimeError, "Session stop was requested"):
+                    harp.delegate(path, "inspect target", 1, quiet=True)
 
     def test_context_compaction_keeps_prompt_below_budget(self):
         model = {"model": "test"}
@@ -261,10 +594,36 @@ class HarpTests(unittest.TestCase):
                 {"kind": "credential", "title": "Hallucinated", "value": "not-in-output"}))
             self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
 
+    def test_artifact_value_deduplicates_across_titles_and_old_records(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            args = dict(kind="credential", value="demo-pass-123", source="cat note",
+                        evidence="terminal", evidence_backed=True)
+            first = harp_artifacts.register_artifact(path, title="First label", **args)
+            second = harp_artifacts.register_artifact(path, title="Another label", **args)
+            self.assertEqual(first["id"], second["id"])
+            with (path / "artifacts.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps({**first, "id": "old-duplicate", "title": "Old label"}) + "\n")
+            self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
+
+    def test_wsl_terminal_uses_selected_distro_and_user(self):
+        cfg = json.loads(Path("harp.htb.example.json").read_text())
+        cfg.update(runtime="wsl", wsl_distro="kali-linux", wsl_user="kali", target="10.10.10.10")
+        terminal = harp.WslTerminal(cfg)
+        argv = terminal.command_argv("nmap -sT 10.10.10.10", 10, False)
+        self.assertEqual(argv[:6], ["wsl.exe", "--distribution", "kali-linux", "--user", "kali", "--exec"])
+        self.assertIn(terminal.workspace, argv[-1])
+        self.assertEqual(terminal.command_argv("id", 10, True)[4], "root")
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(cfg), encoding="utf-8")
+            self.assertEqual(harp.load_config(path)["runtime"], "wsl")
+
     def test_document_capture_is_bounded_and_preserved(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
-            with patch.object(harp, "terminal_for", return_value=SimpleNamespace(name="demo-container")), \
+            terminal = harp.KaliTerminal(json.loads(Path("harp.example.json").read_text()))
+            with patch.object(harp, "terminal_for", return_value=terminal), \
                  patch.object(harp_artifacts.subprocess, "run",
                               return_value=SimpleNamespace(returncode=0, stdout=b"Lab document\n")) as run:
                 item = harp_artifacts.capture_document_file(path, {"status": "active"},

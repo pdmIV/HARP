@@ -6,6 +6,7 @@ import argparse
 from collections import deque
 from datetime import datetime, timezone
 import hmac
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -24,6 +25,7 @@ import webbrowser
 import harp
 import harp_artifacts
 import harp_secret
+import harp_nim
 
 
 ROOT = Path(__file__).resolve().parent
@@ -89,7 +91,9 @@ def draft_config() -> dict:
 
 
 def prepare_runtime(cfg: dict) -> None:
-    """Create the dedicated bridge and image on first GUI run."""
+    """Create the dedicated bridge and rebuild Kali only when its recipe changes."""
+    if cfg.get("runtime") == "wsl":
+        return
     try:
         harp.docker("network", "inspect", cfg["network"])
     except RuntimeError:
@@ -97,13 +101,19 @@ def prepare_runtime(cfg: dict) -> None:
             raise
         harp.docker("network", "create", cfg["network"], timeout=30)
     harp.check_network(cfg, starting=True)
-    try:
-        harp.docker("image", "inspect", harp.IMAGE)
-    except RuntimeError:
-        built = subprocess.run(["docker", "build", "-f", "Dockerfile.kali", "-t", harp.IMAGE, "."],
-                               cwd=ROOT, capture_output=True, text=True, timeout=900)
-        if built.returncode:
-            raise RuntimeError("Kali image build failed: " + (built.stderr or built.stdout)[-3000:])
+    recipe_hash = hashlib.sha256((ROOT / "Dockerfile.kali").read_bytes()).hexdigest()
+    stamp = ROOT / ".kali_image_stamp"
+    if stamp.is_file() and stamp.read_text(encoding="ascii") == recipe_hash:
+        try:
+            harp.docker("image", "inspect", harp.IMAGE)
+            return
+        except RuntimeError:
+            pass
+    built = subprocess.run(["docker", "build", "-f", "Dockerfile.kali", "-t", harp.IMAGE, "."],
+                           cwd=ROOT, capture_output=True, text=True, timeout=900)
+    if built.returncode:
+        raise RuntimeError("Kali image build failed: " + (built.stderr or built.stdout)[-3000:])
+    stamp.write_text(recipe_hash, encoding="ascii")
 
 
 def session_path(session_id: str) -> Path:
@@ -143,6 +153,7 @@ def latest_activity(run_dir: Path) -> dict:
     plan = None
     local = None
     objective = None
+    oracle_stopped = None
     path = run_dir / "events.jsonl"
     if path.is_file():
         with path.open("r", encoding="utf-8", errors="replace") as stream:
@@ -154,11 +165,16 @@ def latest_activity(run_dir: Path) -> dict:
                 kind = event.get("type")
                 if kind == "oracle_plan":
                     plan = event.get("plan")
+                elif kind in ("oracle_nim_request", "oracle_nim_resumed"):
+                    oracle_stopped = None
+                elif kind in ("oracle_nim_stopped", "oracle_nim_error"):
+                    oracle_stopped = event.get("reason") or event.get("error") or "error"
                 elif kind == "local_action":
                     local = event.get("action")
                 elif kind == "delegation":
                     objective = event.get("objective")
-    return {"oracle_plan": plan, "local_action": local, "delegated_objective": objective}
+    return {"oracle_plan": plan, "local_action": local, "delegated_objective": objective,
+            "oracle_stopped": oracle_stopped}
 
 
 def pending_approval(run_dir: Path, state: dict) -> dict | None:
@@ -189,6 +205,8 @@ class HARPWebState:
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.session_jobs: set[str] = set()
+        self.stopping_sessions: set[str] = set()
+        self.starting_session = False
         self.model_process: subprocess.Popen | None = None
         self.model_logs: deque[dict] = deque(maxlen=500)
         self.model_log_id = 0
@@ -224,6 +242,8 @@ class HARPWebState:
 
     def submit(self, name: str, operation, session_id: str | None = None) -> str:
         with self.lock:
+            if session_id and session_id in self.stopping_sessions:
+                raise ValueError("This session is stopping")
             if session_id and session_id in self.session_jobs:
                 raise ValueError("Another operation is already running for this session")
             job_id = uuid.uuid4().hex
@@ -235,11 +255,14 @@ class HARPWebState:
         def work():
             try:
                 result = operation()
-                status, detail = "done", str(result) if result is not None else "Done"
+                status = "done"
+                detail = (str(result.get("message", "Done")) if isinstance(result, dict)
+                          else str(result) if result is not None else "Done")
             except Exception as error:
-                status, detail = "error", str(error)
+                status, detail, result = "error", str(error), None
             with self.lock:
-                self.jobs[job_id].update(status=status, detail=detail, finished_at=harp.now())
+                self.jobs[job_id].update(status=status, detail=detail, result=result,
+                                         finished_at=harp.now())
                 if session_id:
                     self.session_jobs.discard(session_id)
 
@@ -251,7 +274,7 @@ class HARPWebState:
             cfg = draft_config()
             studio = payload.get("studio") or studio_settings(cfg)
             build_launch_args(studio)
-            for key in ("target", "network", "network_policy", "scan_ports", "objective",
+            for key in ("target", "runtime", "wsl_distro", "wsl_user", "network", "network_policy", "scan_ports", "objective",
                         "container_memory", "container_cpus", "max_steps", "command_timeout_seconds"):
                 if key in payload:
                     cfg[key] = payload[key]
@@ -262,6 +285,8 @@ class HARPWebState:
             cfg["studio"] = studio
             cfg["local"]["model"] = str(studio["model"]).split(":", 1)[0]
             cfg["local"]["base_url"] = f"http://127.0.0.1:{int(studio['port'])}/v1"
+            if "oracle" in payload:
+                cfg["oracle"] = {**cfg.get("oracle", {}), **payload["oracle"]}
             temporary = CONFIG.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
             try:
@@ -348,8 +373,11 @@ class HARPWebState:
         return {"id": session_id, "summary": harp.summarize(state),
                 "started_epoch": state["started_epoch"],
                 "duration_seconds": state.get("duration_seconds"),
+                "delegation_limit": state["config"]["max_steps"],
+                "oracle_provider": state["config"].get("oracle", {}).get("provider", "codex"),
                 "objective": state["config"].get("objective", ""),
                 "recon": state.get("recon", []), "http_probes": state.get("http_probes", []),
+                "smb_probes": state.get("smb_probes", []),
                 "activity": latest_activity(path), "pending_approval": pending_approval(path, state),
                 "flags": harp_artifacts.flag_status(path),
                 "artifacts": harp_artifacts.list_artifacts(path),
@@ -450,8 +478,9 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 state = self.server.state
                 cfg = draft_config()
                 port = int(studio_settings(cfg)["port"])
-                payload = {"config": cfg, "sessions": state.session_list(),
-                           "selected": state.session_view(selected, cursor) if selected else None,
+                listed = state.session_list()
+                payload = {"config": cfg, "sessions": listed,
+                           "selected": state.session_view(selected, cursor) if selected and any(x["id"] == selected for x in listed) else None,
                            "model": {"listening": api_port_open(port), "port": port,
                                      "owned_running": bool(state.model_process and state.model_process.poll() is None),
                                      "logs": state.model_logs_since(model_cursor)}}
@@ -468,6 +497,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/model/context":
                 cfg = harp.load_config(CONFIG)
                 self._json(200, {"context": harp.model_context_tokens(cfg["local"])})
+            elif parsed.path == "/api/oracle/models":
+                self._json(200, {"models": harp_nim.models()})
             elif (match := re.fullmatch(r"/api/sessions/([^/]+)/attachments/([0-9a-f]{32})", parsed.path)):
                 session_id, artifact_id = match.groups()
                 run_dir = session_path(session_id)
@@ -506,6 +537,23 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 self._json(200, {"config": state.save_config(body)})
                 return
+            if path == "/api/oracle/key":
+                value = str(body.get("key", "")).strip()
+                if not value:
+                    raise ValueError("Enter a NVIDIA API key")
+                harp_secret.save_key(ROOT / ".secrets" / "nvidia.key", value)
+                self._json(200, {"message": "NVIDIA key saved encrypted for this Windows account"})
+                return
+            if path == "/api/oracle/benchmark":
+                models = body.get("models")
+                if (not isinstance(models, list) or not 1 <= len(models) <= 5
+                        or any(not isinstance(item, str) or not re.fullmatch(
+                            r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", item) for item in models)):
+                    raise ValueError("Choose one to five valid NVIDIA model IDs")
+                job = state.submit("NIM speed test", lambda: {
+                    "message": "Speed test complete", "results": harp_nim.benchmark(models)})
+                self._json(202, {"job": job})
+                return
             if path == "/api/model/start":
                 self._json(200, {"message": state.start_model()})
                 return
@@ -516,16 +564,44 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 mode = body.get("mode", "hybrid")
                 if mode not in ("hybrid", "local-only", "frontier-only"):
                     raise ValueError("Invalid experiment mode")
+                with state.lock:
+                    if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
+                        raise ValueError("A session is already starting or active")
                 cfg = harp.load_config(CONFIG)
+                if mode == "hybrid" and cfg.get("oracle", {}).get("provider") == "nvidia_nim":
+                    harp_nim.key()
                 if mode != "frontier-only":
                     if not cfg["local"]["model"]:
                         raise ValueError("Choose a local model in the Local model tab first")
                     if not api_port_open(int(studio_settings(cfg)["port"])):
                         raise ValueError("Start the local model in the Local model tab first")
+                with state.lock:
+                    if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
+                        raise ValueError("A session is already starting or active")
+                    state.starting_session = True
                 def start_job():
-                    prepare_runtime(cfg)
-                    return harp.start_session(cfg, RUNS, mode).name
-                job = state.submit("start session", start_job)
+                    try:
+                        prepare_runtime(cfg)
+                        run_dir = harp.start_session(cfg, RUNS, mode)
+                        if mode == "hybrid" and cfg.get("oracle", {}).get("provider") == "nvidia_nim":
+                            def run_oracle():
+                                try:
+                                    harp_nim.run(run_dir)
+                                except Exception as error:
+                                    harp.append_event(run_dir, {"type": "oracle_nim_error",
+                                                                "error": str(error)[:300]})
+                                    raise
+                            state.submit("NVIDIA NIM oracle", run_oracle, run_dir.name)
+                        return run_dir.name
+                    finally:
+                        with state.lock:
+                            state.starting_session = False
+                try:
+                    job = state.submit("start session", start_job)
+                except Exception:
+                    with state.lock:
+                        state.starting_session = False
+                    raise
                 self._json(202, {"job": job})
                 return
             match = re.fullmatch(r"/api/sessions/([^/]+)/([a-z-]+)", path)
@@ -546,19 +622,77 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 job = state.decide_approval(session_id, str(body.get("id", "")), body.get("approved") is True)
                 self._json(200, {"job": job})
                 return
+            if action == "delete":
+                if session["status"] != "finished":
+                    raise ValueError("Stop the session before deleting its logs")
+                if session_id in state.session_jobs:
+                    raise ValueError("Another operation is still running for this session")
+                job = state.submit("delete session", lambda: shutil.rmtree(run_dir), session_id)
+                self._json(202, {"job": job})
+                return
+            if action == "stop-session" and session["status"] == "recon":
+                if (run_dir / ".stop_session").exists():
+                    raise ValueError("Reconnaissance stop is already requested")
+                (run_dir / ".stop_session").touch()
+                harp.append_event(run_dir, {"type": "session_stop_requested",
+                                            "detail": "Reconnaissance will stop after the current command"})
+                self._json(200, {"message": "Reconnaissance will stop after its current command"})
+                return
             if session["status"] != "active":
                 raise ValueError("Session is not active")
+            if action == "resume-oracle":
+                if session["mode"] != "hybrid" or session["config"].get("oracle", {}).get("provider") != "nvidia_nim":
+                    raise ValueError("Only active Hybrid NIM sessions can resume the oracle")
+                if not latest_activity(run_dir)["oracle_stopped"]:
+                    raise ValueError("The NIM oracle has not stopped")
+                if harp_nim.oracle_history(run_dir)["cycles"] >= int(session["config"]["oracle"].get("max_cycles", 12)):
+                    raise ValueError("NIM cycle budget is exhausted")
+                def resume_oracle():
+                    harp.append_event(run_dir, {"type": "oracle_nim_resumed"})
+                    try:
+                        harp_nim.run(run_dir)
+                    except Exception as error:
+                        harp.append_event(run_dir, {"type": "oracle_nim_error", "error": str(error)[:300]})
+                        raise
+                job = state.submit("resume NVIDIA NIM oracle", resume_oracle, session_id)
+                self._json(202, {"job": job})
+                return
+            if action == "stop-session":
+                with state.lock:
+                    if session_id in state.stopping_sessions:
+                        raise ValueError("Session stop is already in progress")
+                    state.stopping_sessions.add(session_id)
+                (run_dir / ".stop_session").touch()
+                (run_dir / ".stop_local").touch()
+                harp.append_event(run_dir, {"type": "session_stop_requested"})
+                def stop_job():
+                    try:
+                        deadline = time.monotonic() + 480
+                        while session_id in state.session_jobs and time.monotonic() < deadline:
+                            time.sleep(0.25)
+                        if session_id in state.session_jobs:
+                            raise RuntimeError("An operation is still running; retry after it finishes")
+                        current = harp.load_session(run_dir)
+                        if current["status"] == "active":
+                            harp.finish_session(run_dir, "yes" if current.get("success") == "yes" else "unknown")
+                    finally:
+                        with state.lock:
+                            state.stopping_sessions.discard(session_id)
+                job = state.submit("stop session", stop_job)
+                self._json(202, {"job": job})
+                return
             if action == "delegate":
                 if session["mode"] == "frontier-only":
                     raise ValueError("Local delegation is disabled in frontier-only mode")
                 objective = str(body.get("objective", "")).strip()
-                steps = int(body.get("steps", 5))
-                if not objective or not 1 <= steps <= 5:
-                    raise ValueError("Enter an objective and 1 through 5 steps")
+                steps = int(body.get("steps", session["config"]["max_steps"]))
+                unbridled = body.get("unbridled") is True
+                if not objective or steps < 1 or (not unbridled and steps > int(session["config"]["max_steps"])):
+                    raise ValueError("Enter an objective and a positive step count within this session's delegation limit")
                 def delegate_job():
                     if objective != session["config"].get("objective", ""):
                         harp.mark_human_intervention(run_dir)
-                    harp.delegate(run_dir, objective, steps, quiet=True)
+                    harp.delegate(run_dir, objective, steps, quiet=True, unbridled=unbridled)
                 job = state.submit("delegate local", delegate_job, session_id)
             elif action == "stop":
                 (run_dir / ".stop_local").touch()
