@@ -8,18 +8,26 @@
 | --- | --- |
 | Oracle model | Planner provider, model, endpoint, access program, pricing, cache lifetime, and cycle/delegation limits |
 | Proxy model | Worker provider, model, prompt/reply limits, and local Unsloth launch settings |
-| API Keys | Encrypted imports for OpenAI, NVIDIA NIM, and Unsloth |
+| API Keys | Encrypted imports for OpenAI, Z.AI, NVIDIA NIM, and Unsloth |
 | Configuration | Authorized target, Kali runtime, network, scan ports, and resource limits |
 
 Save model changes with **Save oracle** or **Save proxy**. Save target/runtime changes with **Save configuration**. Settings apply to new sessions; existing sessions retain their recorded configuration. The sidebar shows selections for new sessions.
 
 ## API keys
 
-Use **API Keys** in the sidebar to manage OpenAI, NVIDIA NIM, and Unsloth credentials in one place. Each provider accepts a pasted key or a text file containing only the key (up to 4 KiB). Keys are encrypted with Windows DPAPI in the existing `.secrets` files, so keys already imported through Configuration or `set_unsloth_key.py` remain available. Environment variables take precedence. The tab shows only whether an encrypted key exists or an environment key is active; it never retrieves or displays saved key values. Saving a key does not change model or session configuration or send model requests. Model discovery remains available beside oracle and proxy selection. The model-comparison panel has been removed.
+Use **API Keys** in the sidebar to manage OpenAI, Z.AI, NVIDIA NIM, and Unsloth credentials in one place. Select a provider in the shared import panel, paste its key (up to 4 KiB), and click the import button. The status panel on the right lists every provider: green for an encrypted saved key, amber for an active environment key, and red for a missing key. Status reflects key presence, not validated API access. Keys are encrypted with Windows DPAPI in the existing `.secrets` files, so keys already imported through Configuration or `set_unsloth_key.py` remain available. Environment variables take precedence. The tab shows only whether an encrypted key exists or an environment key is active; it never retrieves or displays saved key values. Saving a key does not change model or session configuration or send model requests. Model discovery remains available beside oracle and proxy selection. The model-comparison panel has been removed.
+
+## Z.AI API / GLM
+
+Import a standard Z.AI API key in **API Keys**, or set `ZAI_API_KEY`. The encrypted key is shared by oracle and proxy. Select **Z.AI API / GLM** in either model tab, load the documented presets, and choose `glm-5.3` or `glm-5.3-flash`. Presets do not verify your account access or billing. Save each role before starting a session.
+
+HARP uses the standard endpoint `https://api.z.ai/api/paas/v4/chat/completions`. Coding Plan endpoints and subscription quotas are not used. Requests enable reasoning with selectable **Low**, **High**, or **Max** effort, defaulting to Low. Selecting Z.AI for the proxy raises a lower reply cap to 8,192 tokens. Z.AI oracle requests use 8,192 reply tokens from the command center. Reasoning consumes the reply budget, so increase the proxy cap if responses end before producing an action. Reasoning text is never interpreted as a command.
+
+Enter token rates for each role to enable cost estimates. HARP records provider-reported input, output, and cached-input usage. Missing rates remain unknown. OpenAI access programs, explicit cache controls, and Unsloth server tools are not sent to Z.AI. All target actions continue through HARP's logged terminal, with the existing scope, approval, and flag-verification checks.
 
 ## OpenAI API and Daybreak Blue
 
-In **API Keys**, paste an OpenAI project API key or select a text file containing only the key, then click **Import API key**. HARP encrypts the key with Windows DPAPI under `.secrets/openai.key`. It is never included in `harp.json` or session snapshots. `OPENAI_API_KEY`, if set, takes precedence over the imported key.
+In **API Keys**, paste an OpenAI project API key, then click **Import API key**. HARP encrypts the key with Windows DPAPI under `.secrets/openai.key`. It is never included in `harp.json` or session snapshots. `OPENAI_API_KEY`, if set, takes precedence over the imported key.
 
 Choose **OpenAI API / Daybreak Blue** for the oracle in **Oracle model**, the proxy on the Proxy model page, or both. Set the HTTPS API base URL (default `https://api.openai.com/v1`), click **Load available models** or **Load proxy models**, choose from the dropdown, and save configuration. Each role has its own model, endpoint, and access program. Choose **Standard** when Daybreak is not required.
 

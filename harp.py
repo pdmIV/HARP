@@ -130,14 +130,17 @@ def load_config(path: Path) -> dict:
             raise ValueError("Invalid container_cpus")
     model = cfg["local"]
     provider = model.get("provider", "unsloth")
-    if provider not in ("unsloth", "nvidia_nim", "openai"):
-        raise ValueError("Proxy provider must be unsloth, nvidia_nim, or openai")
+    if provider not in ("unsloth", "nvidia_nim", "openai", "zai"):
+        raise ValueError("Proxy provider must be unsloth, nvidia_nim, openai, or zai")
     if provider == "unsloth":
         url = urlparse(model["base_url"])
         if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.path.rstrip("/") != "/v1":
             raise ValueError("Proxy model URL must be a loopback Unsloth /v1 endpoint")
         if not url.port:
             raise ValueError("Proxy model URL needs an explicit port")
+    elif provider == "zai":
+        import harp_zai
+        harp_zai.validate(model)
     elif provider == "openai":
         import harp_openai
         harp_openai.validate(model)
@@ -145,7 +148,7 @@ def load_config(path: Path) -> dict:
         raise ValueError("Choose a NVIDIA NIM proxy model ID")
     if not 0 <= float(model.get("temperature", 0)) <= 2:
         raise ValueError("Proxy temperature must be 0 through 2")
-    max_proxy_tokens = 32768 if provider in ("nvidia_nim", "openai") else 8192
+    max_proxy_tokens = 32768 if provider in ("nvidia_nim", "openai", "zai") else 8192
     if not 128 <= int(model.get("max_tokens", 700)) <= max_proxy_tokens:
         raise ValueError(f"Proxy max_tokens must be 128 through {max_proxy_tokens}")
     if not 512 <= int(model.get("max_input_tokens", 6000)) <= 131072:
@@ -156,12 +159,15 @@ def load_config(path: Path) -> dict:
             and model.get("enable_thinking") and int(model.get("max_tokens", 700)) < 4096):
         raise ValueError("NIM proxy reasoning needs at least 4096 reply tokens")
     oracle = cfg.get("oracle", {"provider": "codex"})
-    if oracle.get("provider") not in ("codex", "nvidia_nim", "openai"):
-        raise ValueError("Oracle provider must be codex, nvidia_nim, or openai")
+    if oracle.get("provider") not in ("codex", "nvidia_nim", "openai", "zai"):
+        raise ValueError("Oracle provider must be codex, nvidia_nim, openai, or zai")
+    if oracle.get("provider") == "zai":
+        import harp_zai
+        harp_zai.validate(oracle)
     if oracle.get("provider") == "openai":
         import harp_openai
         harp_openai.validate(oracle)
-    if oracle.get("provider") in ("nvidia_nim", "openai"):
+    if oracle.get("provider") in ("nvidia_nim", "openai", "zai"):
         if not isinstance(oracle.get("unlimited_budget", False), bool):
             raise ValueError("Oracle unlimited_budget must be true or false")
         if oracle.get("provider") == "nvidia_nim" and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(oracle.get("model", ""))):
@@ -507,6 +513,9 @@ def deterministic_smb_probes(terminal: KaliTerminal, target: str, findings: list
 
 
 def local_api_key(model: dict) -> str:
+    if model.get("provider") == "zai":
+        import harp_zai
+        return harp_zai.key()
     if model.get("provider") == "openai":
         import harp_openai
         return harp_openai.key()
@@ -526,7 +535,7 @@ def local_api_key(model: dict) -> str:
 
 
 def model_context_tokens(model: dict) -> int:
-    if model.get("provider") in ("nvidia_nim", "openai"):
+    if model.get("provider") in ("nvidia_nim", "openai", "zai"):
         # NIM does not expose Unsloth's /props endpoint. The configured input cap
         # is the contract for this provider, with room reserved for the reply.
         return int(model.get("max_input_tokens", 6000)) + int(model.get("max_tokens", 700)) + 512
@@ -563,12 +572,15 @@ def chat_body(model: dict, system: str, user: str) -> dict:
 
 
 def count_chat_tokens(model: dict, system: str, user: str) -> int:
-    if model.get("provider") in ("nvidia_nim", "openai"):
+    if model.get("provider") in ("nvidia_nim", "openai", "zai"):
         # Conservative estimate; hosted NIM models do not offer /chat/count_tokens.
         body = chat_body(model, system, user)
         if model.get("provider") == "openai":
             import harp_openai
             body = harp_openai.response_body(model, body)
+        elif model.get("provider") == "zai":
+            import harp_zai
+            body = harp_zai.response_body(model, body)
         return (len(json.dumps(body)) + 2) // 3
     body = chat_body(model, system, user)
     request = urllib.request.Request(
@@ -623,6 +635,9 @@ def api_chat(model: dict, system: str, user: str, ledger: list[dict]) -> str:
         if model.get("provider") == "openai":
             import harp_openai
             data = harp_openai.chat(model, chat_body(model, system, user))
+        elif model.get("provider") == "zai":
+            import harp_zai
+            data = harp_zai.chat(model, chat_body(model, system, user))
         else:
             with urllib.request.urlopen(request, timeout=240) as response:
                 data = json.load(response)
@@ -637,6 +652,10 @@ def api_chat(model: dict, system: str, user: str, ledger: list[dict]) -> str:
     if model.get("provider") == "openai":
         import harp_openai
         cache_metrics = harp_openai.usage_metrics(model, usage)
+        cost = cache_metrics["estimated_usd"]
+    if model.get("provider") == "zai":
+        import harp_zai
+        cache_metrics = harp_zai.usage_metrics(model, usage)
         cost = cache_metrics["estimated_usd"]
     choice = data["choices"][0]
     message = choice.get("message") or {}

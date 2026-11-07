@@ -263,7 +263,7 @@ class KeyImportTests(unittest.TestCase):
         return handler
 
     def test_all_providers_use_the_existing_encrypted_key_files(self):
-        for provider, filename in (("openai", "openai.key"), ("nvidia_nim", "nvidia.key"), ("unsloth", "unsloth.key")):
+        for provider, filename in (("openai", "openai.key"), ("zai", "zai.key"), ("nvidia_nim", "nvidia.key"), ("unsloth", "unsloth.key")):
             with self.subTest(provider=provider):
                 handler = self.handler(provider)
                 with patch.object(handler, "_authorized", return_value=True), patch.object(handler, "_body", return_value={"key": " test-secret "}), patch.object(handler, "_json") as reply, patch.object(harp_web.harp_secret, "save_key") as save:

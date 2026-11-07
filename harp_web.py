@@ -27,6 +27,7 @@ import harp_artifacts
 import harp_secret
 import harp_nim
 import harp_openai
+import harp_zai
 
 
 ROOT = Path(__file__).resolve().parent
@@ -41,6 +42,7 @@ KEY_PATTERN = re.compile(r"API Key:\s*(sk-unsloth-[A-Za-z0-9_-]+)")
 
 
 KEY_PROVIDERS = {
+    "zai": ("zai.key", "ZAI_API_KEY", "Z.AI"),
     "openai": ("openai.key", "OPENAI_API_KEY", "OpenAI"),
     "nvidia_nim": ("nvidia.key", "NVIDIA_API_KEY", "NVIDIA NIM"),
     "unsloth": ("unsloth.key", "UNSLOTH_API_KEY", "Unsloth"),
@@ -298,7 +300,7 @@ class HARPWebState:
                 if key in payload:
                     cfg[key] = payload[key]
             local_input = proxy_input
-            for key in ("max_input_tokens", "max_tokens", "temperature", "enable_thinking", "prompt_cache_ttl",
+            for key in ("max_input_tokens", "max_tokens", "temperature", "enable_thinking", "prompt_cache_ttl", "reasoning_effort",
                         *harp_openai.PRICE_FIELDS):
                 if key in local_input:
                     cfg["local"][key] = local_input[key]
@@ -307,7 +309,7 @@ class HARPWebState:
                     cfg["local"][key] = local_input.get(key, harp_openai.BASE if key == "base_url" else "daybreak_blue")
             cfg["studio"] = studio
             cfg["local"]["provider"] = proxy_provider
-            if proxy_provider in ("nvidia_nim", "openai"):
+            if proxy_provider in ("nvidia_nim", "openai", "zai"):
                 cfg["local"]["model"] = str(local_input.get("model", cfg["local"].get("model", ""))).strip()
             else:
                 cfg["local"]["model"] = str(studio["model"]).split(":", 1)[0]
@@ -531,10 +533,10 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/api/oracle/models":
                 query = parse_qs(parsed.query)
                 provider = query.get("provider", ["nvidia_nim"])[0]
-                if provider not in ("nvidia_nim", "openai"):
+                if provider not in ("nvidia_nim", "openai", "zai"):
                     raise ValueError("Choose a hosted model provider")
                 config = {"base_url": query.get("base_url", [harp_openai.BASE])[0]}
-                self._json(200, {"models": harp_openai.models(config) if provider == "openai" else harp_nim.models()})
+                self._json(200, {"models": harp_openai.models(config) if provider == "openai" else harp_zai.models() if provider == "zai" else harp_nim.models()})
             elif (match := re.fullmatch(r"/api/sessions/([^/]+)/attachments/([0-9a-f]{32})", parsed.path)):
                 session_id, artifact_id = match.groups()
                 run_dir = session_path(session_id)
@@ -609,13 +611,16 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
                 cfg = harp.load_config(CONFIG)
-                if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai"):
-                    (harp_openai.key() if cfg["oracle"]["provider"] == "openai" else harp_nim.key())
+                if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai", "zai"):
+                    (harp_zai.key() if cfg["oracle"]["provider"] == "zai" else
+                     harp_openai.key() if cfg["oracle"]["provider"] == "openai" else harp_nim.key())
                 if mode != "frontier-only":
                     if not cfg["local"]["model"]:
                         raise ValueError("Choose a proxy model first")
                     if cfg["local"].get("provider") == "nvidia_nim":
                         harp_nim.key()
+                    elif cfg["local"].get("provider") == "zai":
+                        harp_zai.key()
                     elif cfg["local"].get("provider") == "openai":
                         harp_openai.key()
                     elif not api_port_open(int(studio_settings(cfg)["port"])):
@@ -628,7 +633,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                     try:
                         prepare_runtime(cfg)
                         run_dir = harp.start_session(cfg, RUNS, mode)
-                        if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai"):
+                        if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai", "zai"):
                             def run_oracle():
                                 try:
                                     harp_nim.run(run_dir)
@@ -686,7 +691,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             if session["status"] != "active":
                 raise ValueError("Session is not active")
             if action == "resume-oracle":
-                if session["mode"] != "hybrid" or session["config"].get("oracle", {}).get("provider") not in ("nvidia_nim", "openai"):
+                if session["mode"] != "hybrid" or session["config"].get("oracle", {}).get("provider") not in ("nvidia_nim", "openai", "zai"):
                     raise ValueError("Only active Hybrid hosted sessions can resume the oracle")
                 if not latest_activity(run_dir)["oracle_stopped"]:
                     raise ValueError("The hosted oracle has not stopped")

@@ -325,6 +325,9 @@ def run(run_dir: Path) -> None:
             if cfg.get("provider") == "openai":
                 import harp_openai
                 return harp_openai.chat(cfg, {**body, "harp_role": "oracle"})
+            if cfg.get("provider") == "zai":
+                import harp_zai
+                return harp_zai.chat(cfg, body)
             return request(path, body)
 
         reply = oracle_request("/chat/completions", {"model": model, "stream": False,
@@ -366,6 +369,9 @@ def run(run_dir: Path) -> None:
         if cfg.get("provider") == "openai":
             import harp_openai
             cache_metrics = harp_openai.usage_metrics(cfg, usage)
+        if cfg.get("provider") == "zai":
+            import harp_zai
+            cache_metrics = harp_zai.usage_metrics(cfg, usage)
         call = {"model": model, "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0), **cache_metrics}
         current = harp.load_session(run_dir)

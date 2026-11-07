@@ -26,9 +26,22 @@
   let seenPending = false;
   let toastTimer;
 
-  const preferredTheme = localStorage.getItem("harpTheme") || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  document.documentElement.dataset.theme = preferredTheme;
-  $("themeIcon").textContent = preferredTheme === "dark" ? "☀" : "☾";
+  const themes = ["light", "dark", "amoled"];
+  const themeLabels = { light: "Light", dark: "Dark", amoled: "AMOLED Dark" };
+  const themeIcons = { light: "\u2600", dark: "\u263e", amoled: "\u25cf" };
+  const savedTheme = localStorage.getItem("harpTheme");
+  const preferredTheme = themes.includes(savedTheme) ? savedTheme : (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+
+  function applyTheme(theme) {
+    document.documentElement.dataset.theme = theme;
+    $("themeIcon").textContent = themeIcons[theme];
+    const next = themes[(themes.indexOf(theme) + 1) % themes.length];
+    const label = `${themeLabels[theme]} theme. Switch to ${themeLabels[next]}`;
+    $("themeToggle").title = label;
+    $("themeToggle").setAttribute("aria-label", label);
+  }
+
+  applyTheme(preferredTheme);
 
   function toast(message, error = false) {
     const node = $("toast");
@@ -145,7 +158,7 @@
   }
 
   function renderSelections() {
-    const providers = {openai: "OpenAI", nvidia_nim: "NVIDIA NIM", unsloth: "Unsloth", codex: "Codex via MCP"};
+    const providers = {openai: "OpenAI", zai: "Z.AI", nvidia_nim: "NVIDIA NIM", unsloth: "Unsloth", codex: "Codex via MCP"};
     for (const [role, label, modelId] of [["oracle", "Oracle", "oracleModel"], ["proxy", "Proxy", "proxyNimModel"]]) {
       const provider = $(role + "Provider").value;
       const access = provider === "openai" ? ` / ${$(role + "Access").value === "daybreak_blue" ? "Daybreak Blue" : "Standard"}` : "";
@@ -172,11 +185,16 @@
   function renderModel(model) {
     lastModel = model;
     const running = !!model.listening;
-    $("temperature").disabled = $("proxyProvider").value === "openai";
-    $("enableThinking").disabled = $("proxyProvider").value === "openai";
+    $("temperature").disabled = ["openai", "zai"].includes($("proxyProvider").value);
+    $("enableThinking").disabled = ["openai", "zai"].includes($("proxyProvider").value);
     const nimProxy = $("proxyProvider").value !== "unsloth";
     document.querySelectorAll(".openai-proxy").forEach(x => x.classList.toggle("hidden", $("proxyProvider").value !== "openai"));
     document.querySelectorAll(".openai-oracle").forEach(x => x.classList.toggle("hidden", $("oracleProvider").value !== "openai"));
+    for (const role of ["proxy", "oracle"]) {
+      const provider = $(role + "Provider").value;
+      document.querySelectorAll(".zai-" + role).forEach(x => x.classList.toggle("hidden", provider !== "zai"));
+      document.querySelectorAll(".pricing-" + role).forEach(x => x.classList.toggle("hidden", !["openai", "zai"].includes(provider)));
+    }
     $("unslothSettings").classList.toggle("hidden", nimProxy);
     $("unslothLog").classList.toggle("hidden", nimProxy);
     $("proxyNimModel").disabled = !nimProxy;
@@ -226,6 +244,8 @@
     $("proxyAccess").value = local.access_program || "daybreak_blue";
     const oracle = cfg.oracle || {};
     $("oracleProvider").value = oracle.provider || "codex";
+    $("oracleReasoning").value = oracle.reasoning_effort || "low";
+    $("proxyReasoning").value = local.reasoning_effort || "low";
     setModelOptions("oracleModel", [], oracle.model || "");
     $("oracleOpenaiUrl").value = oracle.base_url || "https://api.openai.com/v1";
     $("oracleAccess").value = oracle.access_program || "daybreak_blue";
@@ -256,8 +276,9 @@
                cache_v: $("cacheV").value, parallel: Number($("studioParallel").value)},
       local: {provider: $("proxyProvider").value, model: $("proxyNimModel").value.trim(),
               base_url: $("proxyOpenaiUrl").value.trim(), access_program: $("proxyAccess").value,
-              ...($("proxyProvider").value === "openai" ? cacheConfig("proxy") : {}),
+              ...(["openai", "zai"].includes($("proxyProvider").value) ? cacheConfig("proxy") : {}),
               max_input_tokens: Number($("maxInput").value), max_tokens: Number($("maxOutput").value),
+              reasoning_effort: $("proxyReasoning").value,
               temperature: Number($("temperature").value), enable_thinking: $("enableThinking").checked},
       target: $("targetInput").value.trim(), runtime: $("runtimeSelect").value,
       wsl_distro: $("wslDistro").value.trim(), wsl_user: $("wslUser").value.trim(),
@@ -268,9 +289,10 @@
       command_timeout_seconds: Number($("commandTimeout").value),
       oracle: {provider: $("oracleProvider").value, model: $("oracleModel").value.trim(),
                base_url: $("oracleOpenaiUrl").value.trim(), access_program: $("oracleAccess").value,
-               ...($("oracleProvider").value === "openai" ? cacheConfig("oracle") : {}),
+               ...(["openai", "zai"].includes($("oracleProvider").value) ? cacheConfig("oracle") : {}),
+               reasoning_effort: $("oracleReasoning").value,
                max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value),
-               unlimited_budget: $("oracleUnlimited").checked, max_tokens: $("oracleProvider").value === "openai" ? 4096 : 1024}
+               unlimited_budget: $("oracleUnlimited").checked, max_tokens: $("oracleProvider").value === "zai" ? 8192 : $("oracleProvider").value === "openai" ? 4096 : 1024}
     };
   }
 
@@ -464,13 +486,13 @@
     $("verboseStage").textContent = sum.status === "recon" ? `Reconnaissance: ${sum.recon_stage || "Preparing Kali"}` : `Session ${sum.status}`;
     const active = sum.status === "active";
     for (const id of ["delegateButton", "stopLocal", "runManual", "markSuccess", "finishSession"]) $(id).disabled = !active;
-    const canResumeOracle = active && ["nvidia_nim", "openai"].includes(selected.oracle_provider) && !!selected.activity.oracle_stopped;
+    const canResumeOracle = active && ["nvidia_nim", "openai", "zai"].includes(selected.oracle_provider) && !!selected.activity.oracle_stopped;
     $("resumeOracle").classList.toggle("hidden", !canResumeOracle);
     $("resumeOracle").disabled = !canResumeOracle;
     if (document.activeElement !== $("stepsInput")) $("stepsInput").value = selected.delegation_limit || 20;
     if (sum.mode === "local-only") $("runManual").disabled = true;
     if (sum.mode === "frontier-only") $("delegateButton").disabled = true;
-    $("unlimitedBudgetRow").classList.toggle("hidden", !["nvidia_nim", "openai"].includes(selected.oracle_provider));
+    $("unlimitedBudgetRow").classList.toggle("hidden", !["nvidia_nim", "openai", "zai"].includes(selected.oracle_provider));
     if (budgetSessionId !== selected.id) { $("unlimitedBudgetInput").checked = selected.oracle_unlimited_budget === true; budgetSessionId = selected.id; }
     $("oracleIdentity").textContent = selected.oracle_provider === "codex" ? "Oracle / Codex" : `Oracle / ${selected.oracle_provider} / ${selected.oracle_model}`;
     $("proxyIdentity").textContent = `Proxy / ${selected.proxy_provider} / ${selected.proxy_model}`;
@@ -629,10 +651,10 @@
       }
       if (!selectedId && !sessions.length) renderSummary();
       fillConfig(data.config);
-      for (const [prefix, provider] of [["openai", "openai"], ["nim", "nvidia_nim"], ["unsloth", "unsloth"]]) {
+      for (const [prefix, provider] of [["zai", "zai"], ["openai", "openai"], ["nim", "nvidia_nim"], ["unsloth", "unsloth"]]) {
         const status = data.keys?.[provider];
         $(prefix + "KeyStatus").textContent = status?.environment ? "Environment key active" : status?.saved ? "Encrypted key saved" : "No key imported";
-        $(prefix + "KeyStatus").classList.toggle("muted", !status?.environment && !status?.saved);
+        $(prefix + "KeyStatus").className = "key-status " + (status?.environment ? "environment" : status?.saved ? "saved" : "missing");
       }
       renderModel(data.model);
       if (data.selected && data.selected.id === selectedId) {
@@ -698,10 +720,9 @@
   $("verboseFilter").addEventListener("change", renderVerbose);
   $("verboseFollow").addEventListener("change", () => { if ($("verboseFollow").checked) $("verboseFeed").scrollTop = $("verboseFeed").scrollHeight; });
   $("themeToggle").addEventListener("click", () => {
-    const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
+    const next = themes[(themes.indexOf(document.documentElement.dataset.theme) + 1) % themes.length];
+    applyTheme(next);
     localStorage.setItem("harpTheme", next);
-    $("themeIcon").textContent = next === "dark" ? "☀" : "☾";
   });
   $("refreshSessions").addEventListener("click", poll);
   document.querySelectorAll(".filter").forEach(button => button.addEventListener("click", () => {
@@ -715,7 +736,7 @@
   $("saveOracle").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("saveProxy").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("findProxyModels").addEventListener("click", () => loadModels("proxy"));
-  $("proxyProvider").addEventListener("change", () => { setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
+  $("proxyProvider").addEventListener("change", () => { if ($("proxyProvider").value === "zai") $("maxOutput").value = Math.max(8192, Number($("maxOutput").value)); setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
   $("oracleProvider").addEventListener("change", () => { setModelOptions("oracleModel", [], ""); renderModel({...lastModel, logs: []}); if ($("oracleProvider").value !== "codex") loadModels("oracle"); });
   for (const id of ["oracleModel", "proxyNimModel", "oracleAccess", "proxyAccess", "studioModel"]) {
     $(id).addEventListener("change", renderSelections);
@@ -740,37 +761,50 @@
   }
   async function loadModels(role) {
     const provider = $(role === "proxy" ? "proxyProvider" : "oracleProvider").value;
-    if (!["openai", "nvidia_nim"].includes(provider)) return;
+    if (!["openai", "nvidia_nim", "zai"].includes(provider)) return;
     const id = role === "proxy" ? "proxyNimModel" : "oracleModel";
     const base = $(role === "proxy" ? "proxyOpenaiUrl" : "oracleOpenaiUrl").value.trim();
     try {
       const result = await api(`/api/oracle/models?provider=${provider}&base_url=${encodeURIComponent(base)}`);
       if ($(role === "proxy" ? "proxyProvider" : "oracleProvider").value !== provider || $(role === "proxy" ? "proxyOpenaiUrl" : "oracleOpenaiUrl").value.trim() !== base) return;
       setModelOptions(id, result.models, $(id).value);
-      toast(`${result.models.length} models loaded`);
+      toast(provider === "zai" ? "GLM model presets loaded; account access is checked on first request" : `${result.models.length} models loaded`);
     } catch (error) { toast(error.message, true); }
   }
   $("findNimModels").addEventListener("click", () => loadModels("oracle"));
-  for (const [prefix, provider, button] of [["openai", "openai", "saveOpenaiKey"], ["nim", "nvidia_nim", "saveNimKey"], ["unsloth", "unsloth", "saveUnslothKey"]]) {
-    $(prefix + "KeyFile").addEventListener("change", async () => {
-      const file = $(prefix + "KeyFile").files[0];
-      if (!file) return;
-      try {
-        if (file.size > 4096) throw new Error("Choose a text file containing only the API key (up to 4 KiB)");
-        $(prefix + "Key").value = (await file.text()).trim();
-      } catch (error) { $(prefix + "KeyFile").value = ""; toast(error.message, true); }
-    });
-    $(button).addEventListener("click", async () => {
-      $(button).disabled = true;
-      try {
-        const result = await post(`/api/keys/${provider}`, {key: $(prefix + "Key").value.trim()});
-        $(prefix + "Key").value = ""; $(prefix + "KeyFile").value = "";
-        toast(result.message);
-        await poll();
-      } catch (error) { toast(error.message, true); }
-      finally { $(button).disabled = false; }
-    });
-  }
+  const keyProviders = {
+    openai: {label: "OpenAI", help: "Used by the OpenAI oracle and proxy. OPENAI_API_KEY takes precedence when set. Daybreak requires access enabled for your API project."},
+    zai: {label: "Z.AI", help: "Used by the Z.AI oracle and proxy with the standard API endpoint. ZAI_API_KEY takes precedence when set."},
+    nvidia_nim: {label: "NVIDIA NIM", help: "Used by the NVIDIA NIM oracle and proxy. NVIDIA_API_KEY takes precedence when set."},
+    unsloth: {label: "Unsloth", help: "Used by the local Unsloth proxy. Paste the API key shown by your Unsloth server. UNSLOTH_API_KEY takes precedence when set."}
+  };
+  $("apiKeyProvider").addEventListener("change", () => {
+    const provider = keyProviders[$("apiKeyProvider").value];
+    $("apiKeyValue").value = "";
+    $("apiKeyHelp").textContent = provider.help;
+    $("saveApiKey").textContent = `Import ${provider.label} key`;
+  });
+  $("apiKeyForm").addEventListener("submit", async event => {
+    event.preventDefault();
+    if ($("saveApiKey").disabled) return;
+    const provider = $("apiKeyProvider").value;
+    const key = $("apiKeyValue").value.trim();
+    if (!key) { toast("Paste an API key first", true); return; }
+    $("saveApiKey").disabled = true;
+    $("apiKeyProvider").disabled = true;
+    $("apiKeyValue").disabled = true;
+    try {
+      const result = await post(`/api/keys/${provider}`, {key});
+      $("apiKeyValue").value = "";
+      toast(result.message);
+      await poll();
+    } catch (error) { toast(error.message, true); }
+    finally {
+      $("saveApiKey").disabled = false;
+      $("apiKeyProvider").disabled = false;
+      $("apiKeyValue").disabled = false;
+    }
+  });
   $("startSession").addEventListener("click", async () => {
     if (startPending) return;
     const stopId = $("startSession").dataset.stopId;
