@@ -26,6 +26,7 @@ import harp
 import harp_artifacts
 import harp_secret
 import harp_nim
+import harp_openai
 
 
 ROOT = Path(__file__).resolve().parent
@@ -75,7 +76,8 @@ def api_port_open(port: int) -> bool:
 
 def studio_settings(cfg: dict) -> dict:
     local = cfg["local"]
-    default = {"model": local["model"], "port": urlparse(local["base_url"]).port or 8888,
+    default = {"model": local["model"] if local.get("provider", "unsloth") == "unsloth" else "",
+               "port": urlparse(local.get("base_url", "http://127.0.0.1:8888/v1")).port or 8888,
                "context": 32768, "cache_k": "bf16", "cache_v": "bf16", "parallel": 1}
     return {**default, **(cfg.get("studio") or {})}
 
@@ -273,18 +275,29 @@ class HARPWebState:
         with self.lock:
             cfg = draft_config()
             studio = payload.get("studio") or studio_settings(cfg)
-            build_launch_args(studio)
+            proxy_input = payload.get("local") or {}
+            proxy_provider = proxy_input.get("provider", cfg["local"].get("provider", "unsloth"))
+            if proxy_provider == "unsloth":
+                build_launch_args(studio)
             for key in ("target", "runtime", "wsl_distro", "wsl_user", "network", "network_policy", "scan_ports", "objective",
                         "container_memory", "container_cpus", "max_steps", "command_timeout_seconds"):
                 if key in payload:
                     cfg[key] = payload[key]
-            local_input = payload.get("local") or {}
-            for key in ("max_input_tokens", "max_tokens", "temperature", "enable_thinking"):
+            local_input = proxy_input
+            for key in ("max_input_tokens", "max_tokens", "temperature", "enable_thinking", "prompt_cache_ttl",
+                        *harp_openai.PRICE_FIELDS):
                 if key in local_input:
                     cfg["local"][key] = local_input[key]
+            if proxy_provider == "openai":
+                for key in ("base_url", "access_program"):
+                    cfg["local"][key] = local_input.get(key, harp_openai.BASE if key == "base_url" else "daybreak_blue")
             cfg["studio"] = studio
-            cfg["local"]["model"] = str(studio["model"]).split(":", 1)[0]
-            cfg["local"]["base_url"] = f"http://127.0.0.1:{int(studio['port'])}/v1"
+            cfg["local"]["provider"] = proxy_provider
+            if proxy_provider in ("nvidia_nim", "openai"):
+                cfg["local"]["model"] = str(local_input.get("model", cfg["local"].get("model", ""))).strip()
+            else:
+                cfg["local"]["model"] = str(studio["model"]).split(":", 1)[0]
+                cfg["local"]["base_url"] = f"http://127.0.0.1:{int(studio['port'])}/v1"
             if "oracle" in payload:
                 cfg["oracle"] = {**cfg.get("oracle", {}), **payload["oracle"]}
             temporary = CONFIG.with_suffix(".json.tmp")
@@ -375,6 +388,10 @@ class HARPWebState:
                 "duration_seconds": state.get("duration_seconds"),
                 "delegation_limit": state["config"]["max_steps"],
                 "oracle_provider": state["config"].get("oracle", {}).get("provider", "codex"),
+                "oracle_model": state["config"].get("oracle", {}).get("model", ""),
+                "oracle_unlimited_budget": state["config"].get("oracle", {}).get("unlimited_budget") is True,
+                "proxy_provider": state["config"]["local"].get("provider", "unsloth"),
+                "proxy_model": state["config"]["local"].get("model", ""),
                 "objective": state["config"].get("objective", ""),
                 "recon": state.get("recon", []), "http_probes": state.get("http_probes", []),
                 "smb_probes": state.get("smb_probes", []),
@@ -498,7 +515,12 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 cfg = harp.load_config(CONFIG)
                 self._json(200, {"context": harp.model_context_tokens(cfg["local"])})
             elif parsed.path == "/api/oracle/models":
-                self._json(200, {"models": harp_nim.models()})
+                query = parse_qs(parsed.query)
+                provider = query.get("provider", ["nvidia_nim"])[0]
+                if provider not in ("nvidia_nim", "openai"):
+                    raise ValueError("Choose a hosted model provider")
+                config = {"base_url": query.get("base_url", [harp_openai.BASE])[0]}
+                self._json(200, {"models": harp_openai.models(config) if provider == "openai" else harp_nim.models()})
             elif (match := re.fullmatch(r"/api/sessions/([^/]+)/attachments/([0-9a-f]{32})", parsed.path)):
                 session_id, artifact_id = match.groups()
                 run_dir = session_path(session_id)
@@ -537,6 +559,13 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 self._json(200, {"config": state.save_config(body)})
                 return
+            if path == "/api/openai/key":
+                value = str(body.get("key", "")).strip()
+                if not value or len(value) > 4096 or any(c.isspace() for c in value):
+                    raise ValueError("Enter a valid OpenAI API key")
+                harp_secret.save_key(ROOT / ".secrets" / "openai.key", value)
+                self._json(200, {"message": "OpenAI key saved encrypted for this Windows account"})
+                return
             if path == "/api/oracle/key":
                 value = str(body.get("key", "")).strip()
                 if not value:
@@ -568,13 +597,17 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
                 cfg = harp.load_config(CONFIG)
-                if mode == "hybrid" and cfg.get("oracle", {}).get("provider") == "nvidia_nim":
-                    harp_nim.key()
+                if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai"):
+                    (harp_openai.key() if cfg["oracle"]["provider"] == "openai" else harp_nim.key())
                 if mode != "frontier-only":
                     if not cfg["local"]["model"]:
-                        raise ValueError("Choose a local model in the Local model tab first")
-                    if not api_port_open(int(studio_settings(cfg)["port"])):
-                        raise ValueError("Start the local model in the Local model tab first")
+                        raise ValueError("Choose a proxy model first")
+                    if cfg["local"].get("provider") == "nvidia_nim":
+                        harp_nim.key()
+                    elif cfg["local"].get("provider") == "openai":
+                        harp_openai.key()
+                    elif not api_port_open(int(studio_settings(cfg)["port"])):
+                        raise ValueError("Start the Unsloth proxy model first")
                 with state.lock:
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
@@ -583,7 +616,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                     try:
                         prepare_runtime(cfg)
                         run_dir = harp.start_session(cfg, RUNS, mode)
-                        if mode == "hybrid" and cfg.get("oracle", {}).get("provider") == "nvidia_nim":
+                        if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai"):
                             def run_oracle():
                                 try:
                                     harp_nim.run(run_dir)
@@ -591,7 +624,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                                     harp.append_event(run_dir, {"type": "oracle_nim_error",
                                                                 "error": str(error)[:300]})
                                     raise
-                            state.submit("NVIDIA NIM oracle", run_oracle, run_dir.name)
+                            state.submit("hosted oracle", run_oracle, run_dir.name)
                         return run_dir.name
                     finally:
                         with state.lock:
@@ -641,20 +674,30 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             if session["status"] != "active":
                 raise ValueError("Session is not active")
             if action == "resume-oracle":
-                if session["mode"] != "hybrid" or session["config"].get("oracle", {}).get("provider") != "nvidia_nim":
-                    raise ValueError("Only active Hybrid NIM sessions can resume the oracle")
+                if session["mode"] != "hybrid" or session["config"].get("oracle", {}).get("provider") not in ("nvidia_nim", "openai"):
+                    raise ValueError("Only active Hybrid hosted sessions can resume the oracle")
                 if not latest_activity(run_dir)["oracle_stopped"]:
-                    raise ValueError("The NIM oracle has not stopped")
-                if harp_nim.oracle_history(run_dir)["cycles"] >= int(session["config"]["oracle"].get("max_cycles", 12)):
-                    raise ValueError("NIM cycle budget is exhausted")
+                    raise ValueError("The hosted oracle has not stopped")
+                unlimited_budget = body.get("unlimited_budget", session["config"]["oracle"].get("unlimited_budget", False))
+                if not isinstance(unlimited_budget, bool):
+                    raise ValueError("Unlimited budget choice must be true or false")
+                if (not unlimited_budget and harp_nim.oracle_history(run_dir)["cycles"] >=
+                        int(session["config"]["oracle"].get("max_cycles", 12))):
+                    raise ValueError("Oracle cycle budget is exhausted")
                 def resume_oracle():
+                    current = harp.load_session(run_dir)
+                    if unlimited_budget != (current["config"]["oracle"].get("unlimited_budget") is True):
+                        current["config"]["oracle"]["unlimited_budget"] = unlimited_budget
+                        harp.save_session(run_dir, current)
+                        harp.append_event(run_dir, {"type": "oracle_budget_changed",
+                                                    "unlimited_budget": unlimited_budget})
                     harp.append_event(run_dir, {"type": "oracle_nim_resumed"})
                     try:
                         harp_nim.run(run_dir)
                     except Exception as error:
                         harp.append_event(run_dir, {"type": "oracle_nim_error", "error": str(error)[:300]})
                         raise
-                job = state.submit("resume NVIDIA NIM oracle", resume_oracle, session_id)
+                job = state.submit("resume hosted oracle", resume_oracle, session_id)
                 self._json(202, {"job": job})
                 return
             if action == "stop-session":
@@ -683,7 +726,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 return
             if action == "delegate":
                 if session["mode"] == "frontier-only":
-                    raise ValueError("Local delegation is disabled in frontier-only mode")
+                    raise ValueError("Proxy delegation is disabled in frontier-only mode")
                 objective = str(body.get("objective", "")).strip()
                 steps = int(body.get("steps", session["config"]["max_steps"]))
                 unbridled = body.get("unbridled") is True
@@ -697,11 +740,11 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             elif action == "stop":
                 (run_dir / ".stop_local").touch()
                 harp.append_event(run_dir, {"type": "operator_stop_requested"})
-                self._json(200, {"message": "Local worker will stop after its current step"})
+                self._json(200, {"message": "Proxy model will stop after its current step"})
                 return
             elif action == "terminal":
                 if session["mode"] == "local-only":
-                    raise ValueError("Manual terminal is disabled in local-only mode")
+                    raise ValueError("Manual terminal is disabled in proxy-only mode")
                 command = str(body.get("command", "")).strip()
                 if not command:
                     raise ValueError("Enter a command")

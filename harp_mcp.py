@@ -259,7 +259,7 @@ TOOLS = {
     "capture_document": (capture_document, "Preserve one regular file under the active Kali session workspace (8 MiB maximum) as a downloadable document artifact.",
                          {"session": {"type": "string"}, "path": {"type": "string"},
                           "title": {"type": "string"}}, ["session", "path", "title"]),
-    "delegate_local": (delegate_local, "Give Unsloth one narrow objective. The configured local step limit applies afresh to each delegation; total local steps remain a statistic. Unbridled=true removes step, model-call, and repetition limits until done, operator stop, or another required stop. Review terminal evidence and the stop reason afterward.",
+    "delegate_local": (delegate_local, "Give the proxy model one narrow objective. The configured proxy step limit applies afresh to each delegation; total proxy steps remain a statistic. Unbridled=true removes step, model-call, and repetition limits until done, operator stop, or another required stop. Review terminal evidence and the stop reason afterward.",
                        {"session": {"type": "string"}, "objective": {"type": "string"},
                         "steps": {"type": "integer", "minimum": 1},
                         "unbridled": {"type": "boolean", "default": False}},

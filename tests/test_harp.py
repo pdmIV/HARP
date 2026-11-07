@@ -29,6 +29,25 @@ class DummyTerminal:
 
 
 class HarpTests(unittest.TestCase):
+    def test_session_save_retries_transient_windows_replace_denial(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            run_dir = Path(temp)
+            original_replace = Path.replace
+            attempts = []
+
+            def flaky_replace(source, target):
+                attempts.append(source)
+                if len(attempts) <= 2:
+                    raise PermissionError("destination briefly in use")
+                return original_replace(source, target)
+
+            with patch.object(Path, "replace", flaky_replace), patch.object(harp.time, "sleep") as sleep:
+                harp.save_session(run_dir, {"status": "active"})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(sleep.call_count, 2)
+            self.assertEqual(harp.load_session(run_dir)["status"], "active")
+            self.assertEqual(list(run_dir.glob("session.json.*.tmp")), [])
+
     def test_new_session_is_visible_during_recon(self):
         cfg = json.loads(Path("harp.example.json").read_text())
         cfg["target"] = "10.10.10.5"
@@ -149,6 +168,102 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(state["last_delegate_stop"], "repeated_command")
             self.assertIsNone(state["human_intervention_at"])
 
+    def test_unlimited_budget_skips_step_and_model_call_caps_but_still_stops(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["max_model_calls"] = 1
+            harp.save_session(path, state)
+            replies = iter([
+                '{"thought":"first","command":"echo first","done":false}',
+                '{"thought":"second","command":"echo second","done":false}',
+                '{"thought":"finished","done":true,"finding":"Reviewed results"}',
+            ])
+
+            def model_reply(_model, _system, _user, ledger):
+                ledger.append({"model": "test", "seconds": 0, "prompt_tokens": 0,
+                               "completion_tokens": 0, "estimated_usd": 0})
+                return next(replies)
+
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=model_reply):
+                harp.delegate(path, "Inspect target", 1, quiet=True, unlimited_budget=True)
+            saved = harp.load_session(path)
+            self.assertEqual(saved["local_steps"], 2)
+            self.assertEqual(len(saved["local_calls"]), 3)
+            self.assertEqual(saved["last_delegate_stop"], "local_done")
+
+    def test_proxy_api_failure_is_not_reported_as_step_budget(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=RuntimeError("API failed")):
+                with self.assertRaisesRegex(RuntimeError, "API failed"):
+                    harp.delegate(path, "Inspect target", 1, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(saved["last_delegate_stop"], "proxy_api_error")
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[-1]["reason"], "proxy_api_error")
+
+    def test_proxy_command_trims_trailing_newline_before_terminal(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            reply = json.dumps({"thought": "Check one service", "command": "echo result\n", "done": False})
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=reply):
+                harp.delegate(path, "Inspect target", 1, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(saved["local_steps"], 1)
+            self.assertEqual(saved["observations"][0]["command"], "echo result")
+            self.assertEqual(saved["last_delegate_stop"], "step_budget")
+            self.assertIn("control character", harp.local_command_issue(
+                "echo first\necho second", "target", "Inspect target"))
+
+    def test_unlimited_oracle_can_resume_past_cycle_cap_and_uses_verified_artifacts(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                           "max_cycles": 1, "steps_per_cycle": 1,
+                                           "unlimited_budget": True}
+            harp.save_session(path, state)
+            harp.append_event(path, {"type": "oracle_nim_request", "cycle": 1})
+            harp_artifacts.register_artifact(path, kind="credential", title="Discovered password",
+                                             value="example-secret", source="read evidence",
+                                             evidence="Observed in terminal", evidence_backed=True)
+            reply = {"choices": [{"message": {"content":
+                     '{"plan":"Review evidence","objective":"","stop":true}'}}]}
+            with patch.object(harp_nim, "request", return_value=reply) as request:
+                harp_nim.run(path)
+            self.assertEqual(request.call_count, 1)
+            body = request.call_args.args[1]
+            context = json.loads(body["messages"][1]["content"])
+            self.assertEqual(context["cycle"], 2)
+            self.assertEqual(context["verified_artifacts"][0]["value"], "example-secret")
+            self.assertIn("not proof that it belongs to any named user", body["messages"][0]["content"])
+
+    def test_unlimited_budget_config_accepts_steps_beyond_normal_limit(self):
+        config = json.loads(Path("harp.example.json").read_text())
+        config["oracle"]["steps_per_cycle"] = config["max_steps"] + 1
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "proxy step limit"):
+                harp.load_config(path)
+            config["oracle"]["unlimited_budget"] = True
+            path.write_text(json.dumps(config), encoding="utf-8")
+            self.assertTrue(harp.load_config(path)["oracle"]["unlimited_budget"])
+
     def test_root_request_does_not_execute_or_count_as_human_help(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
@@ -202,6 +317,37 @@ class HarpTests(unittest.TestCase):
         self.assertIn("sample.user", compact[1]["summary"])
         self.assertNotIn("Domain Admins", compact[1]["summary"])
 
+    def test_nim_history_preserves_distinct_older_results_with_a_bound(self):
+        observations = [
+            {"command": "list share", "exit_code": 0, "output": "HR READ\n"},
+            {"command": "repeat share", "exit_code": 0, "output": "HR READ\n"},
+            {"command": "failed login", "exit_code": 1, "output": "Access denied"},
+        ] + [{"command": f"check {n}", "exit_code": 0, "output": f"finding {n}"}
+             for n in range(12)]
+        older = harp_nim.compact_past_observations(observations)
+        self.assertEqual(len(older), 8)
+        self.assertEqual(len({item["output_excerpt"] for item in older}), 8)
+        self.assertNotIn("Access denied", str(older))
+        self.assertTrue(all(len(item["output_excerpt"]) <= 523 for item in older))
+
+    def test_nim_attempt_history_restores_plan_terminal_and_rejection(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            harp.append_event(path, {"type": "oracle_nim_request", "cycle": 1})
+            harp.append_event(path, {"type": "oracle_plan", "plan": "Check the readable share"})
+            harp.append_event(path, {"type": "delegation", "objective": "List share files"})
+            harp.append_event(path, {"type": "local_terminal", "result": {
+                "command": "smbclient -c ls", "exit_code": 1, "output": "Access denied"}})
+            harp.append_event(path, {"type": "local_command_rejected", "command": "bad syntax",
+                                     "reason": "Shell syntax check failed"})
+            harp.append_event(path, {"type": "delegation_stopped", "reason": "command_validation_failed",
+                                     "local_steps": 1})
+            attempt = harp_nim.oracle_history(path)["attempts"][0]
+            self.assertEqual(attempt["plan"], "Check the readable share")
+            self.assertEqual(attempt["last_command"], "smbclient -c ls")
+            self.assertEqual(attempt["last_output"], "Access denied")
+            self.assertEqual(attempt["last_rejection"]["reason"], "Shell syntax check failed")
+
     def test_nim_speed_test_requires_usable_plan(self):
         reply = {"choices": [{"message": {"content":
                  '{"plan":"Review SMB","objective":"List shares","stop":false}'}}]}
@@ -214,6 +360,8 @@ class HarpTests(unittest.TestCase):
     def test_nim_ultra_requests_visible_reply_without_reasoning(self):
         self.assertEqual(harp_nim.oracle_model_options("nvidia/nemotron-3-ultra-550b-a55b"),
                          {"reasoning_effort": "none"})
+        self.assertEqual(harp_nim.oracle_model_options("nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"),
+                         {"chat_template_kwargs": {"enable_thinking": False}})
         self.assertEqual(harp_nim.oracle_model_options("example/fast-model"), {})
 
     def test_nim_plan_carries_null_auth_boundary_to_worker(self):
@@ -243,15 +391,20 @@ class HarpTests(unittest.TestCase):
             state = harp.load_session(path)
             state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
                                           "max_cycles": 3, "steps_per_cycle": 2}
+            state["recon"] = [{"port": 445, "service": "microsoft-ds"}]
+            state["http_probes"] = [{"port": 80, "status": 200}]
+            state["smb_probes"] = [{"option": "--shares", "exit_code": 0,
+                                     "output_excerpt": "Share HR READ"}]
             harp.save_session(path, state)
             first = {"plan": "List services", "objective": "List services once", "stop": False}
             second = {"plan": "Stop after review", "objective": "", "stop": True}
             replies = [{"choices": [{"message": {"content": json.dumps(item)}}]}
                        for item in (first, second)]
 
-            def failed_delegate(run_dir, _objective, _steps, *, quiet):
+            def failed_delegate(run_dir, _objective, _steps, *, quiet, unlimited_budget=False):
                 current = harp.load_session(run_dir)
                 current["last_delegate_stop"] = "three_unproductive_commands"
+                current["local_steps"] += 1
                 current["observations"].append({"command": "nmap target", "exit_code": 1,
                                                 "output": "No useful result"})
                 harp.save_session(run_dir, current)
@@ -260,8 +413,40 @@ class HarpTests(unittest.TestCase):
                  patch.object(harp, "delegate", side_effect=failed_delegate):
                 harp_nim.run(path)
             self.assertEqual(request.call_count, 2)
+            first_context = json.loads(request.call_args_list[0].args[1]["messages"][1]["content"])
+            self.assertEqual(first_context["recon"], state["recon"])
+            self.assertEqual(first_context["http_probes"], state["http_probes"])
+            self.assertIn("HR READ", first_context["smb_probes"][0]["summary"])
+            second_context = json.loads(request.call_args_list[1].args[1]["messages"][1]["content"])
+            self.assertEqual(second_context["prior_attempts"][0]["plan"], "List services")
+            self.assertEqual(second_context["prior_attempts"][0]["last_output"], "No useful result")
             events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
             self.assertTrue(any(item.get("type") == "oracle_nim_recovery" for item in events))
+
+    def test_nim_oracle_stops_after_three_delegations_without_terminal_progress(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                           "max_cycles": 1, "steps_per_cycle": 1,
+                                           "unlimited_budget": True}
+            harp.save_session(path, state)
+            replies = [{"choices": [{"message": {"content": json.dumps(
+                {"plan": f"Try another route {n}", "objective": f"Inspect route {n}", "stop": False})}}]}
+                for n in range(1, 4)]
+
+            def no_progress(run_dir, _objective, _steps, *, quiet, unlimited_budget):
+                current = harp.load_session(run_dir)
+                current["last_delegate_stop"] = "repeated_command"
+                harp.save_session(run_dir, current)
+
+            with patch.object(harp_nim, "request", side_effect=replies) as request, \
+                 patch.object(harp, "delegate", side_effect=no_progress):
+                harp_nim.run(path)
+            self.assertEqual(request.call_count, 3)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[-1]["reason"], "no_progress")
 
     def test_nim_can_run_one_scoped_probe_during_recovery(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -337,6 +522,10 @@ class HarpTests(unittest.TestCase):
     def test_local_reply_accepts_identical_duplicate_json_only(self):
         action = '{"thought":"list share","command":"smbclient -N //target/HR -c ls","done":false}'
         self.assertEqual(harp.json_object(action + "\n" + action)["thought"], "list share")
+        self.assertEqual(harp.json_object("<think>private reasoning</think>\n" + action)["command"],
+                         "smbclient -N //target/HR -c ls")
+        with self.assertRaisesRegex(ValueError, "no final answer"):
+            harp.json_object("<think>unfinished reasoning")
         with self.assertRaises(ValueError):
             harp.json_object(action + '\n{"command":"different"}')
 
@@ -348,8 +537,12 @@ class HarpTests(unittest.TestCase):
             'smbclient -N //10.10.10.5/HR -c "get \'Notice from HR.txt\'"', "10.10.10.5", objective))
         self.assertIsNone(harp.local_command_issue(
             "smbclient -N //10.10.10.5/HR -c 'get \"Notice from HR.txt\"'", "10.10.10.5", objective))
+        self.assertIn("recurse on", harp.local_command_issue(
+            "smbclient -N //10.10.10.5/HR -c 'prompt off; ls -R'", "10.10.10.5", objective))
         self.assertIn("outside", harp.local_command_issue(
             "nxc smb 10.10.10.6 --shares", "10.10.10.5", objective))
+        self.assertIn("root approval", harp.local_command_issue(
+            "sudo apt install example", "10.10.10.5", objective))
 
     def test_null_smb_task_rejects_named_account_and_guessed_password(self):
         target = "10.10.10.5"
@@ -495,6 +688,92 @@ class HarpTests(unittest.TestCase):
         self.assertIs(captured[0]["enable_tools"], False)
         self.assertEqual(captured[0]["enabled_tools"], [])
         self.assertEqual(ledger[0]["prompt_tokens"], 12)
+
+    def test_nim_proxy_uses_separate_model_and_supported_request(self):
+        config = json.loads(Path("harp.example.json").read_text())
+        config["local"].update(provider="nvidia_nim", model="example/proxy-model")
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            loaded = harp.load_config(path)
+        self.assertEqual(loaded["oracle"]["model"], "meta/llama-3.1-8b-instruct")
+        self.assertEqual(loaded["local"]["model"], "example/proxy-model")
+        captured = []
+
+        def fake_open(request, timeout):
+            captured.append(request)
+            reply = {"choices": [{"message": {"content": '{"done":true,"finding":"test"}'}}],
+                     "usage": {"prompt_tokens": 12, "completion_tokens": 3}}
+            return io.BytesIO(json.dumps(reply).encode())
+
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "test-secret"}), \
+             patch.object(harp.urllib.request, "urlopen", side_effect=fake_open):
+            answer = harp.api_chat(loaded["local"], "system", "user", [])
+        body = json.loads(captured[0].data)
+        self.assertEqual(body["model"], "example/proxy-model")
+        self.assertNotIn("enable_tools", body)
+        self.assertNotIn("enabled_tools", body)
+        self.assertEqual(captured[0].full_url, "https://integrate.api.nvidia.com/v1/chat/completions")
+        self.assertIn('"done":true', answer)
+        self.assertGreater(harp.model_context_tokens(loaded["local"]), loaded["local"]["max_input_tokens"])
+        self.assertGreater(harp.count_chat_tokens(loaded["local"], "system", "user"), 0)
+
+    def test_nim_proxy_empty_content_records_reason_and_stops_after_retry(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["local"].update(provider="nvidia_nim",
+                                             model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
+            harp.save_session(path, state)
+
+            def fake_open(request, timeout):
+                body = json.loads(request.data)
+                self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+                reply = {"choices": [{"finish_reason": "length",
+                                      "message": {"content": None, "reasoning_content": "unusable reasoning"}}],
+                         "usage": {"prompt_tokens": 200, "completion_tokens": 1024}}
+                return io.BytesIO(json.dumps(reply).encode())
+
+            with patch.dict(os.environ, {"NVIDIA_API_KEY": "test-secret"}), \
+                 patch.object(harp.urllib.request, "urlopen", side_effect=fake_open) as request, \
+                 patch.object(harp, "terminal_for", return_value=DummyTerminal()):
+                harp.delegate(path, "Review one service", 3, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(saved["last_delegate_stop"], "invalid_replies")
+            self.assertEqual(saved["local_steps"], 0)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            invalid = [event for event in events if event["type"] == "invalid_local_reply"]
+            self.assertEqual(len(invalid), 2)
+            self.assertEqual(invalid[0]["finish_reason"], "length")
+            self.assertEqual(invalid[0]["reasoning_chars"], len("unusable reasoning"))
+
+    def test_nim_proxy_can_enable_reasoning_with_sufficient_reply_budget(self):
+        config = json.loads(Path("harp.example.json").read_text())
+        config["local"].update(provider="nvidia_nim",
+                               model="nvidia/nemotron-3-nano-omni-30b-a3b-reasoning",
+                               enable_thinking=True, max_tokens=8192)
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "config.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            model = harp.load_config(path)["local"]
+            self.assertEqual(harp.chat_body(model, "system", "user")["chat_template_kwargs"],
+                             {"enable_thinking": True})
+            config["local"]["max_tokens"] = 1024
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "at least 4096"):
+                harp.load_config(path)
+
+    def test_web_config_can_select_nim_proxy_without_unsloth_server(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            config_path = Path(temp) / "harp.json"
+            state = object.__new__(harp_web.HARPWebState)
+            state.lock = threading.RLock()
+            with patch.object(harp_web, "CONFIG", config_path):
+                saved = state.save_config({"local": {"provider": "nvidia_nim", "model": "example/proxy"}})
+                self.assertEqual(saved["local"]["provider"], "nvidia_nim")
+                self.assertEqual(saved["local"]["model"], "example/proxy")
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_encrypted_key_round_trip(self):

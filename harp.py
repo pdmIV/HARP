@@ -43,9 +43,12 @@ or {"thought":"brief reason", "done":true, "finding":"evidence-based conclusion"
 When you recover a credential, document excerpt, or other useful artifact, you may add
 "artifact":{"kind":"credential|document|other","title":"short label","value":"exact observed value"}
 to your JSON action. HARP records it only if that value appears in terminal evidence.
-You have a limited step budget. Avoid repeating commands. No interactive programs.
+Avoid repeating commands. No interactive programs. Do not run sudo; use needs_root
+to request approval if a root command is essential.
 Follow the delegated objective exactly. Before using smbclient mget, disable prompts with
 "prompt off;". For remote filenames containing spaces, use double quotes inside smbclient -c.
+For recursive smbclient listings use "recurse on; ls"; smbclient does not use "ls -R".
+The shell starts in the session workspace; do not spend a step changing to it.
 """
 
 
@@ -126,29 +129,48 @@ def load_config(path: Path) -> dict:
         if not 0.1 <= float(cfg["container_cpus"]) <= 8:
             raise ValueError("Invalid container_cpus")
     model = cfg["local"]
-    url = urlparse(model["base_url"])
-    if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.path.rstrip("/") != "/v1":
-        raise ValueError("Local model URL must be a loopback Unsloth /v1 endpoint")
-    if not url.port:
-        raise ValueError("Local model URL needs an explicit port")
+    provider = model.get("provider", "unsloth")
+    if provider not in ("unsloth", "nvidia_nim", "openai"):
+        raise ValueError("Proxy provider must be unsloth, nvidia_nim, or openai")
+    if provider == "unsloth":
+        url = urlparse(model["base_url"])
+        if url.scheme != "http" or url.hostname not in ("127.0.0.1", "localhost") or url.path.rstrip("/") != "/v1":
+            raise ValueError("Proxy model URL must be a loopback Unsloth /v1 endpoint")
+        if not url.port:
+            raise ValueError("Proxy model URL needs an explicit port")
+    elif provider == "openai":
+        import harp_openai
+        harp_openai.validate(model)
+    elif not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(model.get("model", ""))):
+        raise ValueError("Choose a NVIDIA NIM proxy model ID")
     if not 0 <= float(model.get("temperature", 0)) <= 2:
-        raise ValueError("Local temperature must be 0 through 2")
-    if not 128 <= int(model.get("max_tokens", 700)) <= 8192:
-        raise ValueError("Local max_tokens must be 128 through 8192")
+        raise ValueError("Proxy temperature must be 0 through 2")
+    max_proxy_tokens = 32768 if provider in ("nvidia_nim", "openai") else 8192
+    if not 128 <= int(model.get("max_tokens", 700)) <= max_proxy_tokens:
+        raise ValueError(f"Proxy max_tokens must be 128 through {max_proxy_tokens}")
     if not 512 <= int(model.get("max_input_tokens", 6000)) <= 131072:
-        raise ValueError("Local max_input_tokens must be 512 through 131072")
+        raise ValueError("Proxy max_input_tokens must be 512 through 131072")
     if "enable_thinking" in model and not isinstance(model["enable_thinking"], bool):
-        raise ValueError("Local enable_thinking must be true or false")
+        raise ValueError("Proxy enable_thinking must be true or false")
+    if (provider == "nvidia_nim" and model.get("model") == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+            and model.get("enable_thinking") and int(model.get("max_tokens", 700)) < 4096):
+        raise ValueError("NIM proxy reasoning needs at least 4096 reply tokens")
     oracle = cfg.get("oracle", {"provider": "codex"})
-    if oracle.get("provider") not in ("codex", "nvidia_nim"):
-        raise ValueError("Oracle provider must be codex or nvidia_nim")
-    if oracle.get("provider") == "nvidia_nim":
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(oracle.get("model", ""))):
+    if oracle.get("provider") not in ("codex", "nvidia_nim", "openai"):
+        raise ValueError("Oracle provider must be codex, nvidia_nim, or openai")
+    if oracle.get("provider") == "openai":
+        import harp_openai
+        harp_openai.validate(oracle)
+    if oracle.get("provider") in ("nvidia_nim", "openai"):
+        if not isinstance(oracle.get("unlimited_budget", False), bool):
+            raise ValueError("Oracle unlimited_budget must be true or false")
+        if oracle.get("provider") == "nvidia_nim" and not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(oracle.get("model", ""))):
             raise ValueError("Choose a NVIDIA NIM model ID")
         if not 1 <= int(oracle.get("max_cycles", 12)) <= 50:
             raise ValueError("Oracle max_cycles must be 1 through 50")
-        if not 1 <= int(oracle.get("steps_per_cycle", 6)) <= int(cfg["max_steps"]):
-            raise ValueError("Oracle steps_per_cycle must fit the local step limit")
+        if not 1 <= int(oracle.get("steps_per_cycle", 6)) or (
+                not oracle.get("unlimited_budget") and int(oracle.get("steps_per_cycle", 6)) > int(cfg["max_steps"])):
+            raise ValueError("Oracle steps_per_cycle must fit the proxy step limit")
     return cfg
 
 
@@ -485,6 +507,12 @@ def deterministic_smb_probes(terminal: KaliTerminal, target: str, findings: list
 
 
 def local_api_key(model: dict) -> str:
+    if model.get("provider") == "openai":
+        import harp_openai
+        return harp_openai.key()
+    if model.get("provider") == "nvidia_nim":
+        import harp_nim
+        return harp_nim.key()
     key = os.environ.get(model["api_key_env"], "")
     if key:
         return key
@@ -498,6 +526,10 @@ def local_api_key(model: dict) -> str:
 
 
 def model_context_tokens(model: dict) -> int:
+    if model.get("provider") in ("nvidia_nim", "openai"):
+        # NIM does not expose Unsloth's /props endpoint. The configured input cap
+        # is the contract for this provider, with room reserved for the reply.
+        return int(model.get("max_input_tokens", 6000)) + int(model.get("max_tokens", 700)) + 512
     request = urllib.request.Request(
         model["base_url"].rstrip("/") + "/props",
         headers={"Authorization": "Bearer " + local_api_key(model)},
@@ -516,15 +548,28 @@ def chat_body(model: dict, system: str, user: str) -> dict:
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "temperature": float(model.get("temperature", 0)),
         "max_tokens": int(model.get("max_tokens", 700)),
-        "enable_tools": False,
-        "enabled_tools": [],
     }
-    if "enable_thinking" in model:
+    if model.get("provider", "unsloth") == "unsloth":
+        body["enable_tools"] = False
+        body["enabled_tools"] = []
+    elif model.get("provider") == "nvidia_nim":
+        import harp_nim
+        body.update(harp_nim.oracle_model_options(model["model"]))
+        if model["model"] == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning":
+            body["chat_template_kwargs"] = {"enable_thinking": bool(model.get("enable_thinking", False))}
+    if "enable_thinking" in model and model.get("provider", "unsloth") == "unsloth":
         body["chat_template_kwargs"] = {"enable_thinking": bool(model["enable_thinking"])}
     return body
 
 
 def count_chat_tokens(model: dict, system: str, user: str) -> int:
+    if model.get("provider") in ("nvidia_nim", "openai"):
+        # Conservative estimate; hosted NIM models do not offer /chat/count_tokens.
+        body = chat_body(model, system, user)
+        if model.get("provider") == "openai":
+            import harp_openai
+            body = harp_openai.response_body(model, body)
+        return (len(json.dumps(body)) + 2) // 3
     body = chat_body(model, system, user)
     request = urllib.request.Request(
         model["base_url"].rstrip("/") + "/chat/count_tokens",
@@ -557,7 +602,7 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
         output_chars = max(200, output_chars // 2)
         note_count = max(2, note_count // 2)
         command_count = max(5, command_count // 2)
-    raise RuntimeError("Local prompt exceeds the measured context budget even after compaction")
+    raise RuntimeError("Proxy prompt exceeds the context budget even after compaction")
 
 
 def api_chat(model: dict, system: str, user: str, ledger: list[dict]) -> str:
@@ -565,35 +610,56 @@ def api_chat(model: dict, system: str, user: str, ledger: list[dict]) -> str:
     if model["model"].startswith("REPLACE_"):
         raise RuntimeError("Set the model ID in harp.json")
     payload = json.dumps(chat_body(model, system, user)).encode("utf-8")
+    base_url = ("https://integrate.api.nvidia.com/v1" if model.get("provider") == "nvidia_nim"
+                else model.get("base_url", "https://api.openai.com/v1").rstrip("/"))
     request = urllib.request.Request(
-        model["base_url"].rstrip("/") + "/chat/completions",
+        base_url + "/chat/completions",
         data=payload,
         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
         method="POST",
     )
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=240) as response:
-            data = json.load(response)
+        if model.get("provider") == "openai":
+            import harp_openai
+            data = harp_openai.chat(model, chat_body(model, system, user))
+        else:
+            with urllib.request.urlopen(request, timeout=240) as response:
+                data = json.load(response)
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"Model API returned HTTP {error.code}: {error.read(500)!r}") from error
     usage = data.get("usage") or {}
     prompt_tokens = int(usage.get("prompt_tokens") or 0)
     completion_tokens = int(usage.get("completion_tokens") or 0)
-    cost = (prompt_tokens * float(model.get("input_usd_per_million", 0))
-            + completion_tokens * float(model.get("output_usd_per_million", 0))) / 1_000_000
+    cost = (prompt_tokens * float(model.get("input_usd_per_million") or 0)
+            + completion_tokens * float(model.get("output_usd_per_million") or 0)) / 1_000_000
+    cache_metrics = {}
+    if model.get("provider") == "openai":
+        import harp_openai
+        cache_metrics = harp_openai.usage_metrics(model, usage)
+        cost = cache_metrics["estimated_usd"]
+    choice = data["choices"][0]
+    message = choice.get("message") or {}
+    content = message.get("content")
     ledger.append({"model": model["model"], "prompt_tokens": prompt_tokens,
                    "completion_tokens": completion_tokens, "estimated_usd": cost,
-                   "usage_reported": bool(usage),
+                   **cache_metrics,
+                   "usage_reported": bool(usage), "finish_reason": choice.get("finish_reason"),
+                   "reasoning_chars": len(message.get("reasoning_content") or ""),
+                   "content_chars": len(content) if isinstance(content, str) else 0,
                    "seconds": round(time.monotonic() - started, 2)})
-    content = data["choices"][0]["message"]["content"]
-    if not isinstance(content, str):
-        raise RuntimeError("Model returned no text content")
-    return content
+    # Empty text is an invalid proxy reply, eligible for the bounded retry.
+    # Reasoning content is never interpreted as an action.
+    return content if isinstance(content, str) else ""
 
 
 def json_object(text: str) -> dict:
     text = text.strip()
+    if text.startswith("<think>"):
+        closing = text.find("</think>")
+        if closing < 0:
+            raise ValueError("Reasoning reply has no final answer")
+        text = text[closing + len("</think>"):].strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
     decoder = json.JSONDecoder()
@@ -614,12 +680,18 @@ def null_auth_objective(objective: str) -> bool:
 
 def local_command_issue(command: str, target: str, objective: str,
                         observations: list[dict] | None = None) -> str | None:
+    if len(command) > 1000:
+        return "Command is too long; return one shorter command."
+    if any(ord(c) < 32 and c != "\t" for c in command):
+        return "Command contains a control character; return one shell command on a single line."
     try:
         parts = shlex.split(command)
     except ValueError:
         return "Shell quoting is incomplete; return a corrected single command."
     if not parts:
         return "Command is empty."
+    if "sudo" in parts:
+        return "Do not invoke sudo in a proxy command; request root approval with needs_root if essential."
     foreign_ips = {ip for ip in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", command)
                    if ip != target and ip not in ("127.0.0.1", "0.0.0.0")}
     if foreign_ips:
@@ -657,6 +729,8 @@ def local_command_issue(command: str, target: str, objective: str,
             if part != "-c":
                 continue
             smb_commands = parts[index + 1]
+            if re.search(r"(?:^|;)\s*ls\s+-[A-Za-z]*[Rr]\b", smb_commands):
+                return "smbclient does not support ls -R; use 'recurse on; ls' instead."
             if re.search(r"(?:^|;)\s*mget\b", smb_commands, re.I) and not re.search(
                     r"(?:^|;)\s*prompt\s+off\b", smb_commands, re.I):
                 return "smbclient mget may prompt; add 'prompt off;' before mget."
@@ -679,9 +753,21 @@ def append_note(run_dir: Path, heading: str, body: str) -> None:
 
 def save_session(run_dir: Path, session: dict) -> None:
     path = run_dir / "session.json"
-    temporary = run_dir / "session.json.tmp"
-    temporary.write_text(json.dumps(session, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    temporary = run_dir / f"session.json.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_text(json.dumps(session, indent=2), encoding="utf-8")
+        # Windows readers and scanners can briefly hold the destination open.
+        # Give the atomic replacement a bounded retry without losing this update.
+        for attempt in range(20):
+            try:
+                temporary.replace(path)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def load_session(run_dir: Path) -> dict:
@@ -833,7 +919,7 @@ def terminal_for(session: dict) -> KaliTerminal:
 def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     session = load_session(run_dir)
     if session.get("mode", "hybrid") == "local-only":
-        raise RuntimeError("Direct oracle terminal commands are disabled in local-only mode")
+        raise RuntimeError("Direct oracle terminal commands are disabled in proxy-only mode")
     terminal = terminal_for(session)
     terminal.event_dir = run_dir
     terminal.print_stdout = not quiet
@@ -854,7 +940,7 @@ def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     """Called only after an external human approval of this exact tool invocation."""
     session = load_session(run_dir)
     if session.get("mode", "hybrid") == "local-only" and command != session.get("pending_root_command"):
-        raise RuntimeError("In local-only mode, approve only the local model's pending root command")
+        raise RuntimeError("In proxy-only mode, approve only the proxy model's pending root command")
     terminal = terminal_for(session)
     terminal.event_dir = run_dir
     terminal.print_stdout = not quiet
@@ -875,17 +961,17 @@ def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
 
 
 def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet: bool = False,
-             unbridled: bool = False) -> None:
+             unbridled: bool = False, unlimited_budget: bool = False) -> None:
     session = load_session(run_dir)
     if session.get("mode", "hybrid") == "frontier-only":
-        raise RuntimeError("Local delegation is disabled in frontier-only mode")
+        raise RuntimeError("Proxy delegation is disabled in frontier-only mode")
     terminal = terminal_for(session)
     terminal.event_dir = run_dir
     terminal.print_stdout = not quiet
     cfg = session["config"]
     limit = int(cfg["max_steps"])
     budget = limit if budget is None else budget
-    if budget < 1 or (not unbridled and budget > limit):
+    if budget < 1 or (not (unbridled or unlimited_budget) and budget > limit):
         raise ValueError(f"Delegation budget must be 1 through {limit} steps")
     context_window = model_context_tokens(cfg["local"])
     prompt_budget = min(int(cfg["local"].get("max_input_tokens", 6000)),
@@ -897,7 +983,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     session["oracle_actions"] += 1
     starting_model_calls = len(session["local_calls"])
     append_event(run_dir, {"type": "delegation", "objective": objective,
-                           "budget": None if unbridled else budget, "unbridled": unbridled})
+                           "budget": None if unbridled or unlimited_budget else budget,
+                           "unbridled": unbridled, "unlimited_budget": unlimited_budget})
     stop_file = run_dir / ".stop_local"
     session_stop_file = run_dir / ".stop_session"
     if session_stop_file.is_file():
@@ -915,11 +1002,11 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     memory_results: list[dict] = []
     stop_reason = "step_budget"
     try:
-        for index in itertools.count() if unbridled else range(budget):
+        for index in itertools.count() if unbridled or unlimited_budget else range(budget):
             if stop_file.is_file() or session_stop_file.is_file():
                 stop_reason = "operator_stop"
                 break
-            if not unbridled and len(session["local_calls"]) - starting_model_calls >= int(cfg.get("max_model_calls", 30)):
+            if not (unbridled or unlimited_budget) and len(session["local_calls"]) - starting_model_calls >= int(cfg.get("max_model_calls", 30)):
                 stop_reason = "model_call_budget"
                 break
             step = session["local_steps"] + 1
@@ -929,7 +1016,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "http_probes": session.get("http_probes", []),
                 "smb_probes": session.get("smb_probes", []),
                 "last_command_feedback": validation_feedback,
-                "step": step, "remaining": None if unbridled else budget - index,
+                "step": step, "remaining": None if unbridled or unlimited_budget else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
                 "memory_search_results": memory_results,
                 "recent_terminal_results": [
@@ -946,12 +1033,20 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             if compacted:
                 append_event(run_dir, {"type": "context_compaction", "step": step,
                                        "prompt_tokens": prompt_tokens, "budget_tokens": prompt_budget})
-            reply = api_chat(action_model, prompt, fitted_user, session["local_calls"])
+            try:
+                reply = api_chat(action_model, prompt, fitted_user, session["local_calls"])
+            except Exception:
+                stop_reason = "proxy_api_error"
+                raise
             try:
                 action = json_object(reply)
             except (json.JSONDecodeError, ValueError):
                 invalid += 1
-                append_event(run_dir, {"type": "invalid_local_reply", "text": reply[:2000]})
+                call = session["local_calls"][-1]
+                excerpt = "[reasoning reply omitted]" if reply.lstrip().startswith("<think>") else reply[:2000]
+                append_event(run_dir, {"type": "invalid_local_reply", "text": excerpt,
+                                       "finish_reason": call.get("finish_reason"),
+                                       "reasoning_chars": call.get("reasoning_chars", 0)})
                 if invalid == 1 and not structured_mode:
                     structured_mode = True
                     append_event(run_dir, {"type": "local_response_mode_changed",
@@ -971,7 +1066,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             note = action.get("memory_note")
             if isinstance(note, str) and note.strip():
                 session["memory_notes"].append(note.strip()[:500])
-                append_note(run_dir, f"Local memory at step {step}", note.strip()[:500])
+                append_note(run_dir, f"Proxy memory at step {step}", note.strip()[:500])
             if action.get("done") is True:
                 stop_reason = "local_done"
                 session["local_conclusion"] = str(action.get("finding", ""))[:4000]
@@ -1009,6 +1104,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     stop_reason = "missing_command"
                     break
                 continue
+            command = command.strip()
             normalized = re.sub(r"\s+", " ", command.strip().lower())
             if normalized in seen and not unbridled:
                 stop_reason = "repeated_command"
@@ -1016,11 +1112,15 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             issue = local_command_issue(command, session["target"], objective,
                                         session["observations"])
             if issue is None:
-                syntax = terminal.run("sh -n -c " + shlex.quote(command), 5, live=False)
-                append_event(run_dir, {"type": "local_command_check", "step": step,
-                                       "result": syntax})
-                if syntax["exit_code"] != 0:
-                    issue = "Shell syntax check failed: " + syntax["output"][:500]
+                syntax_command = "sh -n -c " + shlex.quote(command)
+                if len(syntax_command) > 1000:
+                    issue = "Command is too long for the shell syntax check; shorten it."
+                else:
+                    syntax = terminal.run(syntax_command, 5, live=False)
+                    append_event(run_dir, {"type": "local_command_check", "step": step,
+                                           "result": syntax})
+                    if syntax["exit_code"] != 0:
+                        issue = "Shell syntax check failed: " + syntax["output"][:500]
             if issue:
                 validation_failures += 1
                 validation_feedback = issue
@@ -1034,14 +1134,14 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             if not unbridled:
                 seen.add(normalized)
             if not quiet:
-                print(f"\n[local step {step}] $ {command}")
+                print(f"\n[proxy step {step}] $ {command}")
             result = terminal.run(command, int(cfg["command_timeout_seconds"]))
             result["resource_sample"] = terminal.stats()
             session["local_steps"] += 1
             session["observations"].append({"origin": "local", **result})
             append_event(run_dir, {"type": "local_terminal", "step": step, "result": result})
             harp_artifacts.capture_flags_from_result(run_dir, result)
-            append_note(run_dir, f"Local step {step}: {command[:80]}", result["output"][:8000])
+            append_note(run_dir, f"Proxy step {step}: {command[:80]}", result["output"][:8000])
             digest = hashlib.sha256(result["output"].encode()).hexdigest()
             repeated_output = repeated_output + 1 if digest == previous_hash else 0
             previous_hash = digest
@@ -1058,6 +1158,10 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             if failures >= 3 and not unbridled:
                 stop_reason = "three_unproductive_commands"
                 break
+    except Exception:
+        if stop_reason == "step_budget":
+            stop_reason = "delegation_error"
+        raise
     finally:
         stop_file.unlink(missing_ok=True)
         session["last_delegate_stop"] = stop_reason
@@ -1145,7 +1249,19 @@ def summarize(session: dict) -> dict:
         "local_input_tokens": sum(x["prompt_tokens"] for x in calls),
         "local_output_tokens": sum(x["completion_tokens"] for x in calls),
         "local_usage_complete": all(x.get("usage_reported", False) for x in calls) if calls else None,
-        "local_estimated_usd": round(sum(x["estimated_usd"] for x in calls), 6),
+        "local_estimated_usd": (round(sum(x.get("estimated_usd", 0) for x in calls), 6)
+                                if all(x.get("estimated_usd") is not None for x in calls) else None),
+        "local_cached_input_tokens": sum(x.get("cached_input_tokens", 0) for x in calls),
+        "local_cache_write_tokens": sum(x.get("cache_write_tokens", 0) for x in calls),
+        "local_uncached_input_tokens": sum(x.get("uncached_input_tokens", x["prompt_tokens"]) for x in calls),
+        "oracle_model_calls": len(session.get("oracle_calls", [])),
+        "oracle_input_tokens": sum(x.get("prompt_tokens", 0) for x in session.get("oracle_calls", [])),
+        "oracle_output_tokens": sum(x.get("completion_tokens", 0) for x in session.get("oracle_calls", [])),
+        "oracle_cached_input_tokens": sum(x.get("cached_input_tokens", 0) for x in session.get("oracle_calls", [])),
+        "oracle_cache_write_tokens": sum(x.get("cache_write_tokens", 0) for x in session.get("oracle_calls", [])),
+        "oracle_estimated_usd": (round(sum(x["estimated_usd"] for x in session.get("oracle_calls", [])), 6)
+                                 if session.get("oracle_calls") and all(x.get("estimated_usd") is not None
+                                     for x in session["oracle_calls"]) else None),
         "local_model_seconds": round(sum(x["seconds"] for x in calls), 2),
         "model_context_tokens": session.get("model_context_tokens"),
         "context_budget_tokens": session.get("context_budget_tokens"),

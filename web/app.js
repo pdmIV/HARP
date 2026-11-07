@@ -14,6 +14,8 @@
   let sessions = [];
   let cursor = 0;
   let modelCursor = 0;
+  let lastModel = null;
+  let budgetSessionId = "";
   let currentFilter = "all";
   let artifactSignature = "";
   let configLoaded = false;
@@ -85,7 +87,7 @@
     currentPage = name;
     document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.dataset.panel === name));
     document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === name));
-    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", model: "Local model", settings: "Configuration"})[name];
+    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", model: "Proxy model", settings: "Configuration"})[name];
     if (name === "verbose") renderVerbose();
     if (name === "flags") acknowledgeFlags();
     if (name === "artifacts") renderArtifacts(true);
@@ -143,14 +145,24 @@
   }
 
   function renderModel(model) {
+    lastModel = model;
     const running = !!model.listening;
-    $("serverStatus").className = "status-pill" + (running ? "" : " muted");
-    $("serverStatus").replaceChildren(el("i"), document.createTextNode(running ? ` Model online :${model.port}` : " Model offline"));
+    $("temperature").disabled = $("proxyProvider").value === "openai";
+    $("enableThinking").disabled = $("proxyProvider").value === "openai";
+    const nimProxy = $("proxyProvider").value !== "unsloth";
+    const hostedLabel = $("proxyProvider").value === "openai" ? "OpenAI" : "NIM";
+    document.querySelectorAll(".openai-proxy").forEach(x => x.classList.toggle("hidden", $("proxyProvider").value !== "openai"));
+    document.querySelectorAll(".openai-oracle").forEach(x => x.classList.toggle("hidden", $("oracleProvider").value !== "openai"));
+    $("unslothSettings").classList.toggle("hidden", nimProxy);
+    $("unslothLog").classList.toggle("hidden", nimProxy);
+    $("proxyNimModel").disabled = !nimProxy;
+    $("serverStatus").className = "status-pill" + (running && !nimProxy ? "" : " muted");
+    $("serverStatus").replaceChildren(el("i"), document.createTextNode(nimProxy ? ` ${hostedLabel} proxy selected` : running ? ` Unsloth online :${model.port}` : " Unsloth offline"));
     $("modelHealth").className = "status-pill" + (running ? "" : " muted");
     $("modelHealth").textContent = running ? "Listening" : "Offline";
-    $("connectionDot").classList.toggle("online", running);
-    $("connectionTitle").textContent = running ? "Local model online" : "Command center online";
-    $("connectionDetail").textContent = running ? `127.0.0.1:${model.port}` : "Awaiting Unsloth";
+    $("connectionDot").classList.toggle("online", running && !nimProxy);
+    $("connectionTitle").textContent = nimProxy ? `${hostedLabel} proxy selected` : running ? "Unsloth proxy online" : "Command center online";
+    $("connectionDetail").textContent = nimProxy ? "Hosted model" : running ? `127.0.0.1:${model.port}` : "Awaiting Unsloth";
     const logs = model.logs || [];
     if (logs.length) {
       const node = $("modelLog");
@@ -177,7 +189,7 @@
         select.type = "button";
         select.addEventListener("click", async () => {
           $("oracleProvider").value = "nvidia_nim";
-          $("oracleModel").value = item.model;
+          setModelOptions("oracleModel", [item.model], item.model);
           try { await saveConfig(false); toast(`Oracle model saved: ${item.model}`); }
           catch (error) { toast(error.message, true); }
         });
@@ -191,9 +203,9 @@
     if (configLoaded) return;
     const studio = cfg.studio || {};
     const local = cfg.local || {};
-    const port = new URL(local.base_url).port || "8888";
+    const port = new URL(local.base_url || "http://127.0.0.1:8888/v1").port || "8888";
     const values = {
-      studioModel: studio.model || local.model || "", studioPort: studio.port || port,
+      studioModel: studio.model || (local.provider && local.provider !== "unsloth" ? "" : local.model) || "", studioPort: studio.port || port,
       studioContext: studio.context || "32768", cacheK: studio.cache_k || "bf16",
       cacheV: studio.cache_v || "bf16", studioParallel: studio.parallel || "1",
       maxInput: local.max_input_tokens || "24000", maxOutput: local.max_tokens || "1024",
@@ -208,13 +220,34 @@
     };
     for (const [id, value] of Object.entries(values)) $(id).value = value;
     $("enableThinking").checked = !!local.enable_thinking;
+    $("proxyProvider").value = local.provider || "unsloth";
+    setModelOptions("proxyNimModel", [], local.provider !== "unsloth" ? local.model || "" : "");
+    $("proxyOpenaiUrl").value = local.provider === "openai" ? local.base_url || "https://api.openai.com/v1" : "https://api.openai.com/v1";
+    $("proxyAccess").value = local.access_program || "daybreak_blue";
     const oracle = cfg.oracle || {};
     $("oracleProvider").value = oracle.provider || "codex";
-    $("oracleModel").value = oracle.model || "";
+    setModelOptions("oracleModel", [], oracle.model || "");
+    $("oracleOpenaiUrl").value = oracle.base_url || "https://api.openai.com/v1";
+    $("oracleAccess").value = oracle.access_program || "daybreak_blue";
     $("benchmarkCandidates").value = oracle.model || "";
     $("oracleCycles").value = oracle.max_cycles || 12;
     $("oracleSteps").value = oracle.steps_per_cycle || 6;
+    $("oracleUnlimited").checked = oracle.unlimited_budget === true;
+    for (const [role, model] of [["proxy", local], ["oracle", oracle]]) {
+      $(role + "CacheTtl").value = model.prompt_cache_ttl || "30m";
+      for (const [suffix, field] of [["InputPrice", "input_usd_per_million"], ["CachedPrice", "cached_input_usd_per_million"], ["WritePrice", "cache_write_usd_per_million"], ["OutputPrice", "output_usd_per_million"]])
+        $(role + suffix).value = model[field] ?? "";
+    }
     configLoaded = true;
+  }
+
+  function cacheConfig(role) {
+    const settings = {prompt_cache_ttl: $(role + "CacheTtl").value};
+    for (const [suffix, field] of [["InputPrice", "input_usd_per_million"], ["CachedPrice", "cached_input_usd_per_million"], ["WritePrice", "cache_write_usd_per_million"], ["OutputPrice", "output_usd_per_million"]]) {
+      const value = $(role + suffix).value.trim();
+      settings[field] = value === "" ? null : Number(value);
+    }
+    return settings;
   }
 
   function configPayload() {
@@ -222,7 +255,10 @@
       studio: {model: $("studioModel").value.trim(), port: Number($("studioPort").value),
                context: Number($("studioContext").value), cache_k: $("cacheK").value,
                cache_v: $("cacheV").value, parallel: Number($("studioParallel").value)},
-      local: {max_input_tokens: Number($("maxInput").value), max_tokens: Number($("maxOutput").value),
+      local: {provider: $("proxyProvider").value, model: $("proxyNimModel").value.trim(),
+              base_url: $("proxyOpenaiUrl").value.trim(), access_program: $("proxyAccess").value,
+              ...($("proxyProvider").value === "openai" ? cacheConfig("proxy") : {}),
+              max_input_tokens: Number($("maxInput").value), max_tokens: Number($("maxOutput").value),
               temperature: Number($("temperature").value), enable_thinking: $("enableThinking").checked},
       target: $("targetInput").value.trim(), runtime: $("runtimeSelect").value,
       wsl_distro: $("wslDistro").value.trim(), wsl_user: $("wslUser").value.trim(),
@@ -232,7 +268,10 @@
       container_cpus: Number($("containerCpus").value), max_steps: Number($("maxSteps").value),
       command_timeout_seconds: Number($("commandTimeout").value),
       oracle: {provider: $("oracleProvider").value, model: $("oracleModel").value.trim(),
-               max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value), max_tokens: 1024}
+               base_url: $("oracleOpenaiUrl").value.trim(), access_program: $("oracleAccess").value,
+               ...($("oracleProvider").value === "openai" ? cacheConfig("oracle") : {}),
+               max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value),
+               unlimited_budget: $("oracleUnlimited").checked, max_tokens: $("oracleProvider").value === "openai" ? 4096 : 1024}
     };
   }
 
@@ -269,17 +308,18 @@
     if (kind === "recon_failed") return ["Reconnaissance failed", event.error || "Startup failed", ""];
     if (kind === "recon_cancelled") return ["Reconnaissance stopped", "Stopped after the current command", ""];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];
-    if (kind === "delegation") return ["Task delegated", `${event.objective} · ${event.unbridled ? "unbridled" : `up to ${event.budget} steps`}`, ""];
+    if (kind === "delegation") return ["Task delegated", `${event.objective} · ${event.unbridled ? "unbridled" : event.unlimited_budget ? "no step budget" : `up to ${event.budget} steps`}`, ""];
+    if (kind === "oracle_budget_changed") return ["Oracle budget changed", event.unlimited_budget ? "Cycle and proxy step/model-call budgets removed" : "Configured budgets restored", ""];
     if (kind === "local_action") {
       const action = event.action || {};
       const command = action.command || action.finding || action.memory_query || "";
       const artifact = action.artifact ? `\nArtifact: ${action.artifact.title} — ${action.artifact.value}` : "";
-      return [`Local worker · step ${event.step}`, action.thought || "Action selected", command + artifact];
+      return [`Proxy model · step ${event.step}`, action.thought || "Action selected", command + artifact];
     }
     if (kind === "terminal_output") return ["Terminal output", event.command || "", event.text || ""];
     if (kind === "local_terminal" || kind === "oracle_terminal" || kind === "approved_root_terminal") {
       const result = event.result || {};
-      return [kind === "local_terminal" ? "Local command" : kind === "oracle_terminal" ? "Oracle command" : "Approved root command",
+      return [kind === "local_terminal" ? "Proxy command" : kind === "oracle_terminal" ? "Oracle command" : "Approved root command",
               `Exit ${result.exit_code} · ${result.seconds || 0}s · ${result.command || ""}`, result.output || "(no output)"];
     }
     if (kind === "port_discovery") return ["Port sweep complete", `${(event.findings || []).length} open TCP ports · exit ${event.result?.exit_code}`, event.result?.command || ""];
@@ -290,17 +330,17 @@
     if (kind === "deterministic_smb_probe") return ["SMB probe", `${event.probe?.option || ""} · exit ${event.probe?.exit_code}`, event.probe?.output_excerpt || ""];
     if (kind === "deterministic_recon_retry") return ["Version scan retry", `${(event.findings || []).length} open services identified`, event.result?.command || ""];
     if (kind === "recon_fallback") return ["Port sweep retained", "Version scan was filtered; using the open ports from the initial sweep", ""];
-    if (kind === "oracle_nim_error") return ["NIM oracle error", event.error || "The oracle request failed", ""];
-    if (kind === "oracle_nim_stopped") return ["NIM oracle stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, event.detail || ""];
-    if (kind === "oracle_nim_usage") return ["NIM response", `${event.input_tokens ?? "?"} input · ${event.output_tokens ?? "?"} output tokens · ${event.seconds ?? "?"}s`, ""];
-    if (kind === "oracle_nim_request") return ["NIM planning", `Request sent to ${event.model} · cycle ${event.cycle}`, ""];
+    if (kind === "oracle_nim_error") return ["Oracle run error", event.error || "The model request failed", ""];
+    if (kind === "oracle_nim_stopped") return ["Oracle stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, event.detail || ""];
+    if (kind === "oracle_nim_usage") return ["Oracle response", `${event.input_tokens ?? "?"} input / ${event.output_tokens ?? "?"} output tokens / ${event.cached_input_tokens ?? 0} cached / ${event.cache_write_tokens ?? 0} cache writes / ${event.seconds ?? "?"}s`, event.cost_basis ? (event.estimated_usd == null ? "Cost unknown: configure token prices" : `Estimated $${event.estimated_usd.toFixed(6)} before account allowances`) : ""];
+    if (kind === "oracle_nim_request") return ["Oracle planning", `Request sent to ${event.model} · cycle ${event.cycle}`, ""];
     if (kind === "oracle_nim_recovery") return ["Oracle reviewing failure", `Worker stopped: ${(event.reason || "unknown").replaceAll("_", " ")} · correction ${event.attempt}`, ""];
     if (kind === "oracle_nim_probe") return ["Oracle probe", "One scoped, read-only command", event.command || ""];
-    if (kind === "oracle_nim_resumed") return ["NIM oracle resumed", "Continuing this session's plan and cycle budget", ""];
+    if (kind === "oracle_nim_resumed") return ["Oracle resumed", "Continuing this session's plan and cycle budget", ""];
     if (kind === "oracle_nim_probe_rejected") return ["Oracle probe needs correction", event.reason || "Probe check failed", `Correction ${event.attempt}`];
     if (kind === "local_command_rejected") return ["Command check rejected", event.reason || "Invalid command", event.command || ""];
     if (kind === "local_command_check") return ["Shell syntax checked", `Exit ${event.result?.exit_code ?? "?"}`, event.result?.exit_code ? event.result?.output || "" : ""];
-    if (kind === "local_response_mode_changed") return ["Local reply retry", "Retrying with thinking disabled and lower temperature", ""];
+    if (kind === "local_response_mode_changed") return ["Proxy reply retry", "Retrying a malformed reply with stricter settings", ""];
     if (kind === "delegation_stopped") return ["Delegation stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, ""];
     if (kind === "artifact_recorded") return [kind === "artifact_recorded" && event.kind === "flag" ? "Flag captured" : "Artifact recorded", `${event.title} · ${event.kind}`, ""];
     if (kind === "verified_success") return ["Success verified", event.evidence || "", ""];
@@ -356,6 +396,7 @@
     const nearBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 80;
     for (const event of events) {
       if (event.type === "terminal_output") continue;
+      if (event.type === "local_command_check" && event.result?.exit_code === 0) continue;
       const category = eventCategory(event);
       const [title, description, command] = eventInfo(event);
       const row = el("div", `event ${category}`);
@@ -385,6 +426,8 @@
       $("metricModel").textContent = "0";
       $("metricTokens").textContent = "0";
       $("metricFlags").textContent = "0 / 2";
+      $("cacheUsage").textContent = "No API usage recorded.";
+      $("apiCost").textContent = "Estimates require configured token prices.";
       $("metricOutcome").textContent = startPending ? "Starting" : "—";
       $("metricOutcomeNote").textContent = startPending ? "Preparing reconnaissance" : "Awaiting evidence";
       $("reconProgress").classList.toggle("hidden", !startPending);
@@ -395,6 +438,7 @@
       $("verboseStage").textContent = startPending ? "Starting reconnaissance" : "Start a session to see live details.";
       for (const id of ["delegateButton", "stopLocal", "runManual", "markSuccess", "finishSession", "resumeOracle"]) $(id).disabled = true;
       $("resumeOracle").classList.add("hidden");
+      $("unlimitedBudgetRow").classList.add("hidden");
       renderElapsed();
       return;
     }
@@ -405,6 +449,10 @@
     $("metricTools").textContent = sum.terminal_tool_calls ?? "0";
     $("metricModel").textContent = sum.local_model_calls ?? "0";
     $("metricTokens").textContent = ((sum.local_input_tokens || 0) + (sum.local_output_tokens || 0)).toLocaleString();
+    const cacheText = (name, input, cached, writes) => `${name}: ${(cached || 0).toLocaleString()} cached / ${(input || 0).toLocaleString()} input (${input ? (100 * (cached || 0) / input).toFixed(1) : "0"}% hit), ${(writes || 0).toLocaleString()} cache writes`;
+    $("cacheUsage").textContent = cacheText("Proxy", sum.local_input_tokens, sum.local_cached_input_tokens, sum.local_cache_write_tokens) + " | " + cacheText("Oracle", sum.oracle_input_tokens, sum.oracle_cached_input_tokens, sum.oracle_cache_write_tokens);
+    const costText = (value, calls) => !calls ? "no calls" : value == null ? "unknown prices" : `$${value.toFixed(6)}`;
+    $("apiCost").textContent = `Estimated before account allowances: Proxy ${costText(sum.local_estimated_usd, sum.local_model_calls)} | Oracle ${costText(sum.oracle_estimated_usd, sum.oracle_model_calls)}`;
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
     $("metricFlags").textContent = `${flagCount} / 2`;
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.success === "no" ? "No" : "Pending";
@@ -420,12 +468,16 @@
     $("verboseStage").textContent = sum.status === "recon" ? `Reconnaissance: ${sum.recon_stage || "Preparing Kali"}` : `Session ${sum.status}`;
     const active = sum.status === "active";
     for (const id of ["delegateButton", "stopLocal", "runManual", "markSuccess", "finishSession"]) $(id).disabled = !active;
-    const canResumeOracle = active && selected.oracle_provider === "nvidia_nim" && !!selected.activity.oracle_stopped;
+    const canResumeOracle = active && ["nvidia_nim", "openai"].includes(selected.oracle_provider) && !!selected.activity.oracle_stopped;
     $("resumeOracle").classList.toggle("hidden", !canResumeOracle);
     $("resumeOracle").disabled = !canResumeOracle;
     if (document.activeElement !== $("stepsInput")) $("stepsInput").value = selected.delegation_limit || 20;
     if (sum.mode === "local-only") $("runManual").disabled = true;
     if (sum.mode === "frontier-only") $("delegateButton").disabled = true;
+    $("unlimitedBudgetRow").classList.toggle("hidden", !["nvidia_nim", "openai"].includes(selected.oracle_provider));
+    if (budgetSessionId !== selected.id) { $("unlimitedBudgetInput").checked = selected.oracle_unlimited_budget === true; budgetSessionId = selected.id; }
+    $("oracleIdentity").textContent = selected.oracle_provider === "codex" ? "Oracle / Codex" : `Oracle / ${selected.oracle_provider} / ${selected.oracle_model}`;
+    $("proxyIdentity").textContent = `Proxy / ${selected.proxy_provider} / ${selected.proxy_model}`;
     $("oraclePlan").textContent = selected.activity.oracle_plan || "The oracle will publish a plan after reviewing reconnaissance.";
     const local = selected.activity.local_action;
     $("localAction").textContent = local ? `${local.thought || "Working"}${local.command ? " · " + local.command : ""}${sum.last_delegate_stop ? " · Stopped: " + sum.last_delegate_stop.replaceAll("_", " ") : ""}` : "Awaiting a delegated objective.";
@@ -434,7 +486,7 @@
     const approval = selected.pending_approval;
     $("approvalCard").classList.toggle("hidden", !approval);
     if (approval) {
-      $("approvalDescription").textContent = `${approval.source === "local" ? "Local worker" : "Oracle"} requested a command requiring root privileges.`;
+      $("approvalDescription").textContent = `${approval.source === "local" ? "Proxy model" : "Oracle"} requested a command requiring root privileges.`;
       $("approvalCommand").textContent = approval.command;
     }
     if (document.activeElement !== $("objectiveInput") && !$("objectiveInput").value.trim()) $("objectiveInput").value = selected.objective || "";
@@ -660,6 +712,15 @@
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
   $("artifactFilter").addEventListener("change", () => renderArtifacts(true));
   $("saveModel").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
+  $("saveProxy").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
+  $("findProxyModels").addEventListener("click", () => loadModels("proxy"));
+  $("proxyProvider").addEventListener("change", () => { setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
+  $("oracleProvider").addEventListener("change", () => { setModelOptions("oracleModel", [], ""); renderModel({...lastModel, logs: []}); if ($("oracleProvider").value !== "codex") loadModels("oracle"); });
+  $("enableThinking").addEventListener("change", () => {
+    if ($("enableThinking").checked && $("proxyProvider").value === "nvidia_nim" &&
+        $("proxyNimModel").value.trim() === "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" &&
+        Number($("maxOutput").value) < 8192) $("maxOutput").value = 8192;
+  });
   $("htbProfile").addEventListener("click", () => {
     $("networkInput").value = "harp_vpn";
     $("networkPolicy").value = "vpn_bridge";
@@ -672,11 +733,36 @@
     try { const result = await post("/api/oracle/key", {key: $("nimKey").value.trim()}); $("nimKey").value = ""; toast(result.message); }
     catch (error) { toast(error.message, true); }
   });
-  $("findNimModels").addEventListener("click", async () => {
+  function setModelOptions(id, models, selected) {
+    const values = [...new Set([selected, ...models].filter(Boolean))];
+    $(id).replaceChildren(new Option("Choose a model", ""), ...values.map(value => new Option(value, value)));
+    $(id).value = selected || "";
+  }
+  async function loadModels(role) {
+    const provider = $(role === "proxy" ? "proxyProvider" : "oracleProvider").value;
+    if (!["openai", "nvidia_nim"].includes(provider)) return;
+    const id = role === "proxy" ? "proxyNimModel" : "oracleModel";
+    const base = $(role === "proxy" ? "proxyOpenaiUrl" : "oracleOpenaiUrl").value.trim();
     try {
-      const result = await api("/api/oracle/models");
-      $("nimModelList").replaceChildren(...result.models.map(id => { const option = document.createElement("option"); option.value = id; return option; }));
-      toast(`${result.models.length} model IDs available; type to search the list`);
+      const result = await api(`/api/oracle/models?provider=${provider}&base_url=${encodeURIComponent(base)}`);
+      if ($(role === "proxy" ? "proxyProvider" : "oracleProvider").value !== provider || $(role === "proxy" ? "proxyOpenaiUrl" : "oracleOpenaiUrl").value.trim() !== base) return;
+      setModelOptions(id, result.models, $(id).value);
+      toast(`${result.models.length} models loaded`);
+    } catch (error) { toast(error.message, true); }
+  }
+  $("findNimModels").addEventListener("click", () => loadModels("oracle"));
+  $("openaiKeyFile").addEventListener("change", async () => {
+    const file = $("openaiKeyFile").files[0];
+    if (!file) return;
+    if (file.size > 4096) { toast("Choose a text file containing only the API key", true); return; }
+    $("openaiKey").value = (await file.text()).trim();
+  });
+  $("saveOpenaiKey").addEventListener("click", async () => {
+    try {
+      const result = await post("/api/openai/key", {key: $("openaiKey").value.trim()});
+      $("openaiKey").value = ""; $("openaiKeyFile").value = ""; toast(result.message);
+      if ($("oracleProvider").value === "openai") loadModels("oracle");
+      if ($("proxyProvider").value === "openai") loadModels("proxy");
     } catch (error) { toast(error.message, true); }
   });
   $("runBenchmark").addEventListener("click", async () => {
@@ -713,12 +799,12 @@
   });
   $("delegateButton").addEventListener("click", () => {
     const objective = $("objectiveInput").value.trim();
-    if (!objective) { toast("Enter a local objective", true); return; }
+    if (!objective) { toast("Enter a proxy objective", true); return; }
     if (selected && objective !== selected.objective && !confirm("This changes the predeclared objective and will count as human tactical help. Continue?")) return;
     sessionAction("delegate", {objective, steps: Number($("stepsInput").value), unbridled: $("unbridledInput").checked});
   });
   $("stopLocal").addEventListener("click", () => sessionAction("stop"));
-  $("resumeOracle").addEventListener("click", () => sessionAction("resume-oracle"));
+  $("resumeOracle").addEventListener("click", () => sessionAction("resume-oracle", {unlimited_budget: $("unlimitedBudgetInput").checked}));
   $("runManual").addEventListener("click", () => {
     const command = $("manualCommand").value.trim();
     if (!command) { toast("Enter a Kali command", true); return; }

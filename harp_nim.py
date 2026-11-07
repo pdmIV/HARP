@@ -1,5 +1,7 @@
 """NVIDIA hosted NIM oracle for HARP Hybrid sessions."""
 
+import hashlib
+import itertools
 import json
 import os
 import shlex
@@ -25,6 +27,8 @@ def oracle_model_options(model: str) -> dict:
     # which can consume the entire completion cap before producing content.
     if model == "nvidia/nemotron-3-ultra-550b-a55b":
         return {"reasoning_effort": "none"}
+    if model == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning":
+        return {"chat_template_kwargs": {"enable_thinking": False}}
     if model == "mistralai/mistral-large-4-1t-a52b":
         return {"reasoning_effort": "low"}
     return {}
@@ -111,6 +115,42 @@ def compact_smb_probes(probes: list[dict]) -> list[dict]:
     return compact
 
 
+def compact_past_observations(observations: list[dict], *, recent: int = 4) -> list[dict]:
+    """Keep distinct, successful older results without replaying the full log."""
+    seen: set[str] = set()
+    compact = []
+    for item in reversed(observations[:-recent]):
+        output = str(item.get("output", "")).strip()
+        if item.get("exit_code") != 0 or not output:
+            continue
+        digest = hashlib.sha256(output.encode("utf-8")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        excerpt = output[:260] + (" … " + output[-260:] if len(output) > 520 else output[260:])
+        compact.append({"command": str(item.get("command", ""))[:180],
+                        "output_excerpt": excerpt})
+        if len(compact) == 8:
+            break
+    return list(reversed(compact))
+
+
+def last_command_rejection(run_dir: Path, offset: int) -> dict | None:
+    """Read only new validation feedback from the most recent delegation."""
+    rejection = None
+    with (run_dir / "events.jsonl").open("rb") as stream:
+        stream.seek(offset)
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "local_command_rejected":
+                rejection = {"command": str(event.get("command", ""))[:180],
+                             "reason": str(event.get("reason", ""))[:200]}
+    return rejection
+
+
 def bound_objective(plan: str, objective: str) -> str:
     """Carry an explicit null-auth plan constraint into the worker's task."""
     if harp.null_auth_objective(plan) and not harp.null_auth_objective(objective):
@@ -173,12 +213,15 @@ def oracle_probe_issue(command: str, session: dict, objective: str) -> str | Non
 
 def oracle_history(run_dir: Path) -> dict:
     """Restore bounded oracle state when an operator resumes an active session."""
-    history = {"cycles": 0, "objectives": set(), "probes": set(),
-               "rejections": 0, "recovery_streak": 0, "probe_feedback": None}
+    history = {"cycles": 0, "objectives": set(), "probes": set(), "attempts": [],
+               "rejections": 0, "recovery_streak": 0, "stall_cycles": 0,
+               "last_local_steps": 0, "probe_feedback": None}
     path = run_dir / "events.jsonl"
     if not path.is_file():
         return history
     last_stop = None
+    latest_plan = ""
+    pending_attempt = None
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             event = json.loads(line)
@@ -188,10 +231,25 @@ def oracle_history(run_dir: Path) -> dict:
         if kind == "oracle_nim_request":
             history["cycles"] += 1
             last_stop = None
+        elif kind == "oracle_plan":
+            latest_plan = str(event.get("plan", ""))[:240]
         elif kind == "delegation" and isinstance(event.get("objective"), str):
             history["objectives"].add(event["objective"])
+            pending_attempt = {"plan": latest_plan, "objective": event["objective"][:300],
+                               "terminal_results": 0}
+        elif kind == "local_terminal" and pending_attempt is not None:
+            result = event.get("result") or {}
+            pending_attempt["terminal_results"] += 1
+            pending_attempt["last_command"] = str(result.get("command", ""))[:180]
+            pending_attempt["last_exit_code"] = result.get("exit_code")
+            pending_attempt["last_output"] = str(result.get("output", ""))[-350:]
+        elif kind == "local_command_rejected" and pending_attempt is not None:
+            pending_attempt["last_rejection"] = {
+                "command": str(event.get("command", ""))[:180],
+                "reason": str(event.get("reason", ""))[:200]}
         elif kind == "oracle_nim_probe" and isinstance(event.get("command"), str):
             history["probes"].add(event["command"])
+            history["stall_cycles"] = 0
         elif kind == "oracle_nim_probe_rejected":
             history["rejections"] += 1
             history["probe_feedback"] = {"reason": event.get("reason", "Probe rejected")}
@@ -199,6 +257,16 @@ def oracle_history(run_dir: Path) -> dict:
             history["recovery_streak"] = int(event.get("attempt", 1))
         elif kind == "delegation_stopped" and event.get("reason") not in RECOVERABLE_STOPS:
             history["recovery_streak"] = 0
+        if kind == "delegation_stopped" and isinstance(event.get("local_steps"), int):
+            if pending_attempt is not None:
+                pending_attempt["stop_reason"] = event.get("reason")
+                history["attempts"].append(pending_attempt)
+                history["attempts"] = history["attempts"][-8:]
+                pending_attempt = None
+            steps = event["local_steps"]
+            previous = history["last_local_steps"]
+            history["stall_cycles"] = history["stall_cycles"] + 1 if previous == steps else 0
+            history["last_local_steps"] = steps
         elif kind == "oracle_nim_stopped":
             last_stop = event
     if last_stop and last_stop.get("reason") == "probe_rejected":
@@ -210,13 +278,18 @@ def run(run_dir: Path) -> None:
     session = harp.load_session(run_dir)
     cfg = session["config"].get("oracle", {})
     model = cfg["model"]
+    unlimited_budget = cfg.get("unlimited_budget") is True
     history = oracle_history(run_dir)
     prior = history["objectives"]
+    attempts = history["attempts"]
     recovery_streak = history["recovery_streak"]
+    stall_cycles = history["stall_cycles"]
     oracle_probes = history["probes"]
     probe_rejections = history["rejections"]
     probe_feedback: dict | None = history["probe_feedback"]
-    for cycle in range(history["cycles"], int(cfg.get("max_cycles", 12))):
+    cycles = (itertools.count(history["cycles"]) if unlimited_budget else
+              range(history["cycles"], int(cfg.get("max_cycles", 12))))
+    for cycle in cycles:
         session = harp.load_session(run_dir)
         if session["status"] != "active" or (run_dir / ".stop_session").exists() or (run_dir / ".stop_local").exists():
             return
@@ -226,11 +299,20 @@ def run(run_dir: Path) -> None:
             return
         observations = [{"command": x.get("command"), "exit_code": x.get("exit_code"),
                          "output": x.get("output", "")[-1200:]}
-                        for x in session["observations"][-2:]]
+                        for x in session["observations"][-4:]]
+        verified_artifacts = [
+            {"kind": item.get("kind"), "title": item.get("title", "")[:120],
+             "value": item.get("value", "")[:700], "source": item.get("source", "")[:200]}
+            for item in harp_artifacts.list_artifacts(run_dir)
+            if item.get("kind") in {"credential", "document", "other"} and item.get("evidence_backed")
+        ][-8:]
         context = {"target": session["target"], "objective": session["config"]["objective"],
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
-                   "observations": observations, "last_stop": session.get("last_delegate_stop"),
+                   "observations": observations, "verified_artifacts": verified_artifacts,
+                   "historical_evidence": compact_past_observations(session["observations"]),
+                   "prior_attempts": attempts[-8:],
+                   "last_stop": session.get("last_delegate_stop"),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                    for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
         if probe_feedback:
@@ -239,13 +321,19 @@ def run(run_dir: Path) -> None:
         harp.append_event(run_dir, {"type": "oracle_nim_request", "model": model,
                                     "cycle": cycle + 1})
         request_started = time.monotonic()
-        reply = request("/chat/completions", {"model": model, "stream": False,
+        def oracle_request(path, body):
+            if cfg.get("provider") == "openai":
+                import harp_openai
+                return harp_openai.chat(cfg, {**body, "harp_role": "oracle"})
+            return request(path, body)
+
+        reply = oracle_request("/chat/completions", {"model": model, "stream": False,
             "max_tokens": min(int(cfg.get("max_tokens", 1024)), 1024)
                           if model_options else int(cfg.get("max_tokens", 1024)),
             **model_options,
             "messages": [{"role": "system", "content":
                 "You are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
-                "objective for the local worker. Never claim a flag without terminal evidence. "
+                "objective for the proxy model. Never claim a flag without terminal evidence. "
                 "Return only JSON with keys plan (short operator-facing sentence), objective "
                 "(specific bounded task), stop (boolean), and optional oracle_command. "
                 "If the worker stopped after failed commands, assess the terminal evidence and "
@@ -254,6 +342,19 @@ def run(run_dir: Path) -> None:
                 "empty in that case. Never repeat a failed command or guess passwords. "
                 "If probe_feedback is present, correct the rejected probe or delegate a different "
                 "bounded task; a rejected probe has not run. "
+                "Do not repeat an unavailable-tool installation or a command already rejected. "
+                "Use prior_attempts as a record of plans and outcomes, not as verified facts; "
+                "ground conclusions in terminal results, historical_evidence, and verified_artifacts. "
+                "Prefer installed alternatives; request root approval only when essential. "
+                "If several delegations yield no new terminal evidence, stop instead of changing "
+                "the wording of the same plan. "
+                "At every cycle, step back and compare the newest evidence with earlier findings "
+                "before committing to an account, service, or exploit path. A discovered password "
+                "is not proof that it belongs to any named user. If a credential lacks a verified "
+                "identity, consider a limited, authorized validation against already enumerated "
+                "candidate users, accounting for lockout and rate limits. After a positive login, "
+                "first consider re-enumerating shares, users, privileges, and other services with "
+                "that principal; choose the smallest evidence-gathering step that may change the plan. "
                 "Copy any authentication limits from the plan into the objective. Stop only when "
                 "blocked, repeated after correction, or no evidence-backed step remains."},
                 {"role": "user", "content": json.dumps(context)}]})
@@ -261,7 +362,17 @@ def run(run_dir: Path) -> None:
         choice = reply["choices"][0]
         message = choice.get("message") or {}
         content = message.get("content") or ""
+        cache_metrics = {}
+        if cfg.get("provider") == "openai":
+            import harp_openai
+            cache_metrics = harp_openai.usage_metrics(cfg, usage)
+        call = {"model": model, "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0), **cache_metrics}
+        current = harp.load_session(run_dir)
+        current.setdefault("oracle_calls", []).append(call)
+        harp.save_session(run_dir, current)
         harp.append_event(run_dir, {"type": "oracle_nim_usage", "model": model,
+            **cache_metrics,
             "input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
             "seconds": round(time.monotonic() - request_started, 2),
             "finish_reason": choice.get("finish_reason"), "content_chars": len(content),
@@ -300,16 +411,37 @@ def run(run_dir: Path) -> None:
             oracle_probes.add(oracle_command)
             harp.append_event(run_dir, {"type": "oracle_nim_probe", "command": oracle_command})
             harp.direct_exec(run_dir, oracle_command, quiet=True)
+            stall_cycles = 0
             continue
         if not objective or objective in prior:
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "missing_or_repeated_objective"})
             return
         probe_feedback = None
         prior.add(objective)
+        before_steps = int(session.get("local_steps", 0))
+        event_offset = (run_dir / "events.jsonl").stat().st_size
         harp.delegate(run_dir, objective, min(int(cfg.get("steps_per_cycle", 6)),
-                    int(session["config"]["max_steps"])), quiet=True)
+                    int(session["config"]["max_steps"])), quiet=True,
+                    unlimited_budget=unlimited_budget)
         session = harp.load_session(run_dir)
         stop_reason = session.get("last_delegate_stop")
+        latest_result = session["observations"][-1] if int(session.get("local_steps", 0)) > before_steps else None
+        attempt = {"plan": plan[:240], "objective": objective[:300], "stop_reason": stop_reason,
+                   "terminal_results": int(session.get("local_steps", 0)) - before_steps}
+        if latest_result is not None:
+            attempt["last_command"] = str(latest_result.get("command", ""))[:180]
+            attempt["last_exit_code"] = latest_result.get("exit_code")
+            attempt["last_output"] = str(latest_result.get("output", ""))[-350:]
+        rejection = last_command_rejection(run_dir, event_offset)
+        if rejection:
+            attempt["last_rejection"] = rejection
+        attempts.append(attempt)
+        del attempts[:-8]
+        stall_cycles = 0 if int(session.get("local_steps", 0)) > before_steps else stall_cycles + 1
+        if stall_cycles >= 3:
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "no_progress",
+                                        "detail": "Three delegations produced no new terminal result"})
+            return
         if session.get("pending_root_command") or stop_reason in FATAL_STOPS:
             harp.append_event(run_dir, {"type": "oracle_nim_stopped",
                                         "reason": stop_reason})

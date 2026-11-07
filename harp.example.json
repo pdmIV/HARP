@@ -14,9 +14,11 @@
     "model": "meta/llama-3.1-8b-instruct",
     "max_cycles": 12,
     "steps_per_cycle": 6,
+    "unlimited_budget": false,
     "max_tokens": 800
   },
   "local": {
+    "provider": "unsloth",
     "base_url": "http://127.0.0.1:8888/v1",
     "model": "REPLACE_WITH_UNSLOTH_MODEL_ID",
     "max_tokens": 1024,
