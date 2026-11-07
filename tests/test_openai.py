@@ -253,3 +253,43 @@ class APIErrorTests(unittest.TestCase):
                 harp_openai.urllib.request, "urlopen", side_effect=error), self.assertRaises(RuntimeError) as caught:
             harp_openai.request({}, "/responses", {})
         self.assertIn("input[1].content[0].prompt_cache_breakpoint", str(caught.exception))
+
+
+class KeyImportTests(unittest.TestCase):
+    def handler(self, provider):
+        handler = object.__new__(harp_web.HARPRequestHandler)
+        handler.path = "/api/keys/" + provider
+        handler.server = type("Server", (), {"state": None})()
+        return handler
+
+    def test_all_providers_use_the_existing_encrypted_key_files(self):
+        for provider, filename in (("openai", "openai.key"), ("nvidia_nim", "nvidia.key"), ("unsloth", "unsloth.key")):
+            with self.subTest(provider=provider):
+                handler = self.handler(provider)
+                with patch.object(handler, "_authorized", return_value=True), patch.object(handler, "_body", return_value={"key": " test-secret "}), patch.object(handler, "_json") as reply, patch.object(harp_web.harp_secret, "save_key") as save:
+                    handler.do_POST()
+                self.assertEqual(save.call_args.args, (harp_web.ROOT / ".secrets" / filename, "test-secret"))
+                self.assertEqual(reply.call_args.args[0], 200)
+                self.assertNotIn("test-secret", str(reply.call_args))
+
+    def test_invalid_key_or_provider_does_not_replace_saved_key(self):
+        for provider, value in (("unsloth", ""), ("unsloth", "a b"), ("unsloth", "abc\x00"), ("openai", "x" * 4097), ("nvidia_nim", None), ("../openai", "test-secret")):
+            with self.subTest(provider=provider, value_type=type(value).__name__):
+                handler = self.handler(provider)
+                with patch.object(handler, "_authorized", return_value=True), patch.object(handler, "_body", return_value={"key": value}), patch.object(handler, "_json") as reply, patch.object(harp_web.harp_secret, "save_key") as save:
+                    handler.do_POST()
+                save.assert_not_called()
+                self.assertEqual(reply.call_args.args[0], 400)
+                self.assertNotIn("test-secret", str(reply.call_args))
+
+    def test_status_reports_presence_without_reading_secrets(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(harp_web, "ROOT", Path(temp)), patch.dict(harp_web.os.environ, {"OPENAI_API_KEY": "test-env-secret", "NVIDIA_API_KEY": "", "UNSLOTH_API_KEY": ""}), patch.object(harp_web.harp_secret, "load_key") as decrypt:
+            secret_dir = Path(temp) / ".secrets"
+            secret_dir.mkdir()
+            (secret_dir / "unsloth.key").write_text("encrypted placeholder")
+            status = harp_web.key_status()
+        self.assertTrue(status["openai"]["environment"])
+        self.assertTrue(status["unsloth"]["saved"])
+        self.assertFalse(status["nvidia_nim"]["saved"])
+        self.assertNotIn("test-env-secret", json.dumps(status))
+        decrypt.assert_not_called()

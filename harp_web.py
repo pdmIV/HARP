@@ -40,6 +40,20 @@ SESSION_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 KEY_PATTERN = re.compile(r"API Key:\s*(sk-unsloth-[A-Za-z0-9_-]+)")
 
 
+KEY_PROVIDERS = {
+    "openai": ("openai.key", "OPENAI_API_KEY", "OpenAI"),
+    "nvidia_nim": ("nvidia.key", "NVIDIA_API_KEY", "NVIDIA NIM"),
+    "unsloth": ("unsloth.key", "UNSLOTH_API_KEY", "Unsloth"),
+}
+
+
+def key_status() -> dict:
+    # Presence only: never decrypt or return a stored secret to the browser.
+    return {provider: {"saved": (ROOT / ".secrets" / filename).is_file(),
+                       "environment": bool(os.environ.get(env))}
+            for provider, (filename, env, _label) in KEY_PROVIDERS.items()}
+
+
 def build_launch_args(settings: dict) -> list[str]:
     model = str(settings["model"]).strip()
     if not model or model.startswith("-") or any(c in model for c in "\r\n\x00"):
@@ -496,7 +510,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 cfg = draft_config()
                 port = int(studio_settings(cfg)["port"])
                 listed = state.session_list()
-                payload = {"config": cfg, "sessions": listed,
+                payload = {"config": cfg, "keys": key_status(), "sessions": listed,
                            "selected": state.session_view(selected, cursor) if selected and any(x["id"] == selected for x in listed) else None,
                            "model": {"listening": api_port_open(port), "port": port,
                                      "owned_running": bool(state.model_process and state.model_process.poll() is None),
@@ -559,19 +573,17 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/config":
                 self._json(200, {"config": state.save_config(body)})
                 return
-            if path == "/api/openai/key":
-                value = str(body.get("key", "")).strip()
-                if not value or len(value) > 4096 or any(c.isspace() for c in value):
-                    raise ValueError("Enter a valid OpenAI API key")
-                harp_secret.save_key(ROOT / ".secrets" / "openai.key", value)
-                self._json(200, {"message": "OpenAI key saved encrypted for this Windows account"})
-                return
-            if path == "/api/oracle/key":
-                value = str(body.get("key", "")).strip()
-                if not value:
-                    raise ValueError("Enter a NVIDIA API key")
-                harp_secret.save_key(ROOT / ".secrets" / "nvidia.key", value)
-                self._json(200, {"message": "NVIDIA key saved encrypted for this Windows account"})
+            if path.startswith("/api/keys/") or path in ("/api/openai/key", "/api/oracle/key"):
+                provider = {"/api/openai/key": "openai", "/api/oracle/key": "nvidia_nim"}.get(path, path.removeprefix("/api/keys/"))
+                if provider not in KEY_PROVIDERS:
+                    raise ValueError("Unknown API key provider")
+                filename, _env, label = KEY_PROVIDERS[provider]
+                value = body.get("key")
+                if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 4096
+                        or any(not 33 <= ord(c) <= 126 for c in value.strip())):
+                    raise ValueError("Enter a valid API key containing no whitespace or control characters")
+                harp_secret.save_key(ROOT / ".secrets" / filename, value.strip())
+                self._json(200, {"message": label + " key saved encrypted for this Windows account"})
                 return
             if path == "/api/oracle/benchmark":
                 models = body.get("models")

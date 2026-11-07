@@ -87,7 +87,7 @@
     currentPage = name;
     document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.dataset.panel === name));
     document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === name));
-    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", model: "Proxy model", settings: "Configuration"})[name];
+    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", model: "Proxy model", oracle: "Oracle model", keys: "API Keys", settings: "Configuration"})[name];
     if (name === "verbose") renderVerbose();
     if (name === "flags") acknowledgeFlags();
     if (name === "artifacts") renderArtifacts(true);
@@ -144,25 +144,48 @@
     action(`/api/sessions/${encodeURIComponent(session.id)}/delete`);
   }
 
+  function renderSelections() {
+    const providers = {openai: "OpenAI", nvidia_nim: "NVIDIA NIM", unsloth: "Unsloth", codex: "Codex via MCP"};
+    for (const [role, label, modelId] of [["oracle", "Oracle", "oracleModel"], ["proxy", "Proxy", "proxyNimModel"]]) {
+      const provider = $(role + "Provider").value;
+      const access = provider === "openai" ? ` / ${$(role + "Access").value === "daybreak_blue" ? "Daybreak Blue" : "Standard"}` : "";
+      $(role === "oracle" ? "sidebarOracleProvider" : "sidebarProxyProvider").textContent = `${label} / ${providers[provider] || "Not selected"}${access}`;
+      const model = provider === "codex" ? "Current Codex session" : provider === "unsloth" ? $("studioModel").value.trim() : $(modelId).value;
+      const node = $(role === "oracle" ? "sidebarOracleModel" : "sidebarProxyModel");
+      node.textContent = model || "No model selected";
+      node.title = model || "No model selected";
+    }
+  }
+
+  function renderCostSummary(sum = {}) {
+    for (const [role, prefix] of [["oracle", "oracle"], ["proxy", "local"]]) {
+      const calls = sum[prefix + "_model_calls"] || 0;
+      const input = sum[prefix + "_input_tokens"] || 0;
+      const cached = sum[prefix + "_cached_input_tokens"] || 0;
+      const writes = sum[prefix + "_cache_write_tokens"] || 0;
+      const cost = sum[prefix + "_estimated_usd"];
+      $(role + "ApiCost").textContent = !calls ? "No calls yet" : cost == null ? "Set token prices for an estimate" : `$${cost.toFixed(6)} estimated`;
+      $(role + "CacheUsage").textContent = !calls ? "No API usage recorded." : `${input.toLocaleString()} input / ${cached.toLocaleString()} cached (${input ? (100 * cached / input).toFixed(1) : "0"}%) / ${writes.toLocaleString()} cache writes`;
+    }
+  }
+
   function renderModel(model) {
     lastModel = model;
     const running = !!model.listening;
     $("temperature").disabled = $("proxyProvider").value === "openai";
     $("enableThinking").disabled = $("proxyProvider").value === "openai";
     const nimProxy = $("proxyProvider").value !== "unsloth";
-    const hostedLabel = $("proxyProvider").value === "openai" ? "OpenAI" : "NIM";
     document.querySelectorAll(".openai-proxy").forEach(x => x.classList.toggle("hidden", $("proxyProvider").value !== "openai"));
     document.querySelectorAll(".openai-oracle").forEach(x => x.classList.toggle("hidden", $("oracleProvider").value !== "openai"));
     $("unslothSettings").classList.toggle("hidden", nimProxy);
     $("unslothLog").classList.toggle("hidden", nimProxy);
     $("proxyNimModel").disabled = !nimProxy;
-    $("serverStatus").className = "status-pill" + (running && !nimProxy ? "" : " muted");
-    $("serverStatus").replaceChildren(el("i"), document.createTextNode(nimProxy ? ` ${hostedLabel} proxy selected` : running ? ` Unsloth online :${model.port}` : " Unsloth offline"));
     $("modelHealth").className = "status-pill" + (running ? "" : " muted");
     $("modelHealth").textContent = running ? "Listening" : "Offline";
-    $("connectionDot").classList.toggle("online", running && !nimProxy);
-    $("connectionTitle").textContent = nimProxy ? `${hostedLabel} proxy selected` : running ? "Unsloth proxy online" : "Command center online";
-    $("connectionDetail").textContent = nimProxy ? "Hosted model" : running ? `127.0.0.1:${model.port}` : "Awaiting Unsloth";
+    $("connectionDot").classList.add("online");
+    $("connectionTitle").textContent = "Command center online";
+    $("connectionDetail").textContent = "Selections for new sessions";
+    renderSelections();
     const logs = model.logs || [];
     if (logs.length) {
       const node = $("modelLog");
@@ -173,29 +196,6 @@
       }
       if (node.textContent.length > 50000) node.textContent = node.textContent.slice(-40000);
       node.scrollTop = node.scrollHeight;
-    }
-  }
-
-  function renderBenchmarkResults(results) {
-    const container = $("benchmarkResults");
-    container.replaceChildren();
-    for (const item of results) {
-      const row = el("div", "benchmark-row");
-      row.append(el("span", "benchmark-model", item.model),
-                 el("span", item.usable ? "benchmark-time" : "benchmark-failed",
-                    item.usable ? `${item.seconds}s · usable plan` : `${item.status.replaceAll("_", " ")} · ${item.seconds}s`));
-      if (item.usable) {
-        const select = el("button", "button secondary", "Use model");
-        select.type = "button";
-        select.addEventListener("click", async () => {
-          $("oracleProvider").value = "nvidia_nim";
-          setModelOptions("oracleModel", [item.model], item.model);
-          try { await saveConfig(false); toast(`Oracle model saved: ${item.model}`); }
-          catch (error) { toast(error.message, true); }
-        });
-        row.append(select);
-      }
-      container.append(row);
     }
   }
 
@@ -229,7 +229,6 @@
     setModelOptions("oracleModel", [], oracle.model || "");
     $("oracleOpenaiUrl").value = oracle.base_url || "https://api.openai.com/v1";
     $("oracleAccess").value = oracle.access_program || "daybreak_blue";
-    $("benchmarkCandidates").value = oracle.model || "";
     $("oracleCycles").value = oracle.max_cycles || 12;
     $("oracleSteps").value = oracle.steps_per_cycle || 6;
     $("oracleUnlimited").checked = oracle.unlimited_budget === true;
@@ -277,6 +276,7 @@
 
   async function saveConfig(showToast = true) {
     const result = await post("/api/config", configPayload());
+    renderSelections();
     if (showToast) toast("Configuration saved for new sessions");
     return result;
   }
@@ -426,8 +426,7 @@
       $("metricModel").textContent = "0";
       $("metricTokens").textContent = "0";
       $("metricFlags").textContent = "0 / 2";
-      $("cacheUsage").textContent = "No API usage recorded.";
-      $("apiCost").textContent = "Estimates require configured token prices.";
+      renderCostSummary();
       $("metricOutcome").textContent = startPending ? "Starting" : "—";
       $("metricOutcomeNote").textContent = startPending ? "Preparing reconnaissance" : "Awaiting evidence";
       $("reconProgress").classList.toggle("hidden", !startPending);
@@ -449,10 +448,7 @@
     $("metricTools").textContent = sum.terminal_tool_calls ?? "0";
     $("metricModel").textContent = sum.local_model_calls ?? "0";
     $("metricTokens").textContent = ((sum.local_input_tokens || 0) + (sum.local_output_tokens || 0)).toLocaleString();
-    const cacheText = (name, input, cached, writes) => `${name}: ${(cached || 0).toLocaleString()} cached / ${(input || 0).toLocaleString()} input (${input ? (100 * (cached || 0) / input).toFixed(1) : "0"}% hit), ${(writes || 0).toLocaleString()} cache writes`;
-    $("cacheUsage").textContent = cacheText("Proxy", sum.local_input_tokens, sum.local_cached_input_tokens, sum.local_cache_write_tokens) + " | " + cacheText("Oracle", sum.oracle_input_tokens, sum.oracle_cached_input_tokens, sum.oracle_cache_write_tokens);
-    const costText = (value, calls) => !calls ? "no calls" : value == null ? "unknown prices" : `$${value.toFixed(6)}`;
-    $("apiCost").textContent = `Estimated before account allowances: Proxy ${costText(sum.local_estimated_usd, sum.local_model_calls)} | Oracle ${costText(sum.oracle_estimated_usd, sum.oracle_model_calls)}`;
+    renderCostSummary(sum);
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
     $("metricFlags").textContent = `${flagCount} / 2`;
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.success === "no" ? "No" : "Pending";
@@ -633,6 +629,11 @@
       }
       if (!selectedId && !sessions.length) renderSummary();
       fillConfig(data.config);
+      for (const [prefix, provider] of [["openai", "openai"], ["nim", "nvidia_nim"], ["unsloth", "unsloth"]]) {
+        const status = data.keys?.[provider];
+        $(prefix + "KeyStatus").textContent = status?.environment ? "Environment key active" : status?.saved ? "Encrypted key saved" : "No key imported";
+        $(prefix + "KeyStatus").classList.toggle("muted", !status?.environment && !status?.saved);
+      }
       renderModel(data.model);
       if (data.selected && data.selected.id === selectedId) {
         selected = data.selected;
@@ -670,7 +671,6 @@
           else toast(`${job.name}: ${job.detail}`, true);
         }
         else {
-          if (job.name === "NIM speed test") renderBenchmarkResults(job.result?.results || []);
           toast(`${job.name}: ${job.detail || "done"}`);
           if (job.name === "start session" && job.detail) switchSession(job.detail);
         }
@@ -712,10 +712,14 @@
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
   $("artifactFilter").addEventListener("change", () => renderArtifacts(true));
   $("saveModel").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
+  $("saveOracle").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("saveProxy").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("findProxyModels").addEventListener("click", () => loadModels("proxy"));
   $("proxyProvider").addEventListener("change", () => { setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
   $("oracleProvider").addEventListener("change", () => { setModelOptions("oracleModel", [], ""); renderModel({...lastModel, logs: []}); if ($("oracleProvider").value !== "codex") loadModels("oracle"); });
+  for (const id of ["oracleModel", "proxyNimModel", "oracleAccess", "proxyAccess", "studioModel"]) {
+    $(id).addEventListener("change", renderSelections);
+  }
   $("enableThinking").addEventListener("change", () => {
     if ($("enableThinking").checked && $("proxyProvider").value === "nvidia_nim" &&
         $("proxyNimModel").value.trim() === "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" &&
@@ -729,10 +733,6 @@
     toast("Enter the authorized HTB target IP, then save configuration");
   });
   $("saveConfig").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
-  $("saveNimKey").addEventListener("click", async () => {
-    try { const result = await post("/api/oracle/key", {key: $("nimKey").value.trim()}); $("nimKey").value = ""; toast(result.message); }
-    catch (error) { toast(error.message, true); }
-  });
   function setModelOptions(id, models, selected) {
     const values = [...new Set([selected, ...models].filter(Boolean))];
     $(id).replaceChildren(new Option("Choose a model", ""), ...values.map(value => new Option(value, value)));
@@ -751,26 +751,26 @@
     } catch (error) { toast(error.message, true); }
   }
   $("findNimModels").addEventListener("click", () => loadModels("oracle"));
-  $("openaiKeyFile").addEventListener("change", async () => {
-    const file = $("openaiKeyFile").files[0];
-    if (!file) return;
-    if (file.size > 4096) { toast("Choose a text file containing only the API key", true); return; }
-    $("openaiKey").value = (await file.text()).trim();
-  });
-  $("saveOpenaiKey").addEventListener("click", async () => {
-    try {
-      const result = await post("/api/openai/key", {key: $("openaiKey").value.trim()});
-      $("openaiKey").value = ""; $("openaiKeyFile").value = ""; toast(result.message);
-      if ($("oracleProvider").value === "openai") loadModels("oracle");
-      if ($("proxyProvider").value === "openai") loadModels("proxy");
-    } catch (error) { toast(error.message, true); }
-  });
-  $("runBenchmark").addEventListener("click", async () => {
-    const models = $("benchmarkCandidates").value.split(/[\n,]+/).map(value => value.trim()).filter(Boolean);
-    if (!models.length || models.length > 5) { toast("Enter one to five model IDs", true); return; }
-    $("benchmarkResults").replaceChildren(el("p", "muted-text", "Testing synthetic plans; slow models may take up to 90 seconds."));
-    await action("/api/oracle/benchmark", {models});
-  });
+  for (const [prefix, provider, button] of [["openai", "openai", "saveOpenaiKey"], ["nim", "nvidia_nim", "saveNimKey"], ["unsloth", "unsloth", "saveUnslothKey"]]) {
+    $(prefix + "KeyFile").addEventListener("change", async () => {
+      const file = $(prefix + "KeyFile").files[0];
+      if (!file) return;
+      try {
+        if (file.size > 4096) throw new Error("Choose a text file containing only the API key (up to 4 KiB)");
+        $(prefix + "Key").value = (await file.text()).trim();
+      } catch (error) { $(prefix + "KeyFile").value = ""; toast(error.message, true); }
+    });
+    $(button).addEventListener("click", async () => {
+      $(button).disabled = true;
+      try {
+        const result = await post(`/api/keys/${provider}`, {key: $(prefix + "Key").value.trim()});
+        $(prefix + "Key").value = ""; $(prefix + "KeyFile").value = "";
+        toast(result.message);
+        await poll();
+      } catch (error) { toast(error.message, true); }
+      finally { $(button).disabled = false; }
+    });
+  }
   $("startSession").addEventListener("click", async () => {
     if (startPending) return;
     const stopId = $("startSession").dataset.stopId;
