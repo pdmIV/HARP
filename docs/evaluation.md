@@ -18,7 +18,7 @@ Each session stores elapsed time, time to verified success, success before human
 
 ## Current limits
 
-- The demo target is a harmless HTTP service, not a penetration testing benchmark. Windows target support comes from the general terminal and included protocol tools; it has not been validated against a Windows lab machine yet.
+- The demo target is a harmless HTTP service, not a penetration testing benchmark. The Windows lab workflow uses the general terminal and included protocol tools; one target run does not establish broad reliability across Windows environments.
 - Root command approval depends on the Codex MCP tool policy loading in the Codex session. Inspect the approval prompt before using it. HARP's CLI refuses root commands.
 - Obsidian integration is Markdown export plus bounded keyword retrieval. A full retrieval study and automatic vault synchronization are future experiments.
 - There is no automatic Codex plan token or local GPU power measurement. Those fields must come from external measurements.
