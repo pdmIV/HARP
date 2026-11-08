@@ -2,6 +2,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -76,7 +77,7 @@ class OpenAITests(unittest.TestCase):
     def test_import_key_uses_encrypted_storage_and_never_returns_key(self):
         handler = object.__new__(harp_web.HARPRequestHandler)
         handler.path = "/api/openai/key"
-        handler.server = type("Server", (), {"state": None})()
+        handler.server = type("Server", (), {"state": type("State", (), {"lock": threading.RLock()})()})()
         with patch.object(handler, "_authorized", return_value=True), patch.object(handler, "_body", return_value={"key": "test-secret"}), patch.object(handler, "_json") as reply, patch.object(harp_web.harp_secret, "save_key") as save:
             handler.do_POST()
         self.assertEqual(save.call_args.args[0].name, "openai.key")
@@ -259,7 +260,7 @@ class KeyImportTests(unittest.TestCase):
     def handler(self, provider):
         handler = object.__new__(harp_web.HARPRequestHandler)
         handler.path = "/api/keys/" + provider
-        handler.server = type("Server", (), {"state": None})()
+        handler.server = type("Server", (), {"state": type("State", (), {"lock": threading.RLock()})()})()
         return handler
 
     def test_all_providers_use_the_existing_encrypted_key_files(self):

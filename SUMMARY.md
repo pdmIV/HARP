@@ -4,6 +4,7 @@
 * [HARP Codex operator guide](AGENTS.md)
 * [docs](docs/README.md)
   * [Configuration](docs/configuration.md)
+  * [Settings snapshots](docs/settings-snapshots.md)
   * [Install dependencies](docs/dependencies.md)
   * [Evaluation and limitations](docs/evaluation.md)
   * [Host protection](docs/host-protection.md)

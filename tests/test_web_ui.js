@@ -29,7 +29,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -214,6 +214,61 @@ for (const provider of ["codex", "zai", "openai", "nvidia_nim"]) {
 nodes.get("oracleSearch").checked = false;
 assert.equal(context.ui.configPayload().oracle.web_search_enabled, false);
 console.log("Research UI checks passed: toggle beneath adaptive reasoning, defaults off, provider-independent persistence.");
+
+(async () => {
+  const backupNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
+  const values = new Map(), calls = [], downloaded = [], revoked = [];
+  const cfg = JSON.parse(fs.readFileSync("harp.example.json", "utf8"));
+  const preferences = {theme: "amoled", mode: "frontier-only", replay_speed: "8", replay_skip_idle: false, fresh_recon: true, api_key_provider: "zai"};
+  const snapshot = {format: "harp-settings", version: 1, created_at: "2026-11-08T12:00:00+00:00", config: cfg, ui: preferences};
+  class BackupURL extends URL {}
+  BackupURL.createObjectURL = () => "blob:settings-backup";
+  BackupURL.revokeObjectURL = url => revoked.push(url);
+  const backupContext = {...context, URL: BackupURL, Blob, setTimeout: fn => { fn(); }, clearTimeout() {},
+    Option: function(text, value) { return {...element(), textContent: text, value}; },
+    localStorage: {getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value), removeItem: key => values.delete(key)},
+    sessionStorage: {getItem: () => "test-control-token", setItem() {}},
+    document: {...document, documentElement: element(), getElementById: id => backupNodes.get(id),
+      createElement: tag => ({...element(), click() { if (tag === "a") downloaded.push(this.download); }})},
+    fetch: async (url, options = {}) => {
+      calls.push({url, body: options.body && JSON.parse(options.body)});
+      assert.equal(options.headers["X-HARP-Token"], "test-control-token");
+      const result = url === "/api/settings/export" ? {snapshot} : url === "/api/settings/preview" ? {preview: {
+        created_at: snapshot.created_at, target: "target", runtime: "docker", oracle: cfg.oracle, proxy: cfg.local, ui: preferences, included_key_providers: []}} :
+        url === "/api/settings/apply" ? {config: {...cfg, ui: preferences}, ui: preferences, recovery_id: "a".repeat(32)} :
+        url === "/api/settings/recovery" ? {snapshot} :
+        {config: cfg, sessions: [], selected: null, keys: {}, model: {logs: []}, dependencies: {status: "ready", issues: []}};
+      return {ok: true, json: async () => result};
+    }};
+  delete backupContext.ui;
+  vm.createContext(backupContext); vm.runInContext(source, backupContext);
+  await backupContext.ui.exportSettings();
+  assert.equal(calls[0].body.include_keys, false);
+  assert(downloaded[0].startsWith("harp-settings-"));
+  assert.deepEqual(revoked, ["blob:settings-backup"]);
+  const beforeInvalid = calls.length;
+  await backupContext.ui.previewSettingsFile({size: 3, text: async () => "bad"});
+  assert.equal(calls.length, beforeInvalid, "Invalid JSON must not be posted");
+  await backupContext.ui.previewSettingsFile({size: 50000, text: async () => "{}"});
+  assert.equal(calls.length, beforeInvalid, "Oversized files must not be posted");
+  await backupContext.ui.previewSettingsFile({size: 2000, text: async () => JSON.stringify(snapshot)});
+  assert.equal(calls[calls.length - 1].url, "/api/settings/preview");
+  assert(!calls.some(call => call.url === "/api/settings/apply"), "Choosing a backup must not apply it");
+  assert.match(backupNodes.get("snapshotPreview").textContent, /Theme: amoled/);
+  await backupContext.ui.restoreSettings();
+  assert.equal(calls.find(call => call.url === "/api/settings/apply").body.restore_keys, false);
+  assert.equal(backupNodes.get("modeSelect").value, "frontier-only");
+  assert.equal(backupNodes.get("replaySpeed").value, "8");
+  assert.equal(backupContext.document.documentElement.dataset.theme, "amoled");
+  assert.equal(JSON.parse(values.get("harpUiSettings")).api_key_provider, "zai");
+  assert(!calls.some(call => /sessions\/start|model\/start/.test(call.url)), "Restoring cannot start work");
+  const afterApply = calls.length;
+  await backupContext.ui.restoreSettings();
+  assert.equal(calls.length, afterApply, "Applied snapshot must be released from memory");
+  await backupNodes.get("snapshotRecovery").handlers.click();
+  assert(downloaded[1].startsWith("harp-settings-before-restore-"));
+  console.log("Snapshot UI checks passed: export, preview before apply, invalid files, preference restoration, recovery download, no automatic execution.");
+})().catch(error => { console.error(error); process.exitCode = 1; });
 
 context.ui.setReplay(null);
 context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL lab / peter", issues: ["Missing tools: whippet"], command: "python scripts/install_dependencies.py --runtime wsl --distro lab --user peter", tools: {bloodhound_collector: "bloodhound-python", certipy: "certipy-ad"}});

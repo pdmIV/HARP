@@ -1,5 +1,7 @@
 # Configuration
 
+Use **Configuration → Configuration snapshots** to export saved settings from every tab to a portable JSON backup, preview a backup, and apply its settings. API keys are optional and excluded by default. Restore creates a recovery copy and requires sessions and HARP-managed models to be stopped. See [settings snapshots](settings-snapshots.md).
+
 [Home](../README.md) · [Setup](setup.md) · [Configuration](configuration.md) · [Running sessions](running-sessions.md) · [Host protection](host-protection.md) · [Evaluation](evaluation.md)
 
 ## Application tabs

@@ -49,6 +49,7 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | [Setup](docs/setup.md)                           | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup                                               |
 | [Install dependencies](docs/dependencies.md)     | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection                   |
 | [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors              |
+| [Settings snapshots](docs/settings-snapshots.md) | Export and restore complete saved settings, interface preferences, optional API keys, and recovery copies |
 | [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
 | [Image evidence](docs/image-evidence.md)         | PNG/JPEG previews, oracle-directed GLM 5.3 Flash image input, and transcription verification          |
 | [Web research](docs/web-research.md)             | Experimental oracle-directed Z.AI search, bounded source reads, caching, and research budgets          |

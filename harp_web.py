@@ -33,6 +33,7 @@ import harp_replay
 import harp_costs
 import harp_dependencies
 import harp_research
+import harp_snapshots
 
 
 ROOT = Path(__file__).resolve().parent
@@ -443,7 +444,8 @@ class HARPWebState:
             match = KEY_PATTERN.search(line)
             if match:
                 try:
-                    harp_secret.save_key(ROOT / ".secrets" / "unsloth.key", match.group(1))
+                    with self.lock:
+                        harp_secret.save_key(ROOT / ".secrets" / "unsloth.key", match.group(1))
                     self.add_model_log("Model API key stored encrypted for this Windows account.\n" if os.name == "nt"
                                        else "Model API key saved with owner-only Linux permissions.\n")
                 except Exception as error:
@@ -695,6 +697,26 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             body = self._body()
             state = self.server.state
             path = urlparse(self.path).path
+            if path.startswith("/api/settings/"):
+                if path == "/api/settings/export":
+                    with state.lock:
+                        snapshot = harp_snapshots.export(CONFIG, draft_config(), body.get("ui", {}), body.get("include_keys", False))
+                    self._json(200, {"snapshot": snapshot})
+                elif path == "/api/settings/preview":
+                    self._json(200, {"preview": harp_snapshots.preview(body.get("snapshot"), CONFIG)})
+                elif path == "/api/settings/apply":
+                    with state.lock:
+                        if (state.starting_session or state.session_jobs or state.dependencies.installing
+                                or any(x["status"] in ("active", "recon") for x in state.session_list())
+                                or (state.model_process is not None and state.model_process.poll() is None)):
+                            raise ValueError("Stop active sessions and HARP-managed models, and finish dependency operations before restoring settings")
+                        result = harp_snapshots.apply(CONFIG, body.get("snapshot"), draft_config(), body.get("current_ui", {}), body.get("restore_keys", False))
+                    self._json(200, result)
+                elif path == "/api/settings/recovery":
+                    self._json(200, {"snapshot": harp_snapshots.recovery(CONFIG, body.get("id"))})
+                else:
+                    self._json(404, {"error": "Not found"})
+                return
             if path == "/api/dependencies/check":
                 self._json(200, state.dependencies.status(draft_config(), force=True))
                 return
@@ -721,7 +743,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 if (not isinstance(value, str) or not value.strip() or len(value.strip()) > 4096
                         or any(not 33 <= ord(c) <= 126 for c in value.strip())):
                     raise ValueError("Enter a valid API key containing no whitespace or control characters")
-                harp_secret.save_key(ROOT / ".secrets" / filename, value.strip())
+                with state.lock:
+                    harp_secret.save_key(ROOT / ".secrets" / filename, value.strip())
                 self._json(200, {"message": label + " key saved for this user"})
                 return
             if path == "/api/oracle/benchmark":

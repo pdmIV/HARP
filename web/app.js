@@ -19,6 +19,9 @@
   let budgetSessionId = "";
   let currentFilter = "all";
   let artifactSignature = "";
+  let pendingSnapshot = null;
+  let snapshotRecoveryId = "";
+  let snapshotBusy = false;
   let artifactGeneration = 0;
   const artifactImageUrls = new Set();
   let configLoaded = false;
@@ -138,6 +141,104 @@
   }
 
   applyTheme(preferredTheme);
+
+  function interfaceSettings() {
+    return {theme: document.documentElement.dataset.theme, mode: $("modeSelect").value || "hybrid",
+      replay_speed: $("replaySpeed").value || "1", replay_skip_idle: !!$("replaySkipIdle").checked,
+      fresh_recon: !!$("freshRecon").checked, api_key_provider: $("apiKeyProvider").value || "openai"};
+  }
+
+  function rememberInterfaceSettings() {
+    localStorage.setItem("harpUiSettings", JSON.stringify(interfaceSettings()));
+    localStorage.setItem("harpTheme", document.documentElement.dataset.theme);
+  }
+
+  function applyInterfaceSettings(value) {
+    if (!value || typeof value !== "object") return;
+    if (themes.includes(value.theme)) applyTheme(value.theme);
+    if (["hybrid", "local-only", "frontier-only"].includes(value.mode)) $("modeSelect").value = value.mode;
+    if (["1", "2", "4", "8", "16", "32"].includes(value.replay_speed)) $("replaySpeed").value = value.replay_speed;
+    if (typeof value.replay_skip_idle === "boolean") $("replaySkipIdle").checked = value.replay_skip_idle;
+    if (typeof value.fresh_recon === "boolean") $("freshRecon").checked = value.fresh_recon;
+    if (["openai", "zai", "nvidia_nim", "unsloth"].includes(value.api_key_provider)) $("apiKeyProvider").value = value.api_key_provider;
+    rememberInterfaceSettings();
+  }
+
+  function downloadSettings(snapshot, label = "harp-settings") {
+    const blob = new Blob([JSON.stringify(snapshot, null, 2)], {type: "application/json"});
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${label}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  function clearSnapshotPreview() {
+    pendingSnapshot = null;
+    $("snapshotRestorePanel").classList.add("hidden");
+    $("snapshotPreview").textContent = "";
+    $("snapshotDetails").textContent = "";
+    $("snapshotRestoreKeys").checked = false;
+    $("snapshotFile").value = "";
+  }
+
+  function setSnapshotBusy(value) {
+    snapshotBusy = value;
+    for (const id of ["snapshotExport", "snapshotFile", "snapshotApply", "snapshotCancel", "snapshotIncludeKeys", "snapshotRestoreKeys"])
+      $(id).disabled = value;
+  }
+
+  async function exportSettings() {
+    if (snapshotBusy) return;
+    setSnapshotBusy(true);
+    try {
+      const result = await post("/api/settings/export", {ui: interfaceSettings(), include_keys: !!$("snapshotIncludeKeys").checked});
+      downloadSettings(result.snapshot);
+      $("snapshotStatus").textContent = "Saved settings exported.";
+    } catch (error) { $("snapshotStatus").textContent = error.message; }
+    finally { setSnapshotBusy(false); }
+  }
+
+  async function previewSettingsFile(file) {
+    if (snapshotBusy) return;
+    clearSnapshotPreview();
+    if (!file) return;
+    setSnapshotBusy(true);
+    try {
+      if (file.size > 48 * 1024) throw new Error("Settings snapshot exceeds 48 KiB.");
+      const snapshot = JSON.parse(await file.text());
+      const result = await post("/api/settings/preview", {snapshot});
+      const info = result.preview;
+      $("snapshotDetails").textContent = JSON.stringify({config: snapshot.config, ui: info.ui}, null, 2);
+      $("snapshotPreview").textContent = `Created: ${info.created_at}\nTarget: ${info.target || "Not selected"}\nRuntime: ${info.runtime}\nOracle: ${info.oracle.provider || "codex"} / ${info.oracle.model || "Current Codex session"}\nProxy: ${info.proxy.provider || "unsloth"} / ${info.proxy.model || "Not selected"}\nAdaptive reasoning: ${info.oracle.adaptive_reasoning === true ? "on" : "off"}\nWeb search: ${info.oracle.web_search_enabled === true ? "on" : "off"}\nTheme: ${info.ui.theme}\nExperiment mode: ${info.ui.mode}\nIncluded API keys: ${info.included_key_providers.join(", ") || "none"}`;
+      $("snapshotRestoreKeysLabel").classList.toggle("hidden", !info.included_key_providers.length);
+      $("snapshotRestorePanel").classList.remove("hidden");
+      $("snapshotStatus").textContent = "Backup validated. Review the settings, then apply when ready.";
+      pendingSnapshot = snapshot;
+    } catch (error) { $("snapshotStatus").textContent = error instanceof SyntaxError ? "Choose a valid JSON settings backup." : error.message; }
+    finally { setSnapshotBusy(false); }
+  }
+
+  async function restoreSettings() {
+    if (snapshotBusy || !pendingSnapshot) return;
+    setSnapshotBusy(true);
+    try {
+      const result = await post("/api/settings/apply", {snapshot: pendingSnapshot,
+        current_ui: interfaceSettings(), restore_keys: !!$("snapshotRestoreKeys").checked});
+      applyInterfaceSettings(result.ui);
+      configLoaded = false;
+      fillConfig(result.config);
+      renderSelections();
+      if (lastModel) renderModel({...lastModel, logs: []});
+      snapshotRecoveryId = result.recovery_id;
+      $("snapshotRecovery").classList.remove("hidden");
+      clearSnapshotPreview();
+      $("snapshotStatus").textContent = "Settings restored. A pre-restore backup is available below. No model or session was started.";
+      await poll();
+    } catch (error) { $("snapshotStatus").textContent = error.message; }
+    finally { setSnapshotBusy(false); }
+  }
 
   function toast(message, error = false) {
     const node = $("toast");
@@ -420,6 +521,9 @@
       objectiveInput: cfg.objective || ""
     };
     for (const [id, value] of Object.entries(values)) $(id).value = value;
+    let preferences = cfg.ui;
+    try { preferences = JSON.parse(localStorage.getItem("harpUiSettings") || "null") || preferences; } catch {}
+    if (preferences) applyInterfaceSettings(preferences);
     renderRuntimeFields();
     $("enableThinking").checked = !!local.enable_thinking;
     $("proxyProvider").value = local.provider || "unsloth";
@@ -1103,8 +1207,20 @@
     const next = themes[(themes.indexOf(document.documentElement.dataset.theme) + 1) % themes.length];
     applyTheme(next);
     localStorage.setItem("harpTheme", next);
+    rememberInterfaceSettings();
   });
   $("refreshSessions").addEventListener("click", poll);
+  for (const id of ["modeSelect", "replaySpeed", "replaySkipIdle", "freshRecon", "apiKeyProvider"]) $(id).addEventListener("change", rememberInterfaceSettings);
+  $("snapshotExport").addEventListener("click", exportSettings);
+  $("snapshotFile").addEventListener("change", () => previewSettingsFile($("snapshotFile").files?.[0]));
+  $("snapshotApply").addEventListener("click", restoreSettings);
+  $("snapshotCancel").addEventListener("click", clearSnapshotPreview);
+  $("snapshotRecovery").addEventListener("click", async () => {
+    try {
+      const result = await post("/api/settings/recovery", {id: snapshotRecoveryId});
+      downloadSettings(result.snapshot, "harp-settings-before-restore");
+    } catch (error) { $("snapshotStatus").textContent = error.message; }
+  });
   document.querySelectorAll(".filter").forEach(button => button.addEventListener("click", () => {
     currentFilter = button.dataset.filter;
     document.querySelectorAll(".filter").forEach(x => x.classList.toggle("active", x === button));
@@ -1260,7 +1376,7 @@
       await saveConfig(false);
       if (!await action("/api/sessions/start", {mode: $("modeSelect").value,
                                                  fresh_recon: $("freshRecon").checked})) { startPending = false; startingAt = null; }
-      else $("freshRecon").checked = false;
+      else { $("freshRecon").checked = false; rememberInterfaceSettings(); }
     } catch (error) { startPending = false; startingAt = null; toast(error.message, true); }
     renderStartStop();
   });
