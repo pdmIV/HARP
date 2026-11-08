@@ -1,0 +1,12 @@
+$schema: https://api.gitbook.com/gitbook-docs.yaml
+
+site:
+  title: HARP
+  structure:
+    - type: space
+      key: harp-documentation
+      title: HARP Documentation
+      path: docs
+      default: true
+      content:
+        directory: ./
