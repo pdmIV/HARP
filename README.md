@@ -8,6 +8,8 @@
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
+For complex work, a hosted oracle can provide an exact implementation for the proxy to execute, and the proxy can request oracle help when it encounters a blocker. Z.AI GLM-5.3 and GLM-5.3-Flash sessions can use configurable oracle evidence depth and larger token ceilings; see [GLM configuration](docs/configuration.md#zai-api--glm) for practical starting settings.
+
 ## Supported configurations
 
 | Component | Options |
@@ -39,6 +41,8 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 
 ## Evidence and scope
 
-Use HARP only against targets you are authorized to assess. Model claims are not proof of success. HARP records `user.txt` and `root.txt` flags from terminal evidence and preserves session logs for review. You can stop an active session or permanently delete a finished session and its logs in the command center. Root commands require approval.
+See the [Cicada case study](docs/case-studies/cicada-2026-11-07/README.md) for a complete Hybrid run with oracle plans, proxy commands, terminal evidence, artifacts, and both lab flags.
+
+Use HARP only against targets you are authorized to assess. Model claims are not proof of success. HARP records `user.txt` and `root.txt` flags from terminal evidence and preserves session logs for review. You can stop an active session or permanently delete a finished session and its logs in the command center. Completed reconnaissance is cached separately and reused for matching new sessions; a focused `.htb` hostname check can identify the same box at a new IP. Select **Refresh reconnaissance** to scan again. Root commands require approval.
 
 WSL uses your existing distribution and does not provide Docker's isolation or resource limits. Read [Host protection](docs/host-protection.md) before choosing a runtime. Keep API keys and session evidence out of Git.

@@ -80,6 +80,132 @@ class HarpTests(unittest.TestCase):
             self.assertTrue(any(event["type"] == "recon_started" for event in events))
             self.assertTrue(any(event["type"] == "recon_finished" for event in events))
 
+    def test_completed_recon_is_reused_and_can_be_refreshed(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.10.5"
+        commands = []
+        xml = ('<nmaprun><host><ports><port protocol="tcp" portid="445">'
+               '<state state="open"/><service name="microsoft-ds"/>'
+               '</port></ports></host></nmaprun>')
+
+        class FakeTerminal:
+            name = "fake-kali"
+            workspace = "/workspace"
+            event_dir = None
+            recon_mode = False
+            recon_stage = ""
+            def __init__(self, _cfg): pass
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def run(self, command, _timeout, **_kwargs):
+                commands.append(command)
+                return {"command": command, "exit_code": 0, "seconds": 0.1,
+                        "output": xml, "truncated": False, "as_root": False}
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
+             patch.object(harp, "KaliTerminal", FakeTerminal), \
+             patch.object(harp, "docker", return_value="image-id"), \
+             patch.object(harp, "deterministic_http_probes", return_value=[]), \
+             patch.object(harp, "deterministic_smb_probes", return_value=[]):
+            runs = Path(temp)
+            first = harp.start_session(cfg, runs)
+            first_count = len(commands)
+            self.assertGreater(first_count, 0)
+            cache = harp.recon_cache_path(runs, cfg)
+            self.assertTrue(cache.is_file())
+            second = harp.start_session(cfg, runs)
+            self.assertEqual(len(commands), first_count)
+            reused = harp.load_session(second)
+            self.assertEqual(reused["recon_stage"], "Reused")
+            self.assertEqual(reused["recon_source_session"], first.name)
+            self.assertEqual(reused["recon_tool_calls"], 0)
+            self.assertEqual(reused["recon"], harp.load_session(first)["recon"])
+            self.assertTrue(any(json.loads(line)["type"] == "recon_reused"
+                                for line in (second / "events.jsonl").read_text().splitlines()))
+            harp.start_session(cfg, runs, fresh_recon=True)
+            self.assertGreater(len(commands), first_count)
+            refreshed_count = len(commands)
+            different = {**cfg, "scan_ports": "1-1024"}
+            harp.start_session(different, runs)
+            self.assertGreater(len(commands), refreshed_count)
+
+    def test_existing_completed_session_seeds_recon_cache(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.10.5"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            runs = Path(temp)
+            old = runs / "20261101-000000-abcdef"
+            old.mkdir()
+            self.make_session(old)
+            session = harp.load_session(old)
+            session.update(config=cfg, recon_stage="Complete", recon_finished_epoch=time.time(),
+                           recon=[{"port": 445, "protocol": "tcp", "service": "microsoft-ds"}])
+            harp.save_session(old, session)
+            (old / "events.jsonl").write_text(json.dumps({"type": "deterministic_recon", "result": {
+                "output": '<nmaprun><host><hostnames><hostname name="legacy.htb"/>'
+                          '</hostnames></host></nmaprun>'}}) + "\n", encoding="utf-8")
+            snapshot = harp.find_recon_snapshot(runs, cfg)
+            self.assertEqual(snapshot["source_session"], old.name)
+            self.assertEqual(snapshot["recon"][0]["port"], 445)
+            self.assertEqual(snapshot["hostnames"], ["legacy.htb"])
+            self.assertTrue(harp.recon_cache_path(runs, cfg).is_file())
+            self.assertEqual(harp.hostname_recon_candidates(runs, {**cfg, "target": "10.10.10.6"})[0]["hostnames"],
+                             ["legacy.htb"])
+
+    def test_hostname_match_reuses_recon_across_new_ip(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.10.5"
+        commands = []
+
+        class FakeTerminal:
+            name = "fake-kali"
+            workspace = "/workspace"
+            event_dir = None
+            recon_mode = False
+            recon_stage = ""
+            def __init__(self, config): self.target = config["target"]
+            def __enter__(self): return self
+            def __exit__(self, *_args): pass
+            def run(self, command, _timeout, **_kwargs):
+                commands.append((self.target, command))
+                hostname = "box.htb" if self.target != "10.10.10.7" else "other.htb"
+                xml = (f'<nmaprun><host><hostnames><hostname name="{hostname}"/>'
+                       '</hostnames><ports><port protocol="tcp" portid="80">'
+                       f'<state state="open"/><service name="http" hostname="{hostname}"/>'
+                       '</port></ports></host></nmaprun>')
+                return {"command": command, "exit_code": 0, "seconds": 0.1,
+                        "output": xml, "truncated": False, "as_root": False}
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
+             patch.object(harp, "KaliTerminal", FakeTerminal), \
+             patch.object(harp, "docker", return_value="image-id"), \
+             patch.object(harp, "deterministic_http_probes", return_value=[]), \
+             patch.object(harp, "deterministic_smb_probes", return_value=[]):
+            runs = Path(temp)
+            first = harp.start_session(cfg, runs)
+            self.assertEqual(harp.load_session(first)["recon_hostnames"], ["box.htb"])
+            initial_count = len(commands)
+            moved = {**cfg, "target": "10.10.10.6"}
+            second = harp.start_session(moved, runs)
+            self.assertEqual(len(commands), initial_count + 1)
+            self.assertIn("-p 80", commands[-1][1])
+            state = harp.load_session(second)
+            self.assertEqual(state["recon_match_hostname"], "box.htb")
+            self.assertEqual(state["recon_source_target"], cfg["target"])
+            self.assertEqual(state["recon"], harp.load_session(first)["recon"])
+            self.assertTrue(harp.recon_cache_path(runs, moved).is_file())
+            third = harp.start_session({**cfg, "target": "10.10.10.7"}, runs)
+            self.assertEqual(harp.load_session(third)["recon_stage"], "Complete")
+            self.assertGreater(len(commands), initial_count + 2)
+
+    def test_htb_hostname_parser_ignores_unrelated_names(self):
+        xml = ('<nmaprun><host><hostnames><hostname name="BOX.HTB"/>'
+               '</hostnames><ports><port portid="80"><service extrainfo="redirect to admin.box.htb"/>'
+               '</port></ports></host></nmaprun>')
+        self.assertEqual(harp.htb_hostnames(xml), ["admin.box.htb", "box.htb"])
+        self.assertEqual(harp.htb_hostnames('<nmaprun><hostnames><hostname name="example.com"/>'
+                                             '</hostnames></nmaprun>'), [])
+
     def test_recon_command_events_appear_before_and_after_local_execution(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
@@ -153,7 +279,7 @@ class HarpTests(unittest.TestCase):
                    "success_at": None, "success_epoch": None}
         harp.save_session(directory, session)
 
-    def test_repeated_command_stops_delegation(self):
+    def test_repeated_command_can_run_after_human_review(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
             self.make_session(path)
@@ -161,12 +287,33 @@ class HarpTests(unittest.TestCase):
             with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
                  patch.object(harp, "model_context_tokens", return_value=8192), \
                  patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command", return_value=(True, 1.0)) as review, \
                  patch.object(harp, "api_chat", return_value=reply):
-                harp.delegate(path, "inspect target", 3)
+                harp.delegate(path, "inspect target", 2)
             state = harp.load_session(path)
-            self.assertEqual(state["local_steps"], 1)
-            self.assertEqual(state["last_delegate_stop"], "repeated_command")
+            self.assertEqual(state["local_steps"], 2)
+            self.assertEqual(state["last_delegate_stop"], "step_budget")
+            review.assert_called_once()
             self.assertIsNone(state["human_intervention_at"])
+
+    def test_proxy_requests_oracle_help_without_running_a_command(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            reply = json.dumps({"thought": "Need exact protocol framing", "needs_oracle": True,
+                                "done": False})
+            terminal = DummyTerminal()
+            with patch.object(terminal, "run") as run, \
+                 patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=reply):
+                harp.delegate(path, "Inspect the service", 2, quiet=True)
+            state = harp.load_session(path)
+            self.assertEqual(state["last_delegate_stop"], "oracle_requested")
+            self.assertEqual(state["oracle_help_request"], "Need exact protocol framing")
+            self.assertEqual(state["local_steps"], 0)
+            run.assert_not_called()
 
     def test_unlimited_budget_skips_step_and_model_call_caps_but_still_stops(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -366,7 +513,7 @@ class HarpTests(unittest.TestCase):
 
     def test_nim_plan_carries_null_auth_boundary_to_worker(self):
         objective = harp_nim.bound_objective(
-            "Enumerate the HR share using a null SMB session.", "List files in the HR share.")
+            "Enumerate the HR share using a null SMB session only.", "List files in the HR share.")
         self.assertIn("null or guest authentication only", objective)
         self.assertEqual(harp_nim.bound_objective("Inspect HTTP", "Read the page"), "Read the page")
 
@@ -558,6 +705,51 @@ class HarpTests(unittest.TestCase):
             'smbclient //10.10.10.5/HR -U "sample.user%guess" -c ls',
             target, "Use the known account", []))
 
+    def test_smb_checks_apply_to_smb_command_not_local_setup(self):
+        target = "10.10.10.5"
+        objective = "Use null authentication to list //10.10.10.5/HR"
+        for auth in ("-N", "-U '%'"):
+            command = ("mkdir -p hr_share && cd hr_share && smbclient " + auth
+                       + " //10.10.10.5/HR -c 'ls'")
+            with self.subTest(auth=auth):
+                self.assertIsNone(harp.local_command_issue(command, target, objective, []))
+        self.assertIsNone(harp.local_command_issue(
+            "smbclient -N -p 445 //10.10.10.5/HR -c 'ls'", target, objective, []))
+        self.assertIn("empty SMB password", harp.local_command_issue(
+            "mkdir -p hr_share && nxc smb 10.10.10.5 -u . -p guess --shares",
+            target, objective, []))
+
+    def test_glm_proxy_runs_compound_null_smb_command(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            session = harp.load_session(path)
+            session["target"] = "10.10.10.5"
+            session["config"]["local"].update({"provider": "zai", "model": "glm-5.3-flash"})
+            harp.save_session(path, session)
+            command = "mkdir -p hr_share && cd hr_share && smbclient -N //10.10.10.5/HR -c 'ls'"
+            replies = [json.dumps({"thought": "List share", "command": command, "done": False}),
+                       json.dumps({"thought": "Listing recorded", "done": True})]
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=replies):
+                harp.delegate(path, "Use null authentication to list //10.10.10.5/HR", 3, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(saved["last_delegate_stop"], "local_done")
+            self.assertEqual(saved["observations"][0]["command"], command)
+
+    def test_glm_essential_checks_allow_command_guidance_but_keep_scope(self):
+        target = "10.10.10.5"
+        objective = "Use null authentication to inspect //10.10.10.5/HR"
+        command = "smbclient -N //10.10.10.5/HR -c 'ls -R'"
+        self.assertIn("recurse on", harp.local_command_issue(command, target, objective, [], checks="strict"))
+        self.assertIsNone(harp.local_command_issue(command, target, objective, [], checks="essential"))
+        self.assertIn("outside", harp.local_command_issue(
+            "smbclient -N //10.10.10.6/HR -c 'ls'", target, objective, [], checks="essential"))
+        self.assertIsNone(harp.local_command_issue(
+            "smbclient -U named //10.10.10.5/HR -c 'ls'", target, objective, [], checks="essential"))
+
     def test_null_smb_access_denied_returns_control_after_one_step(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
@@ -587,14 +779,91 @@ class HarpTests(unittest.TestCase):
             self.make_session(path)
             bad = '{"thought":"download","command":"smbclient -N //target/HR -c \\"mget *\\"","done":false}'
             good = '{"thought":"list","command":"smbclient -N //target/HR -c \\"ls\\"","done":false}'
+            done = '{"thought":"listing complete","done":true}'
             with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
                  patch.object(harp, "model_context_tokens", return_value=8192), \
                  patch.object(harp, "count_chat_tokens", return_value=300), \
-                 patch.object(harp, "api_chat", side_effect=[bad, good]):
+                 patch.object(harp, "review_proxy_command", return_value=(False, 7.5)) as review, \
+                 patch.object(harp, "api_chat", side_effect=[bad, good, done]):
                 harp.delegate(path, "List //target/HR", 2, quiet=True)
             state = harp.load_session(path)
             commands = [item["command"] for item in state["observations"]]
             self.assertEqual(commands, ['smbclient -N //target/HR -c "ls"'])
+            review.assert_called_once()
+            self.assertEqual(state["local_steps"], 1)
+            self.assertEqual(state["review_wait_seconds"], 7.5)
+
+    def test_approved_flagged_command_runs_without_using_extra_step(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            command = 'smbclient -N //target/HR -c "mget *"'
+            reply = json.dumps({"thought": "download", "command": command, "done": False})
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command", return_value=(True, 12.0)) as review, \
+                 patch.object(harp, "api_chat", return_value=reply):
+                harp.delegate(path, "Download files from //target/HR", 1, quiet=True)
+            state = harp.load_session(path)
+            self.assertEqual([item["command"] for item in state["observations"]], [command])
+            self.assertEqual(state["local_steps"], 1)
+            self.assertEqual(state["review_wait_seconds"], 12.0)
+            review.assert_called_once()
+
+    def test_command_review_web_decision_matches_exact_command(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            runs = Path(temp) / "runs"
+            path = runs / "20261103-000000-abcdef"
+            path.mkdir(parents=True)
+            self.make_session(path)
+            review_dir = path / "command_reviews"
+            review_dir.mkdir()
+            request = {"id": "review123", "command": "id", "reason": "Check flagged command"}
+            (review_dir / "review123.request.json").write_text(json.dumps(request), encoding="utf-8")
+            web_state = object.__new__(harp_web.HARPWebState)
+            with patch.object(harp_web, "RUNS", runs):
+                self.assertEqual(harp_web.pending_approval(path, harp.load_session(path))["reason"], request["reason"])
+                self.assertIsNone(web_state.decide_approval(path.name, "review123", True))
+            decision = json.loads((review_dir / "review123.decision.json").read_text(encoding="utf-8"))
+            self.assertEqual(decision["command"], request["command"])
+            self.assertTrue(decision["approved"])
+            self.assertIsNone(harp_web.pending_approval(path, harp.load_session(path)))
+
+    def test_command_review_waits_for_exact_decision_and_cleans_up(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            outcome = []
+            worker = threading.Thread(target=lambda: outcome.append(harp.review_proxy_command(
+                path, "id", "Check flagged command", 1, path / ".stop_delegate", path / ".stop_session")))
+            worker.start()
+            review_dir = path / "command_reviews"
+            request_path = None
+            for _ in range(100):
+                requests = list(review_dir.glob("*.request.json")) if review_dir.exists() else []
+                if requests:
+                    request_path = requests[0]
+                    break
+                time.sleep(0.01)
+            self.assertIsNotNone(request_path)
+            request = json.loads(request_path.read_text(encoding="utf-8"))
+            decision_path = review_dir / f"{request['id']}.decision.json"
+            decision_path.write_text(json.dumps({"id": request["id"], "command": "id", "approved": True}),
+                                     encoding="utf-8")
+            worker.join(timeout=3)
+            self.assertFalse(worker.is_alive())
+            self.assertTrue(outcome[0][0])
+            self.assertFalse(request_path.exists())
+            self.assertFalse(decision_path.exists())
+
+    def test_private_pivot_requires_terminal_evidence_and_current_objective(self):
+        command = "nmap -Pn 172.16.12.8"
+        evidence = [{"exit_code": 0, "output": "Found 172.16.12.8 in host routes"}]
+        self.assertIsNotNone(harp.command_scope_issue(command, "10.10.10.5", [], "Probe 172.16.12.8", []))
+        self.assertIsNotNone(harp.command_scope_issue(command, "10.10.10.5", [], "Probe the pivot", evidence))
+        self.assertIsNone(harp.command_scope_issue(command, "10.10.10.5", [], "Probe 172.16.12.8", evidence))
+        self.assertIsNotNone(harp.command_scope_issue("nmap -Pn 8.8.8.8", "10.10.10.5", [],
+                                                        "Probe 8.8.8.8", [{"exit_code": 0, "output": "8.8.8.8"}]))
 
     def test_session_stop_marker_prevents_new_delegation(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -844,11 +1113,67 @@ class HarpTests(unittest.TestCase):
             for name, value in (("user.txt", "a" * 32), ("root.txt", "b" * 32)):
                 harp_artifacts.capture_flags_from_result(path,
                     {"command": f"cat /path/{name}", "exit_code": 0, "output": value})
-            with patch.object(harp, "terminal_for", return_value=DummyTerminal()):
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), patch.object(harp, "docker"):
                 harp_artifacts.maybe_mark_flag_success(path)
             state = harp.load_session(path)
             self.assertEqual(state["success"], "yes")
             self.assertTrue(state["success_before_human_intervention"])
+            self.assertEqual(state["status"], "finished")
+            self.assertIsNotNone(state["duration_seconds"])
+            harp_artifacts.maybe_mark_flag_success(path)
+            harp.finish_session(path, "yes")
+            self.assertEqual(harp.load_session(path)["finished_at"], state["finished_at"])
+
+    def test_netexec_flags_require_unambiguous_file_read_evidence(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            result = {"command": 'nxc winrm target -X "type C:\\loot\\root.txt"',
+                      "exit_code": 0, "output": '\x1b[32mWINRM  10.10.10.5  5985  DC  ' + 'b' * 32 + '\x1b[0m\n'}
+            self.assertEqual(harp_artifacts.capture_flags_from_result(path, result)[0]["title"], "root.txt")
+            for overrides in ({"exit_code": 1}, {"command": "nxc winrm target --sam"},
+                              {"command": "nxc winrm target -X 'type user.txt; type root.txt'"},
+                              {"output": "Found root flag: " + "b" * 32},
+                              {"output": result["output"] + "\n" + "a" * 32}):
+                self.assertEqual(harp_artifacts.capture_flags_from_result(path, {**result, **overrides}), [])
+
+    def test_delegation_stops_on_second_flag_without_another_model_call(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            harp_artifacts.capture_flags_from_result(path,
+                {"command": "cat user.txt", "exit_code": 0, "output": "a" * 32})
+            terminal = DummyTerminal()
+            terminal.run = lambda command, *_args, **_kwargs: {
+                "command": command, "exit_code": 0, "seconds": 0.1, "output": "b" * 32}
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(harp, "docker"), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=json.dumps({"command": "cat root.txt"})) as chat:
+                harp.delegate(path, "Read root.txt", 5, quiet=True)
+            state = harp.load_session(path)
+            self.assertEqual(chat.call_count, 1)
+            self.assertEqual(state["last_delegate_stop"], "flags_captured")
+            self.assertEqual(state["status"], "finished")
+
+    def test_artifact_registered_before_next_model_request(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            calls = []
+            def reply(*_args):
+                calls.append(1)
+                if len(calls) == 1:
+                    return json.dumps({"command": "cat notes.txt", "artifact": {
+                        "kind": "document", "title": "Notes", "value": "one result"}})
+                self.assertEqual(harp_artifacts.list_artifacts(path)[0]["value"], "one result")
+                return '{"done":true}'
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=reply):
+                harp.delegate(path, "Read notes", 3, quiet=True)
+            self.assertEqual(len(calls), 2)
 
     def test_flag_acknowledgment_does_not_hide_later_flag(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

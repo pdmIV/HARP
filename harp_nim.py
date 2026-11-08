@@ -4,6 +4,7 @@ import hashlib
 import itertools
 import json
 import os
+import re
 import shlex
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,7 +19,8 @@ import harp_secret
 BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
                      "repeated_output", "missing_command", "invalid_replies",
-                     "command_validation_failed", "repeated_or_excessive_memory_query"}
+                     "command_validation_failed", "repeated_or_excessive_memory_query",
+                     "oracle_requested"}
 FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "model_call_budget"}
 
 
@@ -135,6 +137,18 @@ def compact_past_observations(observations: list[dict], *, recent: int = 4) -> l
     return list(reversed(compact))
 
 
+def oracle_observations(session: dict, config: dict) -> tuple[list[dict], int]:
+    """Offer larger evidence windows only when selected or when the worker asks for help."""
+    depth = config.get("evidence_depth", "compact")
+    if session.get("oracle_help_request") and depth == "compact":
+        depth = "detailed"
+    count, output_chars = {"compact": (4, 1200), "detailed": (12, 6000),
+                           "extended": (32, 12000)}[depth]
+    return ([{"command": item.get("command"), "exit_code": item.get("exit_code"),
+             "output": str(item.get("output", ""))[-output_chars:]}
+            for item in session["observations"][-count:]], count)
+
+
 def last_command_rejection(run_dir: Path, offset: int) -> dict | None:
     """Read only new validation feedback from the most recent delegation."""
     rejection = None
@@ -145,7 +159,8 @@ def last_command_rejection(run_dir: Path, offset: int) -> dict | None:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("type") == "local_command_rejected":
+            if (event.get("type") == "local_command_rejected" or
+                    event.get("type") == "command_review_decided" and event.get("approved") is False):
                 rejection = {"command": str(event.get("command", ""))[:180],
                              "reason": str(event.get("reason", ""))[:200]}
     return rejection
@@ -153,8 +168,25 @@ def last_command_rejection(run_dir: Path, offset: int) -> dict | None:
 
 def bound_objective(plan: str, objective: str) -> str:
     """Carry an explicit null-auth plan constraint into the worker's task."""
-    if harp.null_auth_objective(plan) and not harp.null_auth_objective(objective):
+    null_only = re.search(r"(?:\b(?:null|anonymous|guest)\b.{0,40}\bonly\b|\bonly\b.{0,40}\b(?:null|anonymous|guest)\b)", plan, re.I)
+    if null_only and not harp.null_auth_objective(objective):
         return objective + " Use null or guest authentication only; do not try named accounts or passwords."
+    return objective
+
+
+def assisted_objective(decision: dict, plan: str) -> str:
+    """Keep oracle-authored code intact; reject oversized handoffs, never truncate code."""
+    objective = decision.get("objective", "")
+    implementation = decision.get("implementation", "")
+    if not isinstance(objective, str) or len(objective) > 1000:
+        raise ValueError("Oracle objective must be a string of at most 1000 characters")
+    if not isinstance(implementation, str) or len(implementation) > 16000:
+        raise ValueError("Oracle implementation must be a string of at most 16000 characters")
+    objective = bound_objective(plan, objective.strip())
+    if implementation:
+        if not objective:
+            raise ValueError("Oracle implementation requires a bounded objective")
+        objective += "\n\nOracle-authored implementation instructions:\n" + implementation
     return objective
 
 
@@ -177,8 +209,8 @@ def oracle_probe_issue(command: str, session: dict, objective: str) -> str | Non
         return "Oracle probe tool is outside the read-only allowlist."
     if parts[0].lower() != tool:
         return "Oracle probe must use an installed Kali tool by name."
-    if session["target"] not in command:
-        return "Oracle probe must name the exact authorized target."
+    if session["target"] not in command and not re.search(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", command):
+        return "Oracle probe must name the primary target or an evidence-backed pivot IP."
     forbidden_by_tool = {
         "nxc": {"-x", "-X", "--exec-method", "--put-file", "--sam", "--ntds", "--lsa",
                 "--passwords", "-P"},
@@ -208,7 +240,8 @@ def oracle_probe_issue(command: str, session: dict, objective: str) -> str | Non
             part in ("--shares", "--users", "--rid-brute") for part in parts):
         return "Oracle SMB probe must request shares, users, or RID enumeration."
     return harp.local_command_issue(command, session["target"], objective,
-                                    session.get("observations", []))
+                                    session.get("observations", []),
+                                    authorized_scope=session.get("config", {}).get("authorized_scope"))
 
 
 def oracle_history(run_dir: Path) -> dict:
@@ -243,7 +276,8 @@ def oracle_history(run_dir: Path) -> dict:
             pending_attempt["last_command"] = str(result.get("command", ""))[:180]
             pending_attempt["last_exit_code"] = result.get("exit_code")
             pending_attempt["last_output"] = str(result.get("output", ""))[-350:]
-        elif kind == "local_command_rejected" and pending_attempt is not None:
+        elif (kind == "local_command_rejected" or
+              kind == "command_review_decided" and event.get("approved") is False) and pending_attempt is not None:
             pending_attempt["last_rejection"] = {
                 "command": str(event.get("command", ""))[:180],
                 "reason": str(event.get("reason", ""))[:200]}
@@ -297,9 +331,7 @@ def run(run_dir: Path) -> None:
         if all(flags.get(name, {}).get("found") for name in ("user.txt", "root.txt")):
             harp.finish_session(run_dir, "yes")
             return
-        observations = [{"command": x.get("command"), "exit_code": x.get("exit_code"),
-                         "output": x.get("output", "")[-1200:]}
-                        for x in session["observations"][-4:]]
+        observations, recent_count = oracle_observations(session, cfg)
         verified_artifacts = [
             {"kind": item.get("kind"), "title": item.get("title", "")[:120],
              "value": item.get("value", "")[:700], "source": item.get("source", "")[:200]}
@@ -307,12 +339,15 @@ def run(run_dir: Path) -> None:
             if item.get("kind") in {"credential", "document", "other"} and item.get("evidence_backed")
         ][-8:]
         context = {"target": session["target"], "objective": session["config"]["objective"],
+                   "authorized_scope": session["config"].get("authorized_scope", []),
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
                    "observations": observations, "verified_artifacts": verified_artifacts,
-                   "historical_evidence": compact_past_observations(session["observations"]),
+                   "historical_evidence": compact_past_observations(
+                       session["observations"], recent=recent_count),
                    "prior_attempts": attempts[-8:],
                    "last_stop": session.get("last_delegate_stop"),
+                   "oracle_help_request": session.get("oracle_help_request"),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                    for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
         if probe_feedback:
@@ -338,11 +373,25 @@ def run(run_dir: Path) -> None:
                 "You are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
                 "objective for the proxy model. Never claim a flag without terminal evidence. "
                 "Return only JSON with keys plan (short operator-facing sentence), objective "
-                "(specific bounded task), stop (boolean), and optional oracle_command. "
+                "(specific bounded task, at most 1000 characters), stop (boolean), optional "
+                "implementation (string, at most 16000 characters), and optional oracle_command. "
+                "Assess task complexity before delegating. For complex payload crafting, delicate "
+                "quoting, protocol-specific code, or debugging beyond the proxy's likely capability, "
+                "author the implementation yourself in implementation, with exact code or short "
+                "commands, prerequisites, and a verification step. Delegate only its bounded "
+                "execution and evidence collection; do not ask the proxy to invent the hard part. "
+                "Keep individual commands within the terminal's 1000-character single-line limit; "
+                "split larger files into small writes in the session Kali workspace. Instructions "
+                "remain subject to normal scope validation and root approval. If last_stop is "
+                "oracle_requested, review oracle_help_request as an unverified model report and "
+                "resolve the specific blocker using terminal evidence before delegating again. "
                 "If the worker stopped after failed commands, assess the terminal evidence and "
                 "choose a corrected objective. You may instead return one nonroot, read-only "
-                "oracle_command against the exact target to resolve uncertainty; leave objective "
-                "empty in that case. Never repeat a failed command or guess passwords. "
+                "oracle_command against the primary target or an evidence-backed private pivot "
+                "named in your current plan to resolve uncertainty; leave objective "
+                "empty in that case. Do not repeat a failed command. When evidence suggests a "
+                "credible password candidate, delegate a small validation against authorized "
+                "services and account names, accounting for lockout and rate limits. "
                 "If probe_feedback is present, correct the rejected probe or delegate a different "
                 "bounded task; a rejected probe has not run. "
                 "Do not repeat an unavailable-tool installation or a command already rejected. "
@@ -393,7 +442,12 @@ def run(run_dir: Path) -> None:
             return
         decision = harp.json_object(content)
         plan = str(decision.get("plan", "")).strip()[:1000]
-        objective = bound_objective(plan, str(decision.get("objective", "")).strip()[:1000])
+        try:
+            objective = assisted_objective(decision, plan)
+        except ValueError as error:
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "invalid_handoff",
+                                        "detail": str(error)})
+            return
         proposed_command = decision.get("oracle_command")
         oracle_command = proposed_command.strip() if isinstance(proposed_command, str) else ""
         if plan:

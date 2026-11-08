@@ -1,6 +1,7 @@
 """Z.AI standard API transport for HARP oracle and proxy requests."""
 
 import json
+import math
 import os
 from pathlib import Path
 import urllib.error
@@ -18,6 +19,20 @@ def validate(config: dict) -> None:
         raise ValueError("Choose glm-5.3 or glm-5.3-flash for Z.AI")
     if config.get("reasoning_effort", "low") not in ("low", "high", "max"):
         raise ValueError("Z.AI reasoning effort must be low, high, or max")
+    if "temperature" in config:
+        try:
+            temperature = float(config["temperature"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("Z.AI temperature must be 0 through 2") from error
+        if not math.isfinite(temperature) or not 0 <= temperature <= 2:
+            raise ValueError("Z.AI temperature must be 0 through 2")
+    if "top_p" in config:
+        try:
+            top_p = float(config["top_p"])
+        except (TypeError, ValueError) as error:
+            raise ValueError("Z.AI top_p must be greater than 0 and at most 1") from error
+        if not math.isfinite(top_p) or not 0 < top_p <= 1:
+            raise ValueError("Z.AI top_p must be greater than 0 and at most 1")
     # Reuse the provider-neutral price checks without OpenAI access/cache settings.
     harp_openai.validate({"model": config["model"], **{
         field: config[field] for field in harp_openai.PRICE_FIELDS if field in config}})
@@ -40,10 +55,15 @@ def models() -> list[str]:
 
 def response_body(config: dict, body: dict) -> dict:
     validate(config)
-    return {"model": config["model"], "messages": body["messages"], "stream": False,
+    payload = {"model": config["model"], "messages": body["messages"], "stream": False,
             "max_tokens": int(body.get("max_tokens", config.get("max_tokens", 8192))),
             "thinking": {"type": "enabled"},
             "reasoning_effort": config.get("reasoning_effort", "low")}
+    if "temperature" in config:
+        payload["temperature"] = float(config["temperature"])
+    if "top_p" in config:
+        payload["top_p"] = float(config["top_p"])
+    return payload
 
 
 def chat(config: dict, body: dict) -> dict:

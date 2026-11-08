@@ -198,6 +198,18 @@ def latest_activity(run_dir: Path) -> dict:
 def pending_approval(run_dir: Path, state: dict) -> dict | None:
     if state.get("status") != "active":
         return None
+    review_dir = run_dir / "command_reviews"
+    if review_dir.is_dir():
+        for path in sorted(review_dir.glob("*.request.json")):
+            decision = path.with_name(path.name.replace(".request.json", ".decision.json"))
+            if decision.exists():
+                continue
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                return {"source": "command_check", "command": item["command"],
+                        "reason": item["reason"], "id": item["id"]}
+            except (OSError, ValueError, KeyError):
+                continue
     command = state.get("pending_root_command")
     if command:
         return {"source": "local", "command": command, "id": "local"}
@@ -300,7 +312,7 @@ class HARPWebState:
                 if key in payload:
                     cfg[key] = payload[key]
             local_input = proxy_input
-            for key in ("max_input_tokens", "max_tokens", "temperature", "enable_thinking", "prompt_cache_ttl", "reasoning_effort",
+            for key in ("max_input_tokens", "max_tokens", "temperature", "top_p", "command_checks", "enable_thinking", "prompt_cache_ttl", "reasoning_effort",
                         *harp_openai.PRICE_FIELDS):
                 if key in local_input:
                     cfg["local"][key] = local_input[key]
@@ -421,8 +433,17 @@ class HARPWebState:
         state = harp.load_session(path)
         pending = pending_approval(path, state)
         if not pending or pending["id"] != request_id:
-            raise ValueError("That exact root request is no longer pending")
+            raise ValueError("That exact command request is no longer pending")
         command = pending["command"]
+        if pending["source"] == "command_check":
+            decision = path / "command_reviews" / f"{request_id}.decision.json"
+            if decision.exists():
+                raise ValueError("This command review was already decided")
+            temporary = decision.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"id": request_id, "command": command,
+                                             "approved": approved, "at": harp.now()}), encoding="utf-8")
+            temporary.replace(decision)
+            return None
         if pending["source"] == "local":
             if not approved:
                 state["pending_root_command"] = None
@@ -489,6 +510,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
+                  "/favicon.svg": ("favicon.svg", "image/svg+xml"),
                   "/app.css": ("app.css", "text/css; charset=utf-8"),
                   "/app.js": ("app.js", "application/javascript; charset=utf-8")}
         if parsed.path in assets:
@@ -607,6 +629,9 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 mode = body.get("mode", "hybrid")
                 if mode not in ("hybrid", "local-only", "frontier-only"):
                     raise ValueError("Invalid experiment mode")
+                fresh_recon = body.get("fresh_recon", False)
+                if not isinstance(fresh_recon, bool):
+                    raise ValueError("fresh_recon must be true or false")
                 with state.lock:
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
@@ -632,7 +657,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 def start_job():
                     try:
                         prepare_runtime(cfg)
-                        run_dir = harp.start_session(cfg, RUNS, mode)
+                        run_dir = harp.start_session(cfg, RUNS, mode, fresh_recon=fresh_recon)
                         if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai", "zai"):
                             def run_oracle():
                                 try:

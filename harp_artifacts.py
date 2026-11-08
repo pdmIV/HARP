@@ -14,6 +14,8 @@ KINDS = {"credential", "document", "other", "flag"}
 FLAG_NAMES = ("user.txt", "root.txt")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 FILE_READ = re.compile(r"(?i)(?<![A-Za-z0-9_-])(?:cat|type|get-content|more|head|tail|sed|awk)(?![A-Za-z0-9_-])")
+# NetExec wraps remote stdout in service, address, port and hostname columns.
+NETEXEC_OUTPUT = re.compile(r"^(?:WINRM|SMB|SSH|MSSQL)\s+\S+\s+\d+\s+\S+\s+([0-9a-fA-F]{32})\s*$", re.I)
 
 
 def list_artifacts(run_dir: Path) -> list[dict]:
@@ -124,8 +126,15 @@ def capture_flags_from_result(run_dir: Path, result: dict) -> list[dict]:
     command = str(result.get("command", ""))
     output = ANSI.sub("", str(result.get("output", "")))
     mentioned = [name for name in FLAG_NAMES if re.search(r"(?i)(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", command)]
-    hashes = list(dict.fromkeys(line.strip().lower() for line in output.splitlines()
-                                if re.fullmatch(r"[0-9a-fA-F]{32}", line.strip())))
+    values = []
+    for line in output.splitlines():
+        line = line.strip()
+        wrapped = NETEXEC_OUTPUT.fullmatch(line)
+        if wrapped and re.search(r"\b(?:nxc|netexec|crackmapexec)\b", command, re.I):
+            line = wrapped[1]
+        if re.fullmatch(r"[0-9a-fA-F]{32}", line):
+            values.append(line.lower())
+    hashes = list(dict.fromkeys(values))
     if len(mentioned) != 1 or len(hashes) != 1 or result.get("exit_code") != 0 or not FILE_READ.search(command):
         return []
     name = mentioned[0]
@@ -141,15 +150,26 @@ def capture_model_artifact(run_dir: Path, session: dict, proposal: dict) -> dict
     kind = proposal.get("kind")
     title = proposal.get("title")
     value = proposal.get("value")
-    if kind not in ("credential", "document", "other") or not isinstance(title, str) or not isinstance(value, str):
+    if kind not in KINDS or not isinstance(title, str) or not isinstance(value, str):
         return None
     if not 2 <= len(value) <= 8000:
         return None
     for observation in reversed(session.get("observations", [])):
+        # A mislabeled flag must still be classified from file-reading evidence.
+        for flag in capture_flags_from_result(run_dir, observation):
+            if flag["value"].lower() == value.lower():
+                return flag
+        if kind == "flag":
+            if (title not in FLAG_NAMES or observation.get("exit_code") != 0
+                    or not FILE_READ.search(observation.get("command", ""))
+                    or title.lower() not in observation.get("command", "").lower()):
+                continue
         if value in observation.get("output", ""):
             return register_artifact(run_dir, kind=kind, title=title, value=value,
                                      source=observation["command"], evidence="Exact value appears in terminal output",
                                      evidence_backed=True)
+    if kind == "flag":
+        return None
     for probe in reversed(session.get("http_probes", [])):
         if value in probe.get("body_excerpt", ""):
             return register_artifact(run_dir, kind=kind, title=title, value=value,
@@ -193,6 +213,8 @@ def maybe_mark_flag_success(run_dir: Path) -> None:
     if all(flags[name]["found"] for name in FLAG_NAMES):
         import harp
         state = harp.load_session(run_dir)
-        if state.get("status") == "active" and state.get("success_epoch") is None:
-            ids = ", ".join(flags[name]["artifact_id"] for name in FLAG_NAMES)
-            harp.mark_success(run_dir, "Both user.txt and root.txt captured in terminal evidence; artifact IDs: " + ids)
+        if state.get("status") == "active":
+            if state.get("success_epoch") is None:
+                ids = ", ".join(flags[name]["artifact_id"] for name in FLAG_NAMES)
+                harp.mark_success(run_dir, "Both user.txt and root.txt captured in terminal evidence; artifact IDs: " + ids)
+            harp.finish_session(run_dir, "yes")

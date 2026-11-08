@@ -105,8 +105,9 @@ def captured(operation) -> str:
     return out.getvalue()
 
 
-def start_session(mode: str = "hybrid") -> str:
-    return captured(lambda: harp.start_session(harp.load_config(ROOT / "harp.json"), RUNS, mode))
+def start_session(mode: str = "hybrid", fresh_recon: bool = False) -> str:
+    return captured(lambda: harp.start_session(harp.load_config(ROOT / "harp.json"), RUNS, mode,
+                                               fresh_recon=fresh_recon))
 
 
 def inspect_session(session: str) -> str:
@@ -241,8 +242,9 @@ TOOLS = {
     "launch_control_center": (launch_control_center, "Open the local HARP web command center so the operator can configure the model and target and start a session.", {}, []),
     "wait_for_session": (wait_for_session, "Wait for a new Hybrid session started in the web command center. Startup Nmap reconnaissance completes before this returns; use its compact structured findings to publish an oracle plan before any local delegation.",
                          {"after": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1200, "default": 1200}}, ["after"]),
-    "start_session": (start_session, "Start Kali and deterministic reconnaissance in a selected experiment mode.",
-                      {"mode": {"type": "string", "enum": ["local-only", "frontier-only", "hybrid"], "default": "hybrid"}}, []),
+    "start_session": (start_session, "Start Kali and reuse matching reconnaissance or scan in a selected experiment mode.",
+                      {"mode": {"type": "string", "enum": ["local-only", "frontier-only", "hybrid"], "default": "hybrid"},
+                       "fresh_recon": {"type": "boolean", "default": False}}, []),
     "inspect_session": (inspect_session, "Read recon, recent observations, progress, and metrics.",
                         {"session": {"type": "string"}}, ["session"]),
     "terminal": (terminal, "Run one bounded command as the nonroot Kali user.",

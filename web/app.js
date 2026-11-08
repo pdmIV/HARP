@@ -25,6 +25,20 @@
   let verboseEvents = [];
   let seenPending = false;
   let toastTimer;
+  let reviewDialogShownId = "";
+  const celebratedSessions = new Set();
+
+  function openApprovalDialog(approval) {
+    if (!approval || $("rootDialog").open) return;
+    const check = approval.source === "command_check";
+    $("dialogTitle").textContent = check ? "Review flagged command?" : "Authorize root command?";
+    $("dialogDescription").textContent = check
+      ? `HARP flagged this command: ${approval.reason} Approving runs the exact command in the selected Kali runtime. Review time does not count against the proxy model.`
+      : "The exact command below will run as root in the selected Kali runtime. Permission does not count as tactical help.";
+    $("dialogCommand").textContent = approval.command;
+    $("confirmRoot").textContent = check ? "Accept and run" : "Authorize command";
+    $("rootDialog").showModal();
+  }
 
   const themes = ["light", "dark", "amoled"];
   const themeLabels = { light: "Light", dark: "Dark", amoled: "AMOLED Dark" };
@@ -185,8 +199,10 @@
   function renderModel(model) {
     lastModel = model;
     const running = !!model.listening;
-    $("temperature").disabled = ["openai", "zai"].includes($("proxyProvider").value);
+    $("temperature").disabled = $("proxyProvider").value === "openai";
     $("enableThinking").disabled = ["openai", "zai"].includes($("proxyProvider").value);
+    $("maxInput").max = $("proxyProvider").value === "zai" ? "900000" : "131072";
+    $("maxOutput").max = $("proxyProvider").value === "zai" ? "131072" : "32768";
     const nimProxy = $("proxyProvider").value !== "unsloth";
     document.querySelectorAll(".openai-proxy").forEach(x => x.classList.toggle("hidden", $("proxyProvider").value !== "openai"));
     document.querySelectorAll(".openai-oracle").forEach(x => x.classList.toggle("hidden", $("oracleProvider").value !== "openai"));
@@ -227,7 +243,8 @@
       studioContext: studio.context || "32768", cacheK: studio.cache_k || "bf16",
       cacheV: studio.cache_v || "bf16", studioParallel: studio.parallel || "1",
       maxInput: local.max_input_tokens || "24000", maxOutput: local.max_tokens || "1024",
-      temperature: local.temperature ?? "0.7", targetInput: cfg.target || "",
+      temperature: local.temperature ?? "0.7", proxyTopP: local.top_p ?? "0.95",
+      commandChecks: local.command_checks || (local.provider === "zai" ? "essential" : "strict"), targetInput: cfg.target || "",
       runtimeSelect: cfg.runtime || "docker", wslDistro: cfg.wsl_distro || "kali-linux",
       wslUser: cfg.wsl_user || "kali", networkInput: cfg.network || "",
       networkPolicy: cfg.network_policy || "internal_lab",
@@ -245,6 +262,10 @@
     const oracle = cfg.oracle || {};
     $("oracleProvider").value = oracle.provider || "codex";
     $("oracleReasoning").value = oracle.reasoning_effort || "low";
+    $("oracleTemperature").value = oracle.temperature ?? 1;
+    $("oracleTopP").value = oracle.top_p ?? 0.95;
+    $("oracleReply").value = oracle.max_tokens || 16384;
+    $("oracleEvidence").value = oracle.evidence_depth || "compact";
     $("proxyReasoning").value = local.reasoning_effort || "low";
     setModelOptions("oracleModel", [], oracle.model || "");
     $("oracleOpenaiUrl").value = oracle.base_url || "https://api.openai.com/v1";
@@ -279,6 +300,8 @@
               ...(["openai", "zai"].includes($("proxyProvider").value) ? cacheConfig("proxy") : {}),
               max_input_tokens: Number($("maxInput").value), max_tokens: Number($("maxOutput").value),
               reasoning_effort: $("proxyReasoning").value,
+              command_checks: $("commandChecks").value,
+              ...($("proxyProvider").value === "zai" ? {top_p: Number($("proxyTopP").value)} : {}),
               temperature: Number($("temperature").value), enable_thinking: $("enableThinking").checked},
       target: $("targetInput").value.trim(), runtime: $("runtimeSelect").value,
       wsl_distro: $("wslDistro").value.trim(), wsl_user: $("wslUser").value.trim(),
@@ -291,8 +314,11 @@
                base_url: $("oracleOpenaiUrl").value.trim(), access_program: $("oracleAccess").value,
                ...(["openai", "zai"].includes($("oracleProvider").value) ? cacheConfig("oracle") : {}),
                reasoning_effort: $("oracleReasoning").value,
+               ...($("oracleProvider").value === "zai" ? {temperature: Number($("oracleTemperature").value), top_p: Number($("oracleTopP").value)} : {}),
                max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value),
-               unlimited_budget: $("oracleUnlimited").checked, max_tokens: $("oracleProvider").value === "zai" ? 8192 : $("oracleProvider").value === "openai" ? 4096 : 1024}
+               unlimited_budget: $("oracleUnlimited").checked,
+               evidence_depth: $("oracleEvidence").value,
+               max_tokens: $("oracleProvider").value === "zai" ? Number($("oracleReply").value) : $("oracleProvider").value === "openai" ? 4096 : 1024}
     };
   }
 
@@ -310,7 +336,7 @@
         kind === "oracle_nim_probe_rejected" || kind === "oracle_nim_resumed") return "oracle";
     if (kind === "local_action" || kind === "local_terminal" || kind === "memory_query") return "local";
     if (kind === "terminal_output" || kind === "approved_root_terminal") return "terminal";
-    if (kind.startsWith("root_approval")) return "approval";
+    if (kind.startsWith("root_approval") || kind.startsWith("command_review")) return "approval";
     return "system";
   }
 
@@ -327,6 +353,9 @@
     if (kind === "recon_command_started") return ["Recon command running", event.stage || "Reconnaissance", event.command || ""];
     if (kind === "recon_command_finished") return ["Recon command finished", `${event.stage || "Reconnaissance"} · exit ${event.exit_code} · ${event.seconds}s`, event.command || ""];
     if (kind === "recon_finished") return ["Reconnaissance complete", `${event.services ?? 0} services · ${event.seconds ?? 0}s`, ""];
+    if (kind === "recon_reused") return ["Saved reconnaissance reused", `${event.services ?? 0} services · from session ${event.source_session || "unknown"}${event.match_hostname ? ` · matched ${event.match_hostname} at ${event.source_target}` : ""}`, ""];
+    if (kind === "recon_identity_probe") return ["Target identity checked", event.hostnames?.length ? `Reported ${event.hostnames.join(", ")}` : "No matching HTB hostname reported", event.result?.command || ""];
+    if (kind === "recon_cache_error") return ["Recon save failed", event.error || "The run can continue, but its findings were not cached", ""];
     if (kind === "recon_failed") return ["Reconnaissance failed", event.error || "Startup failed", ""];
     if (kind === "recon_cancelled") return ["Reconnaissance stopped", "Stopped after the current command", ""];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];
@@ -361,6 +390,8 @@
     if (kind === "oracle_nim_resumed") return ["Oracle resumed", "Continuing this session's plan and cycle budget", ""];
     if (kind === "oracle_nim_probe_rejected") return ["Oracle probe needs correction", event.reason || "Probe check failed", `Correction ${event.attempt}`];
     if (kind === "local_command_rejected") return ["Command check rejected", event.reason || "Invalid command", event.command || ""];
+    if (kind === "command_review_requested") return ["Command awaiting review", event.reason || "Check flagged command", event.command || ""];
+    if (kind === "command_review_decided") return [event.approved ? "Command accepted" : event.approved === false ? "Command denied" : "Review stopped", `Review wait ${event.wait_seconds ?? 0}s · ${event.reason || ""}`, event.command || ""];
     if (kind === "local_command_check") return ["Shell syntax checked", `Exit ${event.result?.exit_code ?? "?"}`, event.result?.exit_code ? event.result?.output || "" : ""];
     if (kind === "local_response_mode_changed") return ["Proxy reply retry", "Retrying a malformed reply with stricter settings", ""];
     if (kind === "delegation_stopped") return ["Delegation stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, ""];
@@ -474,7 +505,7 @@
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
     $("metricFlags").textContent = `${flagCount} / 2`;
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.success === "no" ? "No" : "Pending";
-    $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_seconds)}` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";
+    $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";
     const live = document.querySelector(".live-indicator");
     live.classList.toggle("muted", !["active", "recon"].includes(sum.status));
     live.replaceChildren(el("i"), document.createTextNode(["active", "recon"].includes(sum.status) ? " LIVE" : " REPLAY"));
@@ -504,12 +535,24 @@
     const approval = selected.pending_approval;
     $("approvalCard").classList.toggle("hidden", !approval);
     if (approval) {
-      $("approvalDescription").textContent = `${approval.source === "local" ? "Proxy model" : "Oracle"} requested a command requiring root privileges.`;
+      const check = approval.source === "command_check";
+      $("approvalTitle").textContent = check ? "Review flagged command" : "Root authorization";
+      $("approvalDescription").textContent = check
+        ? `HARP flagged the proxy command: ${approval.reason} The proxy is paused until you decide.`
+        : `${approval.source === "local" ? "Proxy model" : "Oracle"} requested a command requiring root privileges.`;
       $("approvalCommand").textContent = approval.command;
+      if (check && reviewDialogShownId !== approval.id) {
+        reviewDialogShownId = approval.id;
+        openApprovalDialog(approval);
+      }
     }
     if (document.activeElement !== $("objectiveInput") && !$("objectiveInput").value.trim()) $("objectiveInput").value = selected.objective || "";
     renderElapsed();
     renderFlags();
+    if (sum.status === "finished" && sum.success === "yes" && flagCount === 2 && !celebratedSessions.has(selected.id)) {
+      celebratedSessions.add(selected.id);
+      $("successDialog").showModal();
+    }
     const signature = JSON.stringify((selected.artifacts || []).map(x => [x.id, x.value]));
     if (signature !== artifactSignature) {
       artifactSignature = signature;
@@ -731,13 +774,14 @@
     document.querySelectorAll(".event").forEach(x => { x.hidden = currentFilter !== "all" && x.dataset.category !== currentFilter; });
   }));
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
+  $("closeSuccess").addEventListener("click", () => $("successDialog").close());
   $("artifactFilter").addEventListener("change", () => renderArtifacts(true));
   $("saveModel").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("saveOracle").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("saveProxy").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("findProxyModels").addEventListener("click", () => loadModels("proxy"));
-  $("proxyProvider").addEventListener("change", () => { if ($("proxyProvider").value === "zai") $("maxOutput").value = Math.max(8192, Number($("maxOutput").value)); setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
-  $("oracleProvider").addEventListener("change", () => { setModelOptions("oracleModel", [], ""); renderModel({...lastModel, logs: []}); if ($("oracleProvider").value !== "codex") loadModels("oracle"); });
+  $("proxyProvider").addEventListener("change", () => { if ($("proxyProvider").value === "zai") { $("maxOutput").value = Math.max(8192, Number($("maxOutput").value)); $("temperature").value = 1; $("proxyTopP").value = 0.95; $("commandChecks").value = "essential"; } else $("commandChecks").value = "strict"; setModelOptions("proxyNimModel", [], ""); renderModel({...lastModel, logs: []}); if ($("proxyProvider").value !== "unsloth") loadModels("proxy"); });
+  $("oracleProvider").addEventListener("change", () => { if ($("oracleProvider").value === "zai" && Number($("oracleReply").value) < 16384) $("oracleReply").value = 16384; setModelOptions("oracleModel", [], ""); renderModel({...lastModel, logs: []}); if ($("oracleProvider").value !== "codex") loadModels("oracle"); });
   for (const id of ["oracleModel", "proxyNimModel", "oracleAccess", "proxyAccess", "studioModel"]) {
     $(id).addEventListener("change", renderSelections);
   }
@@ -827,7 +871,9 @@
     renderStartStop();
     try {
       await saveConfig(false);
-      if (!await action("/api/sessions/start", {mode: $("modeSelect").value})) { startPending = false; startingAt = null; }
+      if (!await action("/api/sessions/start", {mode: $("modeSelect").value,
+                                                 fresh_recon: $("freshRecon").checked})) { startPending = false; startingAt = null; }
+      else $("freshRecon").checked = false;
     } catch (error) { startPending = false; startingAt = null; toast(error.message, true); }
     renderStartStop();
   });
@@ -862,9 +908,7 @@
     catch (error) { toast(error.message, true); }
   });
   $("approveRoot").addEventListener("click", () => {
-    if (!selected?.pending_approval) return;
-    $("dialogCommand").textContent = selected.pending_approval.command;
-    $("rootDialog").showModal();
+    openApprovalDialog(selected?.pending_approval);
   });
   $("cancelRoot").addEventListener("click", () => $("rootDialog").close());
   $("confirmRoot").addEventListener("click", () => {
@@ -874,7 +918,7 @@
   });
   $("denyRoot").addEventListener("click", () => {
     const pending = selected?.pending_approval;
-    if (pending && confirm(`Deny this exact root command?\n\n${pending.command}`)) sessionAction("approval", {id: pending.id, approved: false});
+    if (pending && confirm(`Deny this exact command?\n\n${pending.command}`)) sessionAction("approval", {id: pending.id, approved: false});
   });
 
   poll();
