@@ -16,6 +16,14 @@ An optional [adaptive reasoning experiment](docs/configuration.md#adaptive-oracl
 
 In an initial Cicada comparison, the adaptive run recovered both flags while using **40.1% fewer oracle tokens** and **13.8% fewer combined oracle + proxy tokens** than the earlier fixed-max run. Recorded oracle request time was **70.9% lower**. These are preliminary observations from two runs with different execution paths and reconnaissance reuse, not controlled benchmark results. See [measurements and limitations](docs/evaluation.md#adaptive-reasoning-preliminary-cicada-results).
 
+## How Whippet helps HARP
+
+For Active Directory labs, HARP integrates [Whippet](https://github.com/pdmIV/Whippet), a companion CLI for analyzing BloodHound-compatible collector output. Whippet answers focused questions about group membership, account permissions, and candidate privilege paths, then returns compact JSON. The large capture stays in Kali while HARP supplies the models with selected findings. This aims to reduce repeated input tokens, context pressure, and API cost during AD investigations.
+
+The oracle uses principal-scoped triage to choose a lead. The proxy receives the relevant route, supporting facts, and one bounded verification task. Property selection, pagination, and structured context compaction control how much evidence enters each handoff. HARP preserves complete retained findings and their prerequisites, and marks omitted results and collection limitations. Shared tool instructions teach the models Whippet's custom interface without fine-tuning.
+
+HARP's managed batch connection reuses one loaded graph across queries and starts a fresh graph when capture contents change. Process reuse targets graph-loading overhead; focused queries target model input size. Candidate paths remain leads that require live terminal verification. End-to-end token, latency, and solve-rate improvements still need controlled evaluation. See [Whippet AD analysis](docs/whippet.md) and [managed batch queries](docs/whippet-batch.md) for the workflow and implementation details.
+
 ## Supported configurations
 
 | Component | Options |
