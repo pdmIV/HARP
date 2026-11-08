@@ -296,6 +296,48 @@ class HarpTests(unittest.TestCase):
             review.assert_called_once()
             self.assertIsNone(state["human_intervention_at"])
 
+    def test_unexecutable_proxy_format_is_repaired_without_approval_or_resume(self):
+        for bad in ("echo first\necho second", "echo " + "x" * 1000):
+            with self.subTest(length=len(bad)), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                self.make_session(path)
+                replies = iter([{"command": bad}, {"command": "echo repaired"}, {"done": True}])
+                contexts = []
+                def reply(model, system, user, ledger):
+                    contexts.append(json.loads(user))
+                    ledger.append({"finish_reason": "stop"})
+                    return json.dumps(next(replies))
+                terminal = DummyTerminal()
+                with patch.object(harp, "terminal_for", return_value=terminal), \
+                     patch.object(terminal, "run", wraps=terminal.run) as execute, \
+                     patch.object(harp, "model_context_tokens", return_value=8192), \
+                     patch.object(harp, "count_chat_tokens", return_value=300), \
+                     patch.object(harp, "review_proxy_command") as review, \
+                     patch.object(harp, "api_chat", side_effect=reply):
+                    harp.delegate(path, "Inspect target", 2, quiet=True)
+                review.assert_not_called()
+                self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
+                self.assertEqual(harp.load_session(path)["local_steps"], 1)
+                self.assertIn("single line", contexts[1]["last_command_feedback"])
+                self.assertFalse(any(c.args[0] == bad for c in execute.call_args_list))
+
+    def test_repeated_unexecutable_formats_return_bounded_oracle_recovery(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command") as review, \
+                 patch.object(harp, "api_chat", return_value=json.dumps({"command": "echo a\necho b"})) as chat:
+                harp.delegate(path, "Inspect target", 2, quiet=True)
+            review.assert_not_called()
+            self.assertEqual(chat.call_count, 3)
+            state = harp.load_session(path)
+            self.assertEqual(state["last_delegate_stop"], "command_validation_failed")
+            self.assertEqual(state["local_steps"], 0)
+            self.assertIn(state["last_delegate_stop"], harp_nim.RECOVERABLE_STOPS)
+
     def test_proxy_requests_oracle_help_without_running_a_command(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)

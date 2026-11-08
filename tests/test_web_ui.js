@@ -23,7 +23,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -126,3 +126,18 @@ assert.equal(nodes.get("activityStatusText").textContent, "LIVE");
 assert.equal(liveIndicator.replacements || 0, replacements);
 assert.match(fs.readFileSync("web/app.css", "utf8"), /\.live-indicator i\{animation:none/);
 console.log("Status indicator checks passed: stable dot and static styling across refreshes.");
+
+// Adaptive reasoning is opt-in and provider-scoped when saved.
+nodes.get("oracleProvider").value = "zai";
+nodes.get("oracleAdaptive").checked = true;
+context.ui.renderSelections();
+assert.equal(nodes.get("oracleReasoning").disabled, true);
+assert.equal(context.ui.configPayload().oracle.adaptive_reasoning, true);
+nodes.get("oracleAdaptive").checked = false;
+context.ui.renderSelections();
+assert.equal(nodes.get("oracleReasoning").disabled, false);
+assert.equal(context.ui.configPayload().oracle.adaptive_reasoning, false);
+nodes.get("oracleProvider").value = "codex";
+nodes.get("oracleAdaptive").checked = true;
+assert.equal(context.ui.configPayload().oracle.adaptive_reasoning, false);
+console.log("Adaptive effort UI checks passed: toggle, fixed controls, and provider-scoped persistence.");

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import harp_secret
 import harp_artifacts
+import harp_effort
 
 
 IMAGE = "harp-kali:latest"
@@ -60,9 +61,12 @@ with scope or require changes you cannot confidently make, request oracle help.
 
 
 def system_prompt(session: dict) -> str:
+    prompt = SYSTEM
+    if harp_effort.enabled(session.get("config", {}).get("oracle", {})):
+        prompt += harp_effort.PROXY_INSTRUCTION
     if session.get("runtime") != "wsl":
-        return SYSTEM
-    return SYSTEM.replace(
+        return prompt
+    return prompt.replace(
         "You are a security testing assistant operating only inside an authorized, isolated lab.",
         "You are a security testing assistant operating only on the authorized target."
     ).replace(
@@ -219,6 +223,12 @@ def load_config(path: Path) -> dict:
             and model.get("enable_thinking") and int(model.get("max_tokens", 700)) < 4096):
         raise ValueError("NIM proxy reasoning needs at least 4096 reply tokens")
     oracle = cfg.get("oracle", {"provider": "codex"})
+    if not isinstance(oracle.get("adaptive_reasoning", False), bool):
+        raise ValueError("Oracle adaptive_reasoning must be true or false")
+    if oracle.get("adaptive_reasoning"):
+        if not harp_effort.enabled(oracle):
+            raise ValueError("Adaptive reasoning supports only Z.AI and OpenAI oracles")
+        harp_effort.ceiling(oracle)
     if oracle.get("provider") not in ("codex", "nvidia_nim", "openai", "zai"):
         raise ValueError("Oracle provider must be codex, nvidia_nim, openai, or zai")
     if oracle.get("provider") == "zai":
@@ -1368,6 +1378,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     session["oracle_actions"] += 1
     session.pop("oracle_help_request", None)
     starting_model_calls = len(session["local_calls"])
+    session.pop("recommended_oracle_effort", None)
     append_event(run_dir, {"type": "delegation", "objective": objective,
                            "budget": None if unbridled or unlimited_budget else budget,
                            "unbridled": unbridled, "unlimited_budget": unlimited_budget})
@@ -1383,6 +1394,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     invalid = 0
     structured_mode = False
     validation_feedback = ""
+    format_rejections = 0
     failures = 0
     memory_results: list[dict] = []
     stop_reason = "step_budget"
@@ -1450,6 +1462,15 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     append_event(run_dir, {"type": "artifact_rejected", "step": step,
                                            "reason": "No matching terminal evidence"})
             append_event(run_dir, {"type": "local_action", "step": step, "action": action})
+            if (harp_effort.enabled(cfg.get("oracle", {}))
+                    and (action.get("done") is True or action.get("needs_oracle") is True)
+                    and not action.get("needs_root")
+                    and session["local_calls"][-1].get("finish_reason") != "length"):
+                recommendation = action.get("recommended_oracle_effort")
+                if recommendation in ("high", "max"):
+                    session["recommended_oracle_effort"] = recommendation
+                    append_event(run_dir, {"type": "proxy_effort_recommendation",
+                                           "effort": recommendation, "step": step})
             note = action.get("memory_note")
             if isinstance(note, str) and note.strip():
                 session["memory_notes"].append(note.strip()[:500])
@@ -1496,6 +1517,22 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     break
                 continue
             command = command.strip()
+            # Approval cannot make a command executable by the terminal transport.
+            # Ask the worker to repair its format before offering tactical review.
+            if len(command) > 1000 or any(ord(c) < 32 and c != "\t" for c in command):
+                format_rejections += 1
+                validation_feedback = (
+                    "Command cannot run: return one shell command on a single line, "
+                    "at most 1000 characters, without control characters. "
+                    "Split larger scripts into small writes; do not repeat the rejected format.")
+                append_event(run_dir, {"type": "local_command_rejected", "step": step,
+                    "command": command[:1000], "reason": validation_feedback})
+                save_session(run_dir, session)
+                if format_rejections >= 3:
+                    stop_reason = "command_validation_failed"
+                    break
+                continue
+            format_rejections = 0
             normalized = re.sub(r"\s+", " ", command.strip().lower())
             checks = cfg["local"].get("command_checks", "essential" if cfg["local"].get("provider") == "zai" else "strict")
             issue = local_command_issue(command, session["target"], objective,

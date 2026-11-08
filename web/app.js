@@ -178,6 +178,7 @@
   }
 
   function renderSelections() {
+    $("oracleReasoning").disabled = $("oracleAdaptive").checked && ["zai", "openai"].includes($("oracleProvider").value);
     const providers = {openai: "OpenAI", zai: "Z.AI", nvidia_nim: "NVIDIA NIM", unsloth: "Unsloth", codex: "Codex via MCP"};
     for (const [role, label, modelId] of [["oracle", "Oracle", "oracleModel"], ["proxy", "Proxy", "proxyNimModel"]]) {
       const provider = $(role + "Provider").value;
@@ -189,6 +190,8 @@
       node.title = model || "No model selected";
     }
   }
+
+  $("oracleAdaptive").addEventListener("change", renderSelections);
 
   function renderCostSummary(sum = {}) {
     const money = value => value == null ? "Estimate unavailable" : `$${value.toFixed(6)}`;
@@ -229,6 +232,8 @@
       document.querySelectorAll(".zai-" + role).forEach(x => x.classList.toggle("hidden", provider !== "zai"));
       document.querySelectorAll(".pricing-" + role).forEach(x => x.classList.toggle("hidden", !["openai", "zai"].includes(provider)));
     }
+    document.querySelectorAll(".adaptive-oracle").forEach(x => x.classList.toggle("hidden", !["zai", "openai"].includes($("oracleProvider").value)));
+    $("oracleReasoning").disabled = $("oracleAdaptive").checked && ["zai", "openai"].includes($("oracleProvider").value);
     $("unslothSettings").classList.toggle("hidden", nimProxy);
     $("unslothLog").classList.toggle("hidden", nimProxy);
     $("proxyNimModel").disabled = !nimProxy;
@@ -280,6 +285,7 @@
     const oracle = cfg.oracle || {};
     $("oracleProvider").value = oracle.provider || "codex";
     $("oracleReasoning").value = oracle.reasoning_effort || "low";
+    $("oracleAdaptive").checked = oracle.adaptive_reasoning === true;
     $("oracleTemperature").value = oracle.temperature ?? 1;
     $("oracleTopP").value = oracle.top_p ?? 0.95;
     $("oracleReply").value = oracle.max_tokens || 16384;
@@ -332,6 +338,7 @@
                base_url: $("oracleOpenaiUrl").value.trim(), access_program: $("oracleAccess").value,
                ...(["openai", "zai"].includes($("oracleProvider").value) ? cacheConfig("oracle") : {}),
                reasoning_effort: $("oracleReasoning").value,
+               adaptive_reasoning: ["zai", "openai"].includes($("oracleProvider").value) && $("oracleAdaptive").checked,
                ...($("oracleProvider").value === "zai" ? {temperature: Number($("oracleTemperature").value), top_p: Number($("oracleTopP").value)} : {}),
                max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value),
                unlimited_budget: $("oracleUnlimited").checked,
@@ -349,7 +356,7 @@
 
   function eventCategory(event) {
     const kind = event.type || "";
-    if (kind === "oracle_plan" || kind === "delegation" || kind === "oracle_terminal" ||
+    if (kind === "oracle_effort_selected" || kind === "proxy_effort_recommendation" || kind === "oracle_plan" || kind === "delegation" || kind === "oracle_terminal" ||
         kind === "oracle_nim_recovery" || kind === "oracle_nim_probe" ||
         kind === "oracle_nim_probe_rejected" || kind === "oracle_nim_resumed") return "oracle";
     if (kind === "local_action" || kind === "local_terminal" || kind === "memory_query") return "local";
@@ -376,6 +383,8 @@
     if (kind === "recon_cache_error") return ["Recon save failed", event.error || "The run can continue, but its findings were not cached", ""];
     if (kind === "recon_failed") return ["Reconnaissance failed", event.error || "Startup failed", ""];
     if (kind === "recon_cancelled") return ["Reconnaissance stopped", "Stopped after the current command", ""];
+    if (kind === "oracle_effort_selected") return ["Oracle reasoning effort", `${event.effort} / ${event.source} / cycle ${event.cycle}`, ""];
+    if (kind === "proxy_effort_recommendation") return ["Proxy effort recommendation", event.effort, ""];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];
     if (kind === "delegation") return ["Task delegated", `${event.objective} · ${event.unbridled ? "unbridled" : event.unlimited_budget ? "no step budget" : `up to ${event.budget} steps`}`, ""];
     if (kind === "oracle_budget_changed") return ["Oracle budget changed", event.unlimited_budget ? "Cycle and proxy step/model-call budgets removed" : "Configured budgets restored", ""];

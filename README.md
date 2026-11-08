@@ -12,6 +12,10 @@ HARP is a hierarchical AI-agent penetration-testing prototype for authorized lab
 
 For complex work, a hosted oracle can provide an exact implementation for the proxy to execute, and the proxy can request oracle help when it encounters a blocker. Z.AI GLM-5.3 and GLM-5.3-Flash sessions can use configurable oracle evidence depth and larger token ceilings; see [GLM configuration](docs/configuration.md#zai-api--glm) for practical starting settings.
 
+An optional [adaptive reasoning experiment](docs/configuration.md#adaptive-oracle-reasoning-experimental) lets the proxy recommend high or max effort for the next hosted oracle request, without a separate routing call.
+
+In an initial Cicada comparison, the adaptive run recovered both flags while using **40.1% fewer oracle tokens** and **13.8% fewer combined oracle + proxy tokens** than the earlier fixed-max run. Recorded oracle request time was **70.9% lower**. These are preliminary observations from two runs with different execution paths and reconnaissance reuse, not controlled benchmark results. See [measurements and limitations](docs/evaluation.md#adaptive-reasoning-preliminary-cicada-results).
+
 ## Supported configurations
 
 | Component | Options |

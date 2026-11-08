@@ -99,3 +99,20 @@ A recalculated estimate is labeled **at current configured prices**. The origina
 Overview and replay show combined oracle and proxy cost, an oracle-only estimate, and estimated savings in dollars and percent. The comparison retains recorded oracle work and prices the proxy's recorded token counts at oracle rates, preserving ordinary input, cache reads, cache writes, and output separately. Percentage savings are `(oracle-only estimate - hybrid total) / oracle-only estimate * 100`.
 
 This is a same-workload price comparison, not a measured oracle-only run. Actual oracle-only token usage, cache behavior, and task success may differ. Negative savings appear as extra cost and a higher-cost percentage. A zero oracle-only estimate has no defined percentage. Missing prices or usage keep the comparison unavailable, and non-Hybrid sessions show their total without hybrid savings. In replay, the comparison follows the usage revealed by the playhead.
+
+
+## Adaptive oracle reasoning (experimental)
+
+The [preliminary Cicada comparison](evaluation.md#adaptive-reasoning-preliminary-cicada-results) records the observed token and latency benefits, effort selections, and comparison limits.
+
+In **Oracle model**, enable **Adaptive reasoning (experimental)** and save the oracle before starting a new Hybrid session. This is off by default. It supports Z.AI and supported OpenAI reasoning models, without changing Codex via MCP or NVIDIA NIM settings.
+
+The first oracle request uses **high**. At the end of an objective, or when requesting oracle help, the proxy adds `recommended_oracle_effort` with `high` or `max` to its existing JSON reply. It recommends the effort needed for the next oracle decision, based on observed results. There is no separate routing request and the proxy's own effort stays unchanged.
+
+Z.AI applies high/max directly. OpenAI maps a max recommendation to max for GPT-6 models and xhigh for GPT-5.2 through GPT-5.9; other OpenAI models are rejected when enabling this experiment. Model/account API support still needs live verification. OpenAI adaptive requests send `reasoning.effort`; fixed OpenAI requests retain their previous provider defaults. For Z.AI, disabling the toggle restores the fixed effort selected in the form.
+
+Recommendations apply once. Missing, invalid, or truncated-response recommendations fall back to high, including after a delegation ends on a budget or repetition stop without a final recommendation. Starting a delegation clears any stale recommendation. A recommendation does not override stop conditions, scope checks, approvals, or success verification. The fixed effort setting is preserved while adaptive mode is enabled.
+
+Proxy commands that exceed the terminal's 1000-character limit or contain forbidden control characters are returned to the proxy for formatting correction before command approval. After three consecutive format rejections, the delegation returns `command_validation_failed` for bounded oracle recovery. These commands cannot be made executable through approval; other command reviews retain their normal behavior.
+
+The activity log shows **Proxy effort recommendation** and **Oracle reasoning effort**, including the selection source. Saved oracle call records include `reasoning_effort`, `effort_source`, `adaptive_reasoning`, elapsed seconds, and normal token usage. Compare fixed high, fixed max, and adaptive runs on separate evaluation targets. This experiment does not establish savings or routing accuracy by itself.

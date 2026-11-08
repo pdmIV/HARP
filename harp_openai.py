@@ -69,6 +69,8 @@ def response_body(config: dict, body: dict) -> dict:
     payload = {"model": config["model"], "input": messages,
                "max_output_tokens": int(body.get("max_tokens", 4096)), "store": False,
                "access_programs": {"cyber": config.get("access_program", "daybreak_blue")}}
+    if body.get("reasoning_effort") is not None:
+        payload["reasoning"] = {"effort": body["reasoning_effort"]}
     if boundary is not None:
         prefix = json.dumps(messages[:boundary + 1], sort_keys=True, separators=(",", ":"))
         identity = [config.get("base_url", BASE), config["model"],

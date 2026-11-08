@@ -1,5 +1,7 @@
 # Cicada: a HARP Hybrid case study
 
+This case study records the fixed-max baseline. A later adaptive-effort run is compared with it in [Adaptive reasoning: preliminary Cicada results](../../evaluation.md#adaptive-reasoning-preliminary-cicada-results), including observed token reductions and the limits of that comparison.
+
 HARP recovered both `user.txt` and `root.txt` from the authorized Hack The Box Cicada lab. GLM-5.3 chose bounded objectives and GLM-5.3-Flash executed commands through HARP's Kali WSL runtime. Successful terminal file reads provide the evidence for both flags.
 
 This publication includes the lab flags, credentials, and document excerpts with the operator's permission. API keys and command-center access tokens are excluded. It is a historical record of one run, including unsuccessful commands and recovery, rather than a benchmark of general reliability.

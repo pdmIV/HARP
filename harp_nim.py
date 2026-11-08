@@ -15,6 +15,7 @@ import urllib.request
 import harp
 import harp_artifacts
 import harp_secret
+import harp_effort
 
 BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
@@ -353,16 +354,27 @@ def run(run_dir: Path) -> None:
         if probe_feedback:
             context["probe_feedback"] = probe_feedback
         model_options = oracle_model_options(model)
+        effort, effort_source = harp_effort.select(cfg, session.pop("recommended_oracle_effort", None))
+        request_cfg = dict(cfg)
+        if harp_effort.enabled(cfg):
+            request_cfg["reasoning_effort"] = effort
+            # Consume once, including across restarts and oracle-only probes.
+            session["oracle_reasoning_effort"] = effort
+            harp.save_session(run_dir, session)
+            harp.append_event(run_dir, {"type": "oracle_effort_selected", "cycle": cycle + 1,
+                "effort": effort, "source": effort_source})
         harp.append_event(run_dir, {"type": "oracle_nim_request", "model": model,
                                     "cycle": cycle + 1})
         request_started = time.monotonic()
         def oracle_request(path, body):
             if cfg.get("provider") == "openai":
                 import harp_openai
-                return harp_openai.chat(cfg, {**body, "harp_role": "oracle"})
+                if harp_effort.enabled(cfg):
+                    body = {**body, "reasoning_effort": effort}
+                return harp_openai.chat(request_cfg, {**body, "harp_role": "oracle"})
             if cfg.get("provider") == "zai":
                 import harp_zai
-                return harp_zai.chat(cfg, body)
+                return harp_zai.chat(request_cfg, body)
             return request(path, body)
 
         reply = oracle_request("/chat/completions", {"model": model, "stream": False,
@@ -423,10 +435,14 @@ def run(run_dir: Path) -> None:
             cache_metrics = harp_zai.usage_metrics(cfg, usage)
         call = {"model": model, "prompt_tokens": int(usage.get("prompt_tokens") or 0),
                 "completion_tokens": int(usage.get("completion_tokens") or 0), **cache_metrics}
+        call.update(reasoning_effort=effort, effort_source=effort_source,
+                    adaptive_reasoning=harp_effort.enabled(cfg),
+                    seconds=round(time.monotonic() - request_started, 2))
         current = harp.load_session(run_dir)
         current.setdefault("oracle_calls", []).append(call)
         harp.save_session(run_dir, current)
         harp.append_event(run_dir, {"type": "oracle_nim_usage", "model": model,
+            "reasoning_effort": effort, "effort_source": effort_source,
             **cache_metrics,
             "input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
             "seconds": round(time.monotonic() - request_started, 2),
