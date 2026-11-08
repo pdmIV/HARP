@@ -13,15 +13,16 @@ The setting is `oracle.web_search_enabled`, a JSON boolean. Disabled sessions ne
 | Session limit | Four search attempts, including failures; unlimited execution does not remove this cap |
 | Search timeout | 20 seconds; response limited to 128 KiB |
 | Source retrieval | Selected Kali transport, 25-second outer timeout, 2 MB response limit, at most three redirects |
-| Retained extracted source | Up to 80,000 characters; truncation explicitly recorded |
+| Retained extracted source | Up to 2,000,000 characters within the existing 2 MB response limit; truncation explicitly recorded |
 | Returned source excerpt | Up to 6,000 characters, with extracted-text line references |
 | Hosted oracle research context | At most 9,000 serialized characters; older tasks reduced to an index |
 | Proxy research context | At most 3,000 serialized characters; may be omitted further during prompt compaction |
 | MCP research replies | At most 6,000 serialized characters; cached searches do not resend previous document reads |
+| Hosted research decisions | 16 per session, tracked separately from normal execution cycles and preserved across resumes |
 
-These are character limits, not exact tokenizer counts. HARP uses lexical matching to select relevant passages. No additional routing, extraction, or summarization model is invoked. Research actions use the normal oracle planning response; each search or read then requires another oracle turn to apply the result and consumes a hosted oracle cycle. Those inference costs remain in the normal oracle ledger.
+These are character limits, not exact tokenizer counts. HARP uses lexical matching to select relevant passages. No additional routing, extraction, or summarization model is invoked. Research actions use the normal oracle planning response; each search or read requires another oracle turn to apply the result. Research decisions consume the separate 16-turn research allowance rather than the normal execution-cycle budget. All model calls and their inference costs remain in the oracle ledger. Older logs without the separate research-turn event retain their original cycle accounting.
 
-Search queries are cached after case and whitespace normalization. Source reads are cached by source ID, with extracted documents additionally cached by URL within the session. Successful and failed attempts are reserved on disk before external work and survive resumes. No TTL, automatic refresh, retry, alternate provider, or query broadening is applied. An interrupted attempt retains its reservation and is not rerun automatically. Repeated hosted research actions stop the oracle. A process crash can leave `.research_lock`; review the stopped process before manually removing that lock. Session-local caching avoids sharing sensitive research or stale documents between unrelated runs.
+Search queries are cached after case and whitespace normalization. Source reads are cached by source ID, with extracted documents additionally cached by URL within the session. Successful and failed attempts are reserved on disk before external work and survive resumes. No TTL, automatic refresh, retry, alternate provider, or query broadening is applied. An interrupted attempt retains its reservation and is not rerun automatically. Repeated or rejected hosted research actions return feedback so the oracle can continue with evidence or report a specific blocker. If the oracle keeps requesting research after exhausting its 16-turn allowance, it stops with `research_no_progress`; legitimate execution remains available when the oracle selects it. A process crash can leave `.research_lock`; review the stopped process before manually removing that lock. Session-local caching avoids sharing sensitive research or stale documents between unrelated runs.
 
 ## Oracle interface
 
@@ -42,6 +43,20 @@ Hosted oracles return a standalone research decision through their existing JSON
 ```
 
 To read a result, replace the query with `"source_id":"ID returned by search"`. Do not combine research with a terminal command, implementation, delegation objective, or stop decision. Full source URLs remain in the research registry and event log; model context uses compact source IDs and site names. The next ordinary delegation should reference the useful findings and their source IDs.
+
+## Continuing an important chain
+
+Search and source-fetch limits restrict further internet access, not the entire assessment. An exhausted task/source budget returns `research_feedback` to the hosted oracle without automatically ending its execution loop. It can use retained evidence, delegate verification, choose another valid action within remaining limits, or explain the actual missing prerequisite. Codex receives the tool error directly and can make the same decision. These limits do not authorize additional searches merely because the model labels them important.
+
+An excerpt is not the complete exploit or document. After a successful source read, request a bounded contiguous page of the retained extracted text when prerequisite steps or code are missing:
+
+```json
+{"source_id":"SOURCE_ID","offset":0,"reason":"Read the full prerequisite sequence before using the published implementation"}
+```
+
+Codex passes `offset` as an optional argument to `read_source`; hosted oracles use this object as their standalone `research` action. `offset` is a zero-based character position in retained extracted text. Follow the exact returned `next_offset`, or seek a specific character position, until the important section is complete. Pages have a bounded serialized size, include the source hash and total character count, and consume no additional network fetch or source slot. The requested page is prioritized in hosted oracle context; proxy context can still omit it explicitly to fit the proxy budget. The oracle should supply a complete implementation through the existing handoff when necessary. Do not execute fragments assembled from incomplete excerpts.
+
+Full retained text now extends beyond the old 80,000-character cutoff up to the existing response-size limit. `source_truncated`, `context_omissions`, and pagination markers disclose incomplete coverage. Existing cached documents created under the old cutoff remain truncated and are not silently refetched. Oversized or unsupported sources, real execution budgets, operator stop, root approvals, and repeated unproductive behavior can still block a chain. These safeguards remain in effect.
 
 ## Runtime and evidence
 

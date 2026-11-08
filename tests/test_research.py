@@ -139,7 +139,7 @@ class ResearchTests(unittest.TestCase):
 
     def test_bounded_source_fetch_returns_hash_and_never_executes_content(self):
         raw = b"import os\n# text only; no execution\n"
-        for data in (raw, b"x" * 2_000_001):
+        for data in (raw, b"x" * 90000 + b"\n" + raw, b"x" * 2_000_001):
             connection = Mock()
             response = connection.getresponse.return_value
             response.status = 200
@@ -155,7 +155,10 @@ class ResearchTests(unittest.TestCase):
                 else:
                     result = research_fetch.fetch("http://example.org/docs")
                     self.assertIn("import os", result["text"])
-                    self.assertEqual(result["sha256"], research.hashlib.sha256(raw).hexdigest())
+                    self.assertEqual(result["sha256"], research.hashlib.sha256(data).hexdigest())
+                    if len(data) > 80000:
+                        self.assertGreater(len(result["text"]), 80000)
+                        self.assertFalse(result["truncated"])
             connection.close.assert_called_once()
 
     def test_provider_errors_do_not_echo_bodies_or_retry(self):
@@ -217,6 +220,97 @@ class ResearchTests(unittest.TestCase):
             search.assert_called_once()
             delegated.assert_called_once()
             self.assertEqual(len(harp.load_session(path)["oracle_calls"]), 4)
+
+    def test_research_limit_rejection_does_not_spend_the_last_execution_cycle(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            state = self.setup_session(path)
+            state["config"]["oracle"]["max_cycles"] = 1
+            harp.save_session(path, state)
+            with patch.object(research, "search_api", return_value=self.report()):
+                for i in range(4):
+                    self.search(path, f"ExampleProduct {i + 2}.0 documentation")
+            calls = []
+            def chat(cfg, body):
+                context = json.loads(body["messages"][1]["content"])
+                calls.append(context)
+                if len(calls) == 1:
+                    action = {"research": {"query": "ExampleProduct 9.0 documentation", "reason": "Check another prerequisite before selecting the route"}, "objective": ""}
+                else:
+                    self.assertIn("budget exhausted", context["research_feedback"]["error"])
+                    action = {"objective": "Verify the prerequisite using the retained evidence"}
+                return {"choices": [{"message": {"content": json.dumps({"plan": "Continue the evidence-backed route", "stop": False, **action})}}]}
+            with patch.object(harp_zai, "chat", side_effect=chat), patch.object(harp, "delegate") as delegate, patch.object(research, "search_api") as network:
+                harp_nim.run(path)
+            delegate.assert_called_once()
+            network.assert_not_called()
+            self.assertEqual(len(calls), 2)
+            history = harp_nim.oracle_history(path)
+            self.assertEqual(history["cycles"], 1)
+            self.assertEqual(history["research_turns"], 1)
+            # A resume cannot replenish either budget.
+            with patch.object(harp_zai, "chat") as chat_again:
+                harp_nim.run(path)
+            chat_again.assert_not_called()
+
+    def test_repeated_research_returns_feedback_and_allows_delegation(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            state = self.setup_session(path)
+            state["config"]["oracle"]["max_cycles"] = 1
+            harp.save_session(path, state)
+            action = {"plan": "Check one missing prerequisite", "objective": "", "stop": False,
+                      "research": {"query": "ExampleProduct 2.0 documentation", "reason": "Determine the authentication prerequisite for this route"}}
+            replies = [action, action, {"plan": "Use the retained evidence", "objective": "Verify one prerequisite", "stop": False}]
+            responses = [{"choices": [{"message": {"content": json.dumps(x)}}]} for x in replies]
+            with patch.object(harp_zai, "chat", side_effect=responses), patch.object(harp, "delegate") as delegate, patch.object(research, "search_api", return_value=self.report()) as network:
+                harp_nim.run(path)
+            delegate.assert_called_once()
+            network.assert_called_once()
+            self.assertEqual(harp_nim.oracle_history(path)["cycles"], 1)
+            self.assertEqual(harp_nim.oracle_history(path)["research_turns"], 2)
+
+    def test_cached_pages_recover_late_chain_steps_without_another_fetch(self):
+        prefix = "prerequisite details\n" * 5000
+        text = prefix + "STAGE_THREE_REQUIRED\nverify_final_condition()\n"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", return_value=self.report()), patch.object(research, "source_fetch", return_value=self.source(text)) as fetch:
+            path = Path(temp)
+            state = self.setup_session(path)
+            task = self.search(path)
+            sid = task["source_ids"][0]
+            research.request(path, {"source_id": sid, "reason": "Read the published prerequisites and implementation"})
+            action = {"source_id": sid, "offset": len(prefix), "reason": "Read the final chain stage omitted from the initial excerpt"}
+            page = research.request(path, action)
+            self.assertEqual(page["excerpt"], text[len(prefix):])
+            self.assertIsNone(page["next_offset"])
+            self.assertEqual(page["total_characters"], len(text))
+            self.assertFalse(page["source_truncated"])
+            self.assertEqual(research.context(path, state)["requested_page"]["excerpt"], page["excerpt"])
+            self.assertEqual(research.tool_result(page)["excerpt"], page["excerpt"])
+            fetch.assert_called_once()
+            self.assertEqual(research.metrics(path)["source_requests"], 1)
+            self.assertEqual(len(research.load(path)["tasks"][0]["reads"]), 1)
+
+    def test_unicode_pagination_has_no_missing_characters_at_response_boundaries(self):
+        text = "\u6f22" * 2000 + "\nFINAL_STAGE"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", return_value=self.report()), patch.object(research, "source_fetch", return_value=self.source(text)):
+            path = Path(temp)
+            state = self.setup_session(path)
+            task = self.search(path)
+            sid = task["source_ids"][0]
+            research.request(path, {"source_id": sid, "reason": "Inspect all prerequisites in the published source"})
+            offset, parts = 0, []
+            while offset is not None:
+                page = research.request(path, {"source_id": sid, "offset": offset, "reason": "Recover the next contiguous portion of the important chain"})
+                result = research.tool_result(page)
+                parts.append(result["excerpt"])
+                if result["next_offset"] is not None:
+                    self.assertEqual(result["next_offset"], offset + len(result["excerpt"]))
+                self.assertLessEqual(len(json.dumps(result)), 6000)
+                self.assertLessEqual(len(json.dumps(research.context(path, state))), research.CONTEXT_CHARS)
+                self.assertEqual(research.context(path, state)["requested_page"]["excerpt"], page["excerpt"])
+                offset = result["next_offset"]
+            self.assertEqual("".join(parts), text)
 
     def test_config_validation_and_persistence(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

@@ -108,7 +108,7 @@ def fetch(url):
             lines = [line.rstrip() for line in text.splitlines() if line.strip()]
             text = "\n".join(lines)
             return {"url": original, "final_url": url, "sha256": hashlib.sha256(data).hexdigest(),
-                    "text": text[:80000], "truncated": len(text) > 80000, "bytes": size,
+                    "text": text[:2_000_000], "truncated": len(text) > 2_000_000, "bytes": size,
                     "media_type": mime}
         finally:
             connection.close()

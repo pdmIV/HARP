@@ -256,7 +256,7 @@ def oracle_probe_issue(command: str, session: dict, objective: str) -> str | Non
 
 def oracle_history(run_dir: Path) -> dict:
     """Restore bounded oracle state when an operator resumes an active session."""
-    history = {"cycles": 0, "objectives": set(), "probes": set(), "attempts": [],
+    history = {"cycles": 0, "research_turns": 0, "objectives": set(), "probes": set(), "attempts": [],
                "rejections": 0, "recovery_streak": 0, "stall_cycles": 0,
                "last_local_steps": 0, "probe_feedback": None}
     path = run_dir / "events.jsonl"
@@ -274,6 +274,9 @@ def oracle_history(run_dir: Path) -> dict:
         if kind == "oracle_nim_request":
             history["cycles"] += 1
             last_stop = None
+        elif kind == "oracle_research_turn":
+            history["cycles"] = max(0, history["cycles"] - 1)
+            history["research_turns"] += 1
         elif kind == "oracle_plan":
             latest_plan = str(event.get("plan", ""))[:240]
         elif kind == "delegation" and isinstance(event.get("objective"), str):
@@ -335,9 +338,11 @@ def run(run_dir: Path) -> None:
     probe_rejections = history["rejections"]
     probe_feedback: dict | None = history["probe_feedback"]
     research_seen = set()
-    cycles = (itertools.count(history["cycles"]) if unlimited_budget else
-              range(history["cycles"], int(cfg.get("max_cycles", 12))))
-    for cycle in cycles:
+    used_cycles = history["cycles"]
+    research_turns = history["research_turns"]
+    for cycle in itertools.count(used_cycles + research_turns):
+        if not unlimited_budget and used_cycles >= int(cfg.get("max_cycles", 12)):
+            break
         session = harp.load_session(run_dir)
         if session["status"] != "active" or (run_dir / ".stop_session").exists() or (run_dir / ".stop_local").exists():
             return
@@ -366,18 +371,20 @@ def run(run_dir: Path) -> None:
                    "proxy_image_input_available": harp.supports_image_input(session["config"]["local"]),
                    "unverified_local_conclusion": session.get("local_conclusion"),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
-                                   for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
+                                   for name in ("user.txt", "root.txt")}, "cycle": used_cycles + 1}
         if probe_feedback:
             context["probe_feedback"] = probe_feedback
         if harp_research.enabled(session):
             context["unverified_research"] = harp_research.context(run_dir, session)
+            context["research_feedback"] = session.get("oracle_research_feedback")
+            context["research_turns_remaining"] = max(0, harp_research.MAX_ORACLE_TURNS - research_turns)
         if harp_whippet.relevant(session):
             context["whippet"] = session.get("whippet")
         whippet_chars = sum(len(x.get("output", "")) for x in observations
                             if harp_whippet.is_query(x.get("command", "")))
         if whippet_chars:
             harp.append_event(run_dir, {"type": "whippet_context", "role": "oracle",
-                                       "cycle": cycle + 1, "recent_output_characters": whippet_chars})
+                                       "cycle": used_cycles + 1, "recent_output_characters": whippet_chars})
         model_options = oracle_model_options(model)
         effort, effort_source = harp_effort.select(cfg, session.pop("recommended_oracle_effort", None))
         request_cfg = dict(cfg)
@@ -386,10 +393,11 @@ def run(run_dir: Path) -> None:
             # Consume once, including across restarts and oracle-only probes.
             session["oracle_reasoning_effort"] = effort
             harp.save_session(run_dir, session)
-            harp.append_event(run_dir, {"type": "oracle_effort_selected", "cycle": cycle + 1,
+            harp.append_event(run_dir, {"type": "oracle_effort_selected", "cycle": used_cycles + 1,
                 "effort": effort, "source": effort_source})
         harp.append_event(run_dir, {"type": "oracle_nim_request", "model": model,
-                                    "cycle": cycle + 1})
+                                    "cycle": used_cycles + 1, "turn": cycle + 1})
+        used_cycles += 1
         request_started = time.monotonic()
         def oracle_request(path, body):
             if cfg.get("provider") == "openai":
@@ -493,20 +501,37 @@ def run(run_dir: Path) -> None:
         if "research" in decision:
             if plan:
                 harp.append_event(run_dir, {"type": "oracle_plan", "plan": plan})
+            if not harp_research.enabled(session) or research_turns >= harp_research.MAX_ORACLE_TURNS:
+                harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "research_no_progress",
+                                           "detail": "Research is disabled or the oracle ignored its exhausted research-turn allowance"})
+                return
+            used_cycles -= 1
+            research_turns += 1
+            harp.append_event(run_dir, {"type": "oracle_research_turn", "count": research_turns})
+            feedback = None
             try:
                 if decision.get("objective") or decision.get("implementation") or decision.get("oracle_command") or decision.get("stop") is not False:
                     raise ValueError("Research must be a standalone oracle action with stop=false and empty objective")
                 action = decision["research"]
                 identity = ("query:" + " ".join(str(action["query"]).casefold().split()) if isinstance(action, dict) and "query" in action
-                            else "source:" + str(action.get("source_id")) if isinstance(action, dict) else "invalid")
+                            else "source:" + str(action.get("source_id")) + ":" + str(action.get("offset")) if isinstance(action, dict) else "invalid")
                 if identity in research_seen:
                     raise ValueError("Repeated oracle research action; use the preserved results")
                 research_seen.add(identity)
-                harp_research.request(run_dir, decision["research"])
+                result = harp_research.request(run_dir, decision["research"])
+                if result.get("error"):
+                    feedback = {"error": result["error"], "next": "Do not retry this failed source/search; continue with evidence or report a specific blocker"}
             except (ValueError, RuntimeError) as error:
-                harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "research_rejected", "detail": str(error)[:500]})
-                return
+                feedback = {"error": str(error)[:500], "next": "Research request rejected, not the assessment. Use cached evidence, choose a valid bounded action, or report the missing prerequisite"}
+                harp.append_event(run_dir, {"type": "research_rejected", "detail": feedback["error"]})
+            current = harp.load_session(run_dir)
+            current["oracle_research_feedback"] = feedback
+            harp.save_session(run_dir, current)
             continue
+        if session.get("oracle_research_feedback"):
+            current = harp.load_session(run_dir)
+            current.pop("oracle_research_feedback", None)
+            harp.save_session(run_dir, current)
         try:
             objective = assisted_objective(decision, plan)
         except ValueError as error:
