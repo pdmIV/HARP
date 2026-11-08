@@ -1063,7 +1063,34 @@
     document.querySelectorAll(".event").forEach(x => { x.hidden = currentFilter !== "all" && x.dataset.category !== currentFilter; });
   }));
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
-  $("closeSuccess").addEventListener("click", () => $("successDialog").close());
+  function celebrateWithConfetti() {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const layer = $("successConfetti");
+    const sample = el("span", "confetti-piece");
+    if (typeof sample.animate !== "function") return;
+    layer.replaceChildren();
+    const colors = ["#22c55e", "#fbbf24", "#38bdf8", "#f472b6", "#a78bfa", "#ffffff"];
+    const height = document.documentElement.clientHeight || 800;
+    for (let index = 0; index < 90; index++) {
+      const piece = index === 0 ? sample : el("span", "confetti-piece");
+      const x = (Math.random() - .5) * 1100;
+      const rise = 130 + Math.random() * 280;
+      const rotation = Math.random() * 360;
+      const backgroundColor = colors[index % colors.length];
+      layer.append(piece);
+      const animation = piece.animate([
+        {transform: `translate3d(0,0,0) rotate(${rotation}deg)`, opacity: 1, backgroundColor},
+        {transform: `translate3d(${x * .6}px,${-rise}px,0) rotate(${rotation + 180}deg)`, opacity: 1, backgroundColor, offset: .3},
+        {transform: `translate3d(${x}px,${height * .8}px,0) rotate(${rotation + 720}deg)`, opacity: 0, backgroundColor}
+      ], {duration: 1800 + Math.random() * 1200, delay: Math.random() * 180, easing: "cubic-bezier(.15,.6,.6,1)", fill: "both"});
+      animation.finished.then(() => piece.remove(), () => piece.remove());
+    }
+  }
+  $("closeSuccess").addEventListener("click", () => {
+    if (!$("successDialog").open) return;
+    $("successDialog").close();
+    celebrateWithConfetti();
+  });
   $("artifactFilter").addEventListener("change", () => renderArtifacts(true));
   $("saveModel").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("saveOracle").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });

@@ -256,6 +256,37 @@ for (let index = 0; index < 50; index++) bounded.set(String(index), {value: "x".
 assert(bounded.bytes <= 150 && bounded.entries.size <= 20, "Cache obeys its count and size budgets");
 console.log("Large sidebar/LRU checks passed: stable rows, 150 sessions, viewed recency, pinned session, memory budget.");
 
+// Confetti runs only on explicit dismissal and removes every particle afterward.
+const confettiLayer = nodes.get("successConfetti");
+const originalCreate = document.createElement;
+const finishedAnimations = [];
+document.createElement = () => {
+  const piece = element();
+  piece.remove = () => confettiLayer.removeChild(piece);
+  piece.animate = (frames, options) => {
+    assert(options.duration >= 1800 && options.duration <= 3000);
+    assert.equal(frames[frames.length - 1].opacity, 0);
+    return {finished: {then: finish => finishedAnimations.push(finish)}};
+  };
+  return piece;
+};
+nodes.get("successDialog").showModal();
+nodes.get("closeSuccess").handlers.click();
+assert.equal(nodes.get("successDialog").open, false);
+assert.equal(confettiLayer.children.length, 90);
+nodes.get("closeSuccess").handlers.click();
+assert.equal(finishedAnimations.length, 90, "Repeated clicks on a closed dialog must not start another burst");
+finishedAnimations.forEach(finish => finish());
+assert.equal(confettiLayer.children.length, 0);
+const originalMedia = context.matchMedia;
+context.matchMedia = query => ({matches: query === "(prefers-reduced-motion: reduce)"});
+nodes.get("successDialog").showModal();
+nodes.get("closeSuccess").handlers.click();
+assert.equal(confettiLayer.children.length, 0, "Reduced motion must disable confetti");
+context.matchMedia = originalMedia;
+document.createElement = originalCreate;
+console.log("Confetti checks passed: explicit dismissal, single burst, particle cleanup, reduced motion.");
+
 (async () => {
   let inFlight = 0, maximum = 0;
   const urls = [];
