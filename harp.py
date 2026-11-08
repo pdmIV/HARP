@@ -611,7 +611,7 @@ def local_api_key(model: dict) -> str:
             return harp_secret.load_key(key_file)
         except Exception as error:
             raise RuntimeError("Could not decrypt the Unsloth key for this Windows account") from error
-    raise RuntimeError("Set UNSLOTH_API_KEY or run python set_unsloth_key.py in your PowerShell")
+    raise RuntimeError("Import the Unsloth key in the command center's API Keys tab or set UNSLOTH_API_KEY")
 
 
 def model_context_tokens(model: dict) -> int:

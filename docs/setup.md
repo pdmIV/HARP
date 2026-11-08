@@ -19,7 +19,7 @@ The following Docker setup is optional when using WSL:
    docker build -f Dockerfile.kali -t harp-kali:latest .
    ```
 
-3. Copy [harp.example.json](../harp.example.json) to `harp.json`. Configure hosted providers using the [configuration guide](configuration.md), or set the exact model ID exposed by Unsloth Desktop for a local proxy. The model API URL defaults to `http://127.0.0.1:8888/v1`; change the port if your installation uses another loopback port. In the command center, open **API Keys**, paste the Unsloth key or choose its text file, and click **Import API key**. For headless use, `python set_unsloth_key.py` remains available. Input is hidden; the file under `.secrets` is encrypted for your Windows account and ignored by Git. HARP reads it on demand, so Codex does not need a restart for the key. You may instead provide `UNSLOTH_API_KEY` to the Codex environment.
+3. Copy [harp.example.json](../harp.example.json) to `harp.json`. Configure hosted providers using the [configuration guide](configuration.md), or set the exact model ID exposed by Unsloth Desktop for a local proxy. The model API URL defaults to `http://127.0.0.1:8888/v1`; change the port if your installation uses another loopback port. In the command center, open **API Keys**, select Unsloth, paste its key, and click **Import API key**. The key under `.secrets` is encrypted for your Windows account and ignored by Git. For headless use, set `UNSLOTH_API_KEY` in the environment of the process running HARP. HARP reads it on demand, so Codex does not need a restart for the key.
    For a GGUF model, an explicit 32K context with a BF16 KV cache can be launched with:
 
    ```powershell
