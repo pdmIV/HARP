@@ -16,13 +16,14 @@ import harp
 import harp_artifacts
 import harp_secret
 import harp_effort
+import harp_whippet
 
 BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
                      "repeated_output", "missing_command", "invalid_replies",
                      "command_validation_failed", "repeated_or_excessive_memory_query",
                      "oracle_requested"}
-FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "model_call_budget"}
+FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "model_call_budget", "whippet_batch_error"}
 
 
 def oracle_model_options(model: str) -> dict:
@@ -130,6 +131,11 @@ def compact_past_observations(observations: list[dict], *, recent: int = 4) -> l
         if digest in seen:
             continue
         seen.add(digest)
+        if harp_whippet.is_query(item.get("command", "")):
+            compact.append(harp_whippet.observation(item, 900))
+            if len(compact) == 8:
+                break
+            continue
         excerpt = output[:260] + (" … " + output[-260:] if len(output) > 520 else output[260:])
         compact.append({"command": str(item.get("command", ""))[:180],
                         "output_excerpt": excerpt})
@@ -145,8 +151,10 @@ def oracle_observations(session: dict, config: dict) -> tuple[list[dict], int]:
         depth = "detailed"
     count, output_chars = {"compact": (4, 1200), "detailed": (12, 6000),
                            "extended": (32, 12000)}[depth]
-    return ([{"command": item.get("command"), "exit_code": item.get("exit_code"),
-             "output": str(item.get("output", ""))[-output_chars:]}
+    return ([harp_whippet.observation(item, max(3000, output_chars))
+             if harp_whippet.is_query(item.get("command", "")) else
+             {"command": item.get("command"), "exit_code": item.get("exit_code"),
+              "output": str(item.get("output", ""))[-output_chars:]}
             for item in session["observations"][-count:]], count)
 
 
@@ -276,7 +284,10 @@ def oracle_history(run_dir: Path) -> dict:
             pending_attempt["terminal_results"] += 1
             pending_attempt["last_command"] = str(result.get("command", ""))[:180]
             pending_attempt["last_exit_code"] = result.get("exit_code")
-            pending_attempt["last_output"] = str(result.get("output", ""))[-350:]
+            pending_attempt["last_output"] = (
+                harp_whippet.observation(result, 500)["output"]
+                if harp_whippet.is_query(result.get("command", ""))
+                else str(result.get("output", ""))[-350:])
         elif (kind == "local_command_rejected" or
               kind == "command_review_decided" and event.get("approved") is False) and pending_attempt is not None:
             pending_attempt["last_rejection"] = {
@@ -328,6 +339,7 @@ def run(run_dir: Path) -> None:
         session = harp.load_session(run_dir)
         if session["status"] != "active" or (run_dir / ".stop_session").exists() or (run_dir / ".stop_local").exists():
             return
+        harp.ensure_whippet(run_dir, session)
         flags = harp_artifacts.flag_status(run_dir)
         if all(flags.get(name, {}).get("found") for name in ("user.txt", "root.txt")):
             harp.finish_session(run_dir, "yes")
@@ -353,6 +365,13 @@ def run(run_dir: Path) -> None:
                                    for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
         if probe_feedback:
             context["probe_feedback"] = probe_feedback
+        if harp_whippet.relevant(session):
+            context["whippet"] = session.get("whippet")
+        whippet_chars = sum(len(x.get("output", "")) for x in observations
+                            if harp_whippet.is_query(x.get("command", "")))
+        if whippet_chars:
+            harp.append_event(run_dir, {"type": "whippet_context", "role": "oracle",
+                                       "cycle": cycle + 1, "recent_output_characters": whippet_chars})
         model_options = oracle_model_options(model)
         effort, effort_source = harp_effort.select(cfg, session.pop("recommended_oracle_effort", None))
         request_cfg = dict(cfg)
@@ -420,7 +439,8 @@ def run(run_dir: Path) -> None:
                 "first consider re-enumerating shares, users, privileges, and other services with "
                 "that principal; choose the smallest evidence-gathering step that may change the plan. "
                 "Copy any authentication limits from the plan into the objective. Stop only when "
-                "blocked, repeated after correction, or no evidence-backed step remains."},
+                "blocked, repeated after correction, or no evidence-backed step remains."
+                + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_whippet.guidance(session)},
                 {"role": "user", "content": json.dumps(context)}]})
         usage = reply.get("usage") or {}
         choice = reply["choices"][0]
@@ -507,7 +527,9 @@ def run(run_dir: Path) -> None:
         if latest_result is not None:
             attempt["last_command"] = str(latest_result.get("command", ""))[:180]
             attempt["last_exit_code"] = latest_result.get("exit_code")
-            attempt["last_output"] = str(latest_result.get("output", ""))[-350:]
+            attempt["last_output"] = (harp_whippet.observation(latest_result, 500)["output"]
+                                      if harp_whippet.is_query(latest_result.get("command", ""))
+                                      else str(latest_result.get("output", ""))[-350:])
         rejection = last_command_rejection(run_dir, event_offset)
         if rejection:
             attempt["last_rejection"] = rejection

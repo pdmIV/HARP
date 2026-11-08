@@ -21,13 +21,92 @@
   let artifactSignature = "";
   let configLoaded = false;
   let pollBusy = false;
+  let pollController = null;
+  class SessionViewCache {
+    constructor(maxEntries = 20, maxBytes = 32_000_000) {
+      this.maxEntries = maxEntries; this.maxBytes = maxBytes;
+      this.entries = new Map(); this.bytes = 0; this.clock = 0;
+    }
+    has(id) { return this.entries.has(id); }
+    get(id) {
+      const entry = this.entries.get(id);
+      if (!entry) return null;
+      entry.viewed = ++this.clock;
+      return entry.value;
+    }
+    delete(id) {
+      const entry = this.entries.get(id);
+      if (entry) { this.bytes -= entry.bytes; this.entries.delete(id); }
+    }
+    set(id, value, viewed = false, pinned = "") {
+      const bytes = JSON.stringify(value).length * 2;
+      if (bytes > this.maxBytes) return;
+      const previous = this.entries.get(id);
+      const rank = viewed ? ++this.clock : previous?.viewed || 0;
+      this.delete(id);
+      this.entries.set(id, {value, bytes, viewed: rank}); this.bytes += bytes;
+      while (this.entries.size > this.maxEntries || this.bytes > this.maxBytes) {
+        const candidates = [...this.entries].filter(([key]) => key !== pinned);
+        if (!candidates.length) break;
+        const victim = candidates.reduce((a, b) => a[1].viewed <= b[1].viewed ? a : b);
+        this.delete(victim[0]);
+      }
+    }
+  }
+  const sessionCache = new SessionViewCache();
+  const sessionRows = new Map();
+  let sessionListEmpty = false;
+  let startupPrefetchStarted = false;
   let startPending = false;
   let startingAt = null;
   let verboseEvents = [];
   let seenPending = false;
   let toastTimer;
   let reviewDialogShownId = "";
+  let dependencies = null;
+  let dependencyPending = false;
   const celebratedSessions = new Set();
+  const successAcknowledgments = new Set();
+
+  function acknowledgeSuccess(session) {
+    if (!token || replay || session.success_viewed || successAcknowledgments.has(session.id)) return;
+    successAcknowledgments.add(session.id);
+    post(`/api/sessions/${encodeURIComponent(session.id)}/success-viewed`)
+      .then(() => { session.success_viewed = true; })
+      .catch(() => {}) // Polling retries if acknowledgment could not be saved.
+      .finally(() => successAcknowledgments.delete(session.id));
+  }
+
+  function renderDependencies(value) {
+    dependencies = value || null;
+    const state = value?.status || "checking";
+    const busy = state === "installing" || dependencyPending;
+    const ready = state === "ready";
+    $("dependencyWarning").classList.toggle("hidden", !value || ready);
+    $("dependencyWarningTitle").textContent = busy ? "Installing Kali dependencies" : state === "checking" ? "Checking Kali dependencies" : "Kali dependencies need attention";
+    $("dependencyWarningDetail").textContent = value ? `${value.target} · Open setup` : "";
+    $("dependencyTarget").textContent = value ? `Saved runtime: ${value.target}. Save Configuration to change it.` : "Waiting for runtime configuration.";
+    const detected = Object.entries(value?.tools || {}).filter(([, name]) => name).map(([tool, name]) => `${tool.replaceAll("_", " ")}: ${name}${name === "bloodhound-python" ? " (legacy collector)" : name === "enum4linux" ? " (legacy tool; enum4linux-ng is separate)" : ""}`);
+    $("dependencyDetected").textContent = detected.length ? `Detected AD tools: ${detected.join("; ")}` : "";
+    $("dependencyTitle").textContent = ready ? "Dependencies ready" : busy ? "Installing dependencies" : "Set up your Kali tools";
+    $("dependencyResult").classList.toggle("ready", ready);
+    $("dependencyResult").classList.toggle("warning", state === "warning");
+    $("dependencyResult").textContent = ready ? "Dependencies installed and verified. You're ready to start a session."
+      : busy ? "Installing tools and running checks. This can take several minutes."
+      : state === "checking" || value?.checking ? "Checking installed tools. No target is contacted."
+      : (value?.issues || []).join("\n");
+    $("dependencyBlocked").textContent = value?.blocked ? "Stop active sessions before installing dependencies." : "";
+    $("dependencyCommand").textContent = value?.command || "Choose and save a runtime in Configuration first.";
+    $("dependencyLog").textContent = (value?.installation?.logs || []).join("\n");
+    $("dependencyOutput").classList.toggle("hidden", !(value?.installation?.logs || []).length);
+    $("dependencyInstall").disabled = busy || !!replay || !!value?.blocked || !!value?.checking || state === "checking" || !value?.key;
+    $("dependencyInstall").textContent = busy ? "Installing…" : ready ? "Reinstall dependencies" : "Install dependencies";
+    $("dependencyInstall").classList.toggle("hidden", ready);
+    $("dependencyDone").classList.toggle("primary", ready);
+    $("dependencyDone").classList.toggle("ghost", !ready);
+    $("dependencyRecheck").disabled = busy || !!replay || !!value?.checking || state === "checking";
+    $("dependencyDone").disabled = busy;
+  }
 
   function openApprovalDialog(approval) {
     if (!approval || $("rootDialog").open) return;
@@ -99,6 +178,9 @@
   function switchSession(id) {
     if (!id || (id === selectedId && !replay)) return;
     if (replay) exitReplay(false);
+    if (pollController) pollController.abort();
+    pollController = null;
+    pollBusy = false;
     selectedId = id;
     localStorage.setItem("harpSelectedSession", id);
     selected = null;
@@ -108,7 +190,49 @@
     verboseEvents = [];
     $("verboseFeed").replaceChildren();
     $("objectiveInput").value = "";
+    const cached = sessionCache.get(id);
+    if (cached) {
+      selected = cached.selected;
+      cursor = cached.cursor;
+      appendEvents(cached.events);
+      renderSummary();
+    } else renderSummary();
+    renderSessions();
+    renderStartStop();
     poll();
+  }
+
+  function cacheCompletedSession() {
+    if (!selected || selected.summary.status !== "finished") return;
+    storeSessionView(selected, verboseEvents, cursor, true);
+  }
+
+  function storeSessionView(view, events = [], nextCursor = 0, viewed = false) {
+    const snapshot = {selected: {...view, events: []}, cursor: nextCursor, events: events.slice()};
+    // Keep the overview even when terminal history exceeds the per-entry budget.
+    if (JSON.stringify(snapshot).length > 1_000_000) { snapshot.events = []; snapshot.cursor = 0; }
+    if (JSON.stringify(snapshot).length > 1_000_000) return;
+    sessionCache.set(view.id, snapshot, viewed, selectedId);
+  }
+
+  async function prefetchRecentSessions() {
+    if (startupPrefetchStarted || !sessions.length || !token || replay) return;
+    startupPrefetchStarted = true;
+    const queue = sessions.filter(session => session.status === "finished").slice(0, 10);
+    let index = 0;
+    const worker = async () => {
+      while (index < queue.length) {
+        const session = queue[index++];
+        if (sessionCache.has(session.id) || session.id === selectedId) continue;
+        try {
+          const view = await api(`/api/sessions/${encodeURIComponent(session.id)}/view`);
+          if (!replay && view.id === session.id && view.summary.status === "finished"
+              && session.id !== selectedId && !sessionCache.has(session.id)
+              && sessions.some(item => item.id === session.id)) storeSessionView(view);
+        } catch (_) { /* Selecting retries normally; prefetch never opens dialogs. */ }
+      }
+    };
+    await Promise.all([worker(), worker()]);
   }
 
   function showPage(name) {
@@ -127,31 +251,48 @@
 
   function renderSessions() {
     const list = $("sessionList");
-    list.replaceChildren();
+    const ids = new Set(sessions.map(session => session.id));
+    for (const [id, record] of sessionRows) if (!ids.has(id)) {
+      list.removeChild(record.row); sessionRows.delete(id); sessionCache.delete(id);
+    }
     if (!sessions.length) {
-      list.append(el("div", "empty-small", "No sessions yet"));
+      if (!sessionListEmpty) list.replaceChildren(el("div", "empty-small", "No sessions yet"));
+      sessionListEmpty = true;
       return;
     }
-    for (const session of sessions) {
-      const row = el("div", "session-row" + (session.id === selectedId ? " selected" : ""));
-      const button = el("button", "session-item");
-      button.type = "button";
-      const top = el("div", "session-top");
-      top.append(el("span", "", session.target));
-      const marker = session.pending_approval ? "⚠" : session.unseen_flags ? "⚑" : session.flags_found ? "✓" : "";
-      top.append(el("span", "session-mini-alert", marker));
-      button.append(top, el("div", "session-sub", `${session.mode} · ${session.status} · ${session.id.slice(9,15)}`));
-      button.addEventListener("click", () => switchSession(session.id));
-      row.append(button);
-      if (session.status === "finished") {
-        const remove = el("button", "session-delete", "×");
+    if (sessionListEmpty || !sessionRows.size) list.replaceChildren();
+    sessionListEmpty = false;
+    const text = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+    for (const [index, session] of sessions.entries()) {
+      let record = sessionRows.get(session.id);
+      if (!record) {
+        const row = el("div", "session-row"), button = el("button", "session-item"), top = el("div", "session-top");
+        button.type = "button";
+        const target = el("span"), marker = el("span", "session-mini-alert"), sub = el("div", "session-sub");
+        top.append(target, marker); button.append(top, sub); row.append(button);
+        button.addEventListener("click", () => switchSession(session.id));
+        record = {row, button, target, marker, sub, remove: null};
+        sessionRows.set(session.id, record);
+      }
+      record.row.classList.toggle("selected", session.id === selectedId);
+      text(record.target, session.target);
+      const marker = session.pending_approval ? "!" : session.unseen_flags ? "!" : session.flags_found ? "\u2713" : "";
+      text(record.marker, marker);
+      text(record.sub, `${session.mode} \u00b7 ${session.status} \u00b7 ${session.id.slice(9,15)}`);
+      if (session.status === "finished" && !record.remove) {
+        const remove = el("button", "session-delete", "x");
         remove.type = "button";
         remove.title = "Delete session and logs";
         remove.setAttribute("aria-label", `Delete session and logs for ${session.target}`);
-        remove.addEventListener("click", () => deleteFinishedSession(session));
-        row.append(remove);
+        remove.addEventListener("click", () => {
+          const current = sessions.find(item => item.id === session.id);
+          if (current) deleteFinishedSession(current);
+        });
+        record.row.append(remove); record.remove = remove;
+      } else if (session.status !== "finished" && record.remove) {
+        record.row.removeChild(record.remove); record.remove = null;
       }
-      list.append(row);
+      if (list.children[index] !== record.row) list.insertBefore(record.row, list.children[index] || null);
     }
   }
 
@@ -165,7 +306,7 @@
     button.classList.toggle("danger", !!running);
     button.classList.toggle("primary", !running);
     button.replaceChildren(document.createTextNode(running ? "■ Stop session" : startPending ? "Starting session…" : "＋ Start session"));
-    button.disabled = !!replay || (startPending && !running);
+    button.disabled = !!replay || (startPending && !running) || (dependencies?.status === "installing" && !running);
     $("replayStart").disabled = !!replay || selected?.summary.status !== "finished";
     button.dataset.stopId = running?.id || "";
     $("modeSelect").disabled = !!replay || !!running;
@@ -578,10 +719,12 @@
     renderElapsed();
     renderFlags();
     const celebrationId = (replay ? "replay:" : "") + selected.id;
-    if (sum.status === "finished" && sum.success === "yes" && flagCount === 2 && !celebratedSessions.has(celebrationId)) {
-      celebratedSessions.add(celebrationId);
+    if (sum.status === "finished" && sum.success === "yes" && flagCount === 2 && !celebratedSessions.has(celebrationId)
+        && (replay || !selected.success_viewed)) {
       $("successDialog").showModal();
+      celebratedSessions.add(celebrationId);
     }
+    if (!replay && celebratedSessions.has(celebrationId) && !selected.success_viewed) acknowledgeSuccess(selected);
     const signature = JSON.stringify((selected.artifacts || []).map(x => [x.id, x.value]));
     if (signature !== artifactSignature) {
       artifactSignature = signature;
@@ -702,15 +845,19 @@
   async function poll() {
     if (pollBusy || replay) return;
     pollBusy = true;
+    const controller = new AbortController();
+    pollController = controller;
     try {
       const query = new URLSearchParams({session: selectedId, cursor: String(cursor), model_cursor: String(modelCursor)});
-      const data = await api(`/api/state?${query}`);
-      if (replay) return;
+      const data = await api(`/api/state?${query}`, {signal: controller.signal});
+      if (replay || pollController !== controller || controller.signal.aborted) return;
       sessions = data.sessions || [];
+      renderDependencies(data.dependencies);
       if (startPending) {
         const reconSession = sessions.find(x => x.status === "recon");
         if (reconSession && reconSession.id !== selectedId) switchSession(reconSession.id);
       }
+      if (pollController !== controller) return;
       if (selectedId && !sessions.some(x => x.id === selectedId)) {
         selectedId = "";
         cursor = 0;
@@ -735,12 +882,15 @@
         cursor = selected.event_cursor;
         appendEvents(selected.events || []);
         renderSummary();
+        cacheCompletedSession();
       }
       renderSessions();
       renderStartStop();
       updateBadges();
       if (!data.selected && selectedId) setTimeout(poll, 50);
+      void prefetchRecentSessions();
     } catch (error) {
+      if (controller.signal.aborted || pollController !== controller) return;
       if (error.message === "Session not found" || error.message === "Invalid session ID") {
         selectedId = "";
         localStorage.removeItem("harpSelectedSession");
@@ -750,7 +900,9 @@
       $("connectionDetail").textContent = error.message;
       $("connectionDot").classList.remove("online");
       if (!token) toast(error.message, true);
-    } finally { pollBusy = false; }
+    } finally {
+      if (pollController === controller) { pollBusy = false; pollController = null; }
+    }
   }
 
   async function startReplay() {
@@ -935,6 +1087,25 @@
     toast("Enter the authorized HTB target IP, then save configuration");
   });
   $("saveConfig").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
+  $("dependencyWarning").addEventListener("click", () => {
+    renderDependencies(dependencies);
+    if (!$("dependencyDialog").open) $("dependencyDialog").showModal();
+  });
+  $("dependencyDone").addEventListener("click", () => $("dependencyDialog").close());
+  $("dependencyDialog").addEventListener("cancel", event => { if (dependencies?.status === "installing" || dependencyPending) event.preventDefault(); });
+  $("dependencyRecheck").addEventListener("click", async () => {
+    try { renderDependencies(await post("/api/dependencies/check")); await poll(); }
+    catch (error) { toast(error.message, true); }
+  });
+  $("dependencyInstall").addEventListener("click", async () => {
+    if (dependencyPending || $("dependencyInstall").disabled) return;
+    const key = dependencies?.key;
+    dependencyPending = true;
+    renderDependencies(dependencies);
+    try { await post("/api/dependencies/install", {key}); }
+    catch (error) { toast(error.message, true); }
+    finally { dependencyPending = false; await poll(); }
+  });
   function setModelOptions(id, models, selected) {
     const values = [...new Set([selected, ...models].filter(Boolean))];
     $(id).replaceChildren(new Option("Choose a model", ""), ...values.map(value => new Option(value, value)));

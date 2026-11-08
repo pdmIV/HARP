@@ -50,6 +50,7 @@
       </header>
 
       <div id="toast" class="toast hidden" role="status"></div>
+      <button id="dependencyWarning" class="dependency-warning hidden" type="button" aria-haspopup="dialog" aria-controls="dependencyDialog"><strong id="dependencyWarningTitle">Kali dependencies need attention</strong><span id="dependencyWarningDetail">Open dependency setup</span><span aria-hidden="true">&#8599;</span></button>
       <section id="replayControls" class="replay-controls hidden" aria-label="Recorded session playback">
         <div class="replay-title"><strong>Recorded session replay</strong><span>Saved evidence only. No models or target commands run.</span></div>
         <div class="replay-buttons">
@@ -201,5 +202,16 @@
 
   <dialog id="rootDialog" class="root-dialog"><div class="dialog-icon">⚠</div><h2 id="dialogTitle">Authorize command?</h2><p id="dialogDescription"></p><pre id="dialogCommand"></pre><div class="dialog-actions"><button id="cancelRoot" class="button ghost">Cancel</button><button id="confirmRoot" class="button warning">Authorize command</button></div></dialog>
   <dialog id="successDialog" class="root-dialog success-dialog" aria-labelledby="successTitle"><div class="success-trophy" aria-hidden="true">&#127942;</div><h2 id="successTitle">Target conquered!</h2><p>Both user.txt and root.txt are verified and captured. Session complete. The timer has stopped.</p><div class="dialog-actions"><button id="closeSuccess" class="button primary">Celebrate &amp; close</button></div></dialog>
+  <dialog id="dependencyDialog" class="dependency-dialog" aria-labelledby="dependencyTitle">
+    <div class="eyebrow">KALI / SETUP</div><h2 id="dependencyTitle">Install dependencies</h2>
+    <p id="dependencyTarget" class="muted-text"></p>
+    <p id="dependencyDetected" class="muted-text"></p>
+    <div id="dependencyResult" class="dependency-result" role="status" aria-live="polite"></div>
+    <p class="muted-text">Installs Whippet, NetworkX, BloodHound CE's collector, Certipy and HARP's Kali tools. WSL installs system packages as root and Python tools as your saved user. Docker rebuilds its tool image. Internet access is required.</p>
+    <p id="dependencyBlocked" class="muted-text"></p>
+    <pre id="dependencyCommand" class="command-preview"></pre>
+    <details id="dependencyOutput"><summary>Installation output</summary><pre id="dependencyLog" class="dependency-log"></pre></details>
+    <div class="dialog-actions"><button id="dependencyRecheck" class="button secondary" type="button">Recheck</button><button id="dependencyInstall" class="button primary" type="button">Install dependencies</button><button id="dependencyDone" class="button ghost" type="button">Done</button></div>
+  </dialog>
 </body>
 </html>

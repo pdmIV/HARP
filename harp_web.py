@@ -7,6 +7,7 @@ from collections import deque
 from datetime import datetime, timezone
 import hmac
 import hashlib
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -30,6 +31,7 @@ import harp_openai
 import harp_zai
 import harp_replay
 import harp_costs
+import harp_dependencies
 
 
 ROOT = Path(__file__).resolve().parent
@@ -121,7 +123,8 @@ def prepare_runtime(cfg: dict) -> None:
             raise
         harp.docker("network", "create", cfg["network"], timeout=30)
     harp.check_network(cfg, starting=True)
-    recipe_hash = hashlib.sha256((ROOT / "Dockerfile.kali").read_bytes()).hexdigest()
+    recipe_hash = hashlib.sha256((ROOT / "Dockerfile.kali").read_bytes() + b"\0"
+                                 + (ROOT / "scripts" / "install-dependencies.sh").read_bytes()).hexdigest()
     stamp = ROOT / ".kali_image_stamp"
     if stamp.is_file() and stamp.read_text(encoding="ascii") == recipe_hash:
         try:
@@ -143,6 +146,22 @@ def session_path(session_id: str) -> Path:
     if not (path / "session.json").is_file():
         raise ValueError("Session not found")
     return path
+
+
+def mark_success_viewed(run_dir: Path) -> None:
+    """Persist UI acknowledgment separately from session state and experiment logs."""
+    session = harp.load_session(run_dir)
+    if session["status"] != "finished" or session.get("success") != "yes":
+        raise ValueError("Only a completed successful session can be acknowledged")
+    flags = harp_artifacts.flag_status(run_dir)
+    if not all(flags.get(name, {}).get("found") for name in ("user.txt", "root.txt")):
+        raise ValueError("Both flags must be verified before acknowledging success")
+    marker = run_dir / "success-viewed.json"
+    try:
+        with marker.open("x", encoding="utf-8") as out:
+            json.dump({"viewed_at": harp.now()}, out)
+    except FileExistsError:
+        pass
 
 
 def read_events(run_dir: Path, cursor: int, limit: int = 250) -> tuple[list[dict], int]:
@@ -169,7 +188,53 @@ def read_events(run_dir: Path, cursor: int, limit: int = 250) -> tuple[list[dict
     return events, cursor
 
 
+def file_version(path: Path) -> tuple:
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size, stat.st_ino
+
+
+@lru_cache(maxsize=16)
+def _cached_web_session(path: str, version: tuple) -> dict:
+    return harp.load_session(Path(path))
+
+
+def web_session(run_dir: Path) -> dict:
+    """Read-only dashboard snapshot; large raw observations are not retained."""
+    version = file_version(run_dir / "session.json")
+    if version[2] > 2_000_000:
+        return harp.load_session(run_dir)
+    return _cached_web_session(str(run_dir), version)
+
+
+def optional_file_version(path: Path) -> tuple | None:
+    try:
+        return file_version(path)
+    except FileNotFoundError:
+        return None
+
+
+@lru_cache(maxsize=2048)
+def _cached_sidebar_row(directory: str, version: tuple) -> dict:
+    path = Path(directory)
+    state = web_session(path)
+    flags = harp_artifacts.flag_status(path)
+    return {"id": path.name, "status": state["status"], "mode": state["mode"],
+            "target": state["target"], "started_at": state["started_at"],
+            "_pending_root_command": state.get("pending_root_command"),
+            "unseen_flags": sum(1 for flag in flags.values() if flag["unseen"]),
+            "flags_found": sum(1 for flag in flags.values() if flag["found"])}
+
+
 def latest_activity(run_dir: Path) -> dict:
+    path = run_dir / "events.jsonl"
+    if not path.is_file():
+        return {"oracle_plan": None, "local_action": None, "delegated_objective": None, "oracle_stopped": None}
+    return dict(_cached_latest_activity(str(run_dir), file_version(path)))
+
+
+@lru_cache(maxsize=32)
+def _cached_latest_activity(directory: str, version: tuple) -> dict:
+    run_dir = Path(directory)
     plan = None
     local = None
     objective = None
@@ -239,6 +304,7 @@ class HARPWebState:
         self.session_jobs: set[str] = set()
         self.stopping_sessions: set[str] = set()
         self.starting_session = False
+        self.dependencies = harp_dependencies.DependencyManager(ROOT)
         self.model_process: subprocess.Popen | None = None
         self.model_logs: deque[dict] = deque(maxlen=500)
         self.model_log_id = 0
@@ -396,25 +462,26 @@ class HARPWebState:
 
     def session_list(self) -> list[dict]:
         result = []
-        for path in sorted((p.parent for p in RUNS.glob("*/session.json")), reverse=True)[:100]:
+        for path in sorted((p.parent for p in RUNS.glob("*/session.json")), reverse=True):
             try:
-                state = harp.load_session(path)
-                flags = harp_artifacts.flag_status(path)
-                result.append({"id": path.name, "status": state["status"], "mode": state["mode"],
-                               "target": state["target"], "started_at": state["started_at"],
-                               "pending_approval": bool(pending_approval(path, state)),
-                               "unseen_flags": sum(1 for flag in flags.values() if flag["unseen"]),
-                               "flags_found": sum(1 for flag in flags.values() if flag["found"])})
+                version = tuple(optional_file_version(path / name) for name in
+                                ("session.json", "artifacts.jsonl", "flag_seen.json"))
+                row = dict(_cached_sidebar_row(str(path), version))
+                approval_state = {"status": row["status"], "pending_root_command": row.pop("_pending_root_command", None)}
+                row["pending_approval"] = (bool(pending_approval(path, approval_state))
+                                           if row["status"] == "active" else False)
+                result.append(row)
             except (OSError, ValueError, KeyError):
                 continue
         return result
 
-    def session_view(self, session_id: str, cursor: int) -> dict:
+    def session_view(self, session_id: str, cursor: int, *, include_events: bool = True) -> dict:
         path = session_path(session_id)
-        state = harp.load_session(path)
-        events, next_cursor = read_events(path, cursor)
+        state = web_session(path)
+        events, next_cursor = read_events(path, cursor) if include_events else ([], 0)
         summary = {**harp.summarize(state), **harp_costs.cost_summary(state, draft_config())}
         return {"id": session_id, "summary": summary,
+                "success_viewed": (path / "success-viewed.json").is_file(),
                 "started_epoch": state["started_epoch"],
                 "duration_seconds": state.get("duration_seconds"),
                 "delegation_limit": state["config"]["max_steps"],
@@ -467,6 +534,13 @@ class HARPWebState:
 class HARPRequestHandler(BaseHTTPRequestHandler):
     server: "HARPHTTPServer"
 
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            # A page reload or AbortController may close a request mid-response.
+            self.close_connection = True
+
     def log_message(self, _format, *_args):
         return
 
@@ -482,8 +556,11 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
 
     def _json(self, status: int, payload: dict):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self._headers(status, "application/json; charset=utf-8", len(body))
-        self.wfile.write(body)
+        try:
+            self._headers(status, "application/json; charset=utf-8", len(body))
+            self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def _authorized(self) -> bool:
         expected_host = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
@@ -538,6 +615,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 port = int(studio_settings(cfg)["port"])
                 listed = state.session_list()
                 payload = {"config": cfg, "keys": key_status(), "sessions": listed,
+                           "dependencies": {**state.dependencies.status(cfg),
+                                            "blocked": state.starting_session or any(x["status"] in ("active", "recon") for x in listed)},
                            "selected": state.session_view(selected, cursor) if selected and any(x["id"] == selected for x in listed) else None,
                            "model": {"listening": api_port_open(port), "port": port,
                                      "owned_running": bool(state.model_process and state.model_process.poll() is None),
@@ -547,6 +626,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 session_id = match.group(1)
                 path = session_path(session_id)
                 self._json(200, harp_replay.build_replay(path, self.server.state.session_view(session_id, 0), draft_config()))
+            elif (match := re.fullmatch(r"/api/sessions/([^/]+)/view", parsed.path)):
+                self._json(200, self.server.state.session_view(match.group(1), 0, include_events=False))
             elif parsed.path == "/api/health":
                 self._json(200, {"ready": True})
             elif parsed.path.startswith("/api/jobs/"):
@@ -586,6 +667,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
             else:
                 self._json(404, {"error": "Not found"})
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
         except (ValueError, KeyError, OSError) as error:
             self._json(400, {"error": str(error)})
         except Exception as error:
@@ -601,8 +684,22 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             body = self._body()
             state = self.server.state
             path = urlparse(self.path).path
+            if path == "/api/dependencies/check":
+                self._json(200, state.dependencies.status(draft_config(), force=True))
+                return
+            if path == "/api/dependencies/install":
+                with state.lock:
+                    if state.starting_session or any(x["status"] in ("active", "recon") for x in state.session_list()):
+                        raise ValueError("Stop active sessions before installing dependencies")
+                    state.dependencies.install(draft_config(), body.get("key"))
+                self._json(202, {"message": "Installing dependencies for the saved runtime"})
+                return
             if path == "/api/config":
-                self._json(200, {"config": state.save_config(body)})
+                with state.lock:
+                    if state.dependencies.installing:
+                        raise ValueError("Wait for dependency installation to finish before changing configuration")
+                    saved = state.save_config(body)
+                self._json(200, {"config": saved})
                 return
             if path.startswith("/api/keys/") or path in ("/api/openai/key", "/api/oracle/key"):
                 provider = {"/api/openai/key": "openai", "/api/oracle/key": "nvidia_nim"}.get(path, path.removeprefix("/api/keys/"))
@@ -640,6 +737,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 if not isinstance(fresh_recon, bool):
                     raise ValueError("fresh_recon must be true or false")
                 with state.lock:
+                    if state.dependencies.installing:
+                        raise ValueError("Wait for dependency installation to finish before starting a session")
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
                 cfg = harp.load_config(CONFIG)
@@ -660,6 +759,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 with state.lock:
                     if state.starting_session or any(item["status"] in ("active", "recon") for item in state.session_list()):
                         raise ValueError("A session is already starting or active")
+                    if state.dependencies.installing:
+                        raise ValueError("Wait for dependency installation to finish before starting a session")
                     state.starting_session = True
                 def start_job():
                     try:
@@ -691,6 +792,10 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "Not found"})
                 return
             session_id, action = match.groups()
+            if action == "success-viewed":
+                mark_success_viewed(session_path(session_id))
+                self._json(200, {"message": "Success message acknowledged"})
+                return
             run_dir = session_path(session_id)
             session = harp.load_session(run_dir)
             if action == "flags-seen":
@@ -817,6 +922,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "Not found"})
                 return
             self._json(202, {"job": job})
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
         except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
             self._json(400, {"error": str(error)})
         except Exception as error:

@@ -9,6 +9,12 @@ function element() {
     classList: {add() {}, remove() {}, toggle() {}},
     addEventListener(name, fn) { this.handlers[name] = fn; },
     setAttribute() {}, append(...nodes) { this.children.push(...nodes); },
+    insertBefore(node, before) {
+      const old = this.children.indexOf(node); if (old >= 0) this.children.splice(old, 1);
+      const index = before ? this.children.indexOf(before) : this.children.length;
+      this.children.splice(index, 0, node);
+    },
+    removeChild(node) { this.children.splice(this.children.indexOf(node), 1); },
     replaceChildren(...nodes) { this.replacements = (this.replacements || 0) + 1; this.children = nodes; },
     showModal() { this.open = true; this.opens++; }, close() { this.open = false; }
   };
@@ -23,7 +29,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -141,3 +147,138 @@ nodes.get("oracleProvider").value = "codex";
 nodes.get("oracleAdaptive").checked = true;
 assert.equal(context.ui.configPayload().oracle.adaptive_reasoning, false);
 console.log("Adaptive effort UI checks passed: toggle, fixed controls, and provider-scoped persistence.");
+
+context.ui.setReplay(null);
+context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL lab / peter", issues: ["Missing tools: whippet"], command: "python scripts/install_dependencies.py --runtime wsl --distro lab --user peter", tools: {bloodhound_collector: "bloodhound-python", certipy: "certipy-ad"}});
+assert.match(nodes.get("dependencyDetected").textContent, /bloodhound-python \(legacy collector\)/);
+assert.match(nodes.get("dependencyDetected").textContent, /certipy-ad/);
+assert.match(nodes.get("dependencyResult").textContent, /Missing tools: whippet/);
+nodes.get("dependencyWarning").handlers.click();
+assert.equal(nodes.get("dependencyDialog").open, true);
+assert.match(nodes.get("dependencyTarget").textContent, /WSL lab \/ peter/);
+context.ui.renderDependencies({status: "installing", key: "wsl-kali", target: "WSL lab / peter", installation: {logs: ["Installing Whippet"]}});
+assert.equal(nodes.get("dependencyDone").disabled, true);
+assert.equal(nodes.get("dependencyInstall").disabled, true);
+assert.equal(nodes.get("dependencyLog").textContent, "Installing Whippet");
+context.ui.renderDependencies({status: "ready", key: "wsl-kali", target: "WSL lab / peter"});
+assert.match(nodes.get("dependencyResult").textContent, /installed and verified/);
+assert.equal(nodes.get("dependencyDone").disabled, false);
+nodes.get("dependencyDone").handlers.click();
+assert.equal(nodes.get("dependencyDialog").open, false);
+context.ui.renderDependencies({status: "ready", key: "wsl-kali", target: "WSL lab / peter"});
+assert.equal(nodes.get("dependencyDialog").open, false, "Polling must not reopen dependency setup after Done");
+context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL lab / peter", blocked: true});
+assert.equal(nodes.get("dependencyInstall").disabled, true);
+assert.match(fs.readFileSync("web/app.css", "utf8"), /dependency-result\.ready\{[^}]*#22c55e/);
+console.log("Dependency UI checks passed: warning, focused dialog, progress, green success, Done dismissal, active-session guard.");
+
+// A fresh browser/app instance must respect the persisted session acknowledgment.
+const freshNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
+const freshDocument = {...document, documentElement: element(), getElementById: id => {
+  assert(freshNodes.has(id)); return freshNodes.get(id);
+}};
+const freshContext = {...context, document: freshDocument};
+delete freshContext.ui;
+vm.createContext(freshContext);
+vm.runInContext(source, freshContext);
+const viewedSession = {...state, id: "previously-viewed", summary: {...state.summary, status: "finished", success: "yes"},
+  success_viewed: true, flags: {"user.txt": {found: true}, "root.txt": {found: true}}};
+freshContext.ui.setSelected(viewedSession);
+freshContext.ui.renderSummary();
+freshContext.ui.setSelected({...viewedSession, id: "another-viewed"});
+freshContext.ui.renderSummary();
+assert.equal(freshNodes.get("successDialog").opens, 0, "Previously viewed successes stay silent across instances and session switches");
+freshContext.ui.setSelected({...viewedSession, id: "unseen-success", success_viewed: false});
+freshContext.ui.renderSummary();
+assert.equal(freshNodes.get("successDialog").opens, 1, "A newly seen success still celebrates");
+freshContext.ui.renderSummary();
+assert.equal(freshNodes.get("successDialog").opens, 1);
+console.log("Persistent success UI checks passed: new instance, session switching, and unseen success.");
+
+(async () => {
+  const requests = [];
+  const cacheContext = {...context, document: freshDocument, AbortController,
+    sessionStorage: {getItem: key => key === "harpControlToken" ? "test-token" : null, setItem() {}},
+    fetch: (url, options) => new Promise(resolve => requests.push({url, options, resolve}))};
+  delete cacheContext.ui;
+  vm.createContext(cacheContext);
+  vm.runInContext(source, cacheContext);
+  cacheContext.ui.setSelected(viewedSession);
+  cacheContext.ui.cacheCompletedSession();
+  cacheContext.ui.switchSession("uncached-session");
+  assert.equal(requests.length, 1);
+  cacheContext.ui.switchSession(viewedSession.id);
+  assert.equal(requests.length, 2, "Click starts a request immediately instead of waiting for the polling timer");
+  assert.equal(requests[0].options.signal.aborted, true);
+  assert.equal(freshNodes.get("metricFlags").textContent, "2 / 2", "Cached completed-session metrics render before the request returns");
+  requests[0].resolve({ok: true, json: async () => ({selected: {id: "stale"}})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(freshNodes.get("metricFlags").textContent, "2 / 2", "Late responses cannot overwrite the selected session");
+  await cacheContext.ui.poll();
+  assert.equal(requests.length, 2, "An older request's cleanup cannot release a newer request's busy guard");
+  cacheContext.ui.switchSession("third-session");
+  assert.equal(requests.length, 3);
+  assert.equal(requests[1].options.signal.aborted, true);
+  console.log("Session switching checks passed: instant cached view, immediate fetch, abort, stale-response protection.");
+})().catch(error => { console.error(error); process.exitCode = 1; });
+
+// Stable keyed rows must retain hover/focus across polling, including large lists.
+const manySessions = Array.from({length: 150}, (_, index) => ({id: `session-${index}`, status: "finished", mode: "hybrid", target: `lab-${index}`}));
+context.ui.setSessions(manySessions);
+context.ui.renderSessions();
+const sidebar = nodes.get("sessionList");
+assert.equal(sidebar.children.length, 150);
+const originalRows = sidebar.children.slice();
+const sidebarReplacements = sidebar.replacements;
+context.ui.setSessions(manySessions.map(item => ({...item})));
+context.ui.renderSessions();
+assert.equal(sidebar.replacements, sidebarReplacements);
+assert(originalRows.every((row, index) => row === sidebar.children[index]), "Polling must preserve hovered row elements");
+context.ui.setSessions(manySessions.map((item, index) => ({...item, unseen_flags: index === 4 ? 1 : 0})));
+context.ui.renderSessions();
+assert.equal(sidebar.children[4], originalRows[4]);
+assert.equal(sidebar.children[4].children[0].children[0].children[1].textContent, "!");
+context.ui.setSessions(manySessions.slice(1));
+context.ui.renderSessions();
+assert.equal(sidebar.children[0], originalRows[1]);
+
+const lru = new context.ui.SessionViewCache(3, 10000);
+lru.set("a", {id: "a"}, true); lru.set("b", {id: "b"}, true); lru.set("c", {id: "c"}, true);
+lru.get("a");
+lru.set("d", {id: "d"}, true);
+assert(!lru.has("b") && lru.has("a") && lru.has("c") && lru.has("d"), "Evict least recently viewed, not oldest-created");
+lru.set("prefetch", {id: "prefetch"});
+assert(!lru.has("prefetch"), "An unviewed background result must not displace viewed sessions");
+lru.set("e", {id: "e"}, true, "c");
+assert(lru.has("c"), "Selected session remains pinned");
+const bounded = new context.ui.SessionViewCache(20, 150);
+for (let index = 0; index < 50; index++) bounded.set(String(index), {value: "x".repeat(15)}, true);
+assert(bounded.bytes <= 150 && bounded.entries.size <= 20, "Cache obeys its count and size budgets");
+console.log("Large sidebar/LRU checks passed: stable rows, 150 sessions, viewed recency, pinned session, memory budget.");
+
+(async () => {
+  let inFlight = 0, maximum = 0;
+  const urls = [];
+  const preloadNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
+  const preloadContext = {...context, document: {...document, documentElement: element(), getElementById: id => preloadNodes.get(id)},
+    sessionStorage: {getItem: key => key === "harpControlToken" ? "test-token" : null, setItem() {}},
+    fetch: async url => {
+      urls.push(url); maximum = Math.max(maximum, ++inFlight);
+      await new Promise(resolve => setImmediate(resolve));
+      inFlight--;
+      return {ok: true, json: async () => ({id: url.split("/")[3], summary: {status: "finished"}, events: [], success_viewed: false})};
+    }};
+  delete preloadContext.ui;
+  vm.createContext(preloadContext); vm.runInContext(source, preloadContext);
+  preloadContext.ui.setSessions(manySessions);
+  await preloadContext.ui.prefetchRecentSessions();
+  assert.equal(urls.length, 10);
+  assert.equal(maximum, 2, "Startup prefetch uses only two concurrent requests");
+  assert(urls.every(url => url.endsWith("/view")));
+  assert.equal(preloadContext.ui.sessionCache.entries.size, 10);
+  assert([...preloadContext.ui.sessionCache.entries.values()].every(entry => entry.viewed === 0));
+  assert.equal(preloadNodes.get("successDialog").opens, 0, "Prefetch is not a view and must not acknowledge or celebrate success");
+  await preloadContext.ui.prefetchRecentSessions();
+  assert.equal(urls.length, 10, "Do not repeat startup prefetch every poll");
+  console.log("Startup prefetch checks passed: ten sessions, bounded concurrency, no viewed acknowledgments.");
+})().catch(error => { console.error(error); process.exitCode = 1; });

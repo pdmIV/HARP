@@ -81,6 +81,26 @@ In Docker mode, HARP refuses host networking, an internal bridge selected as a V
 
 ## Activity status and cost display
 
+Session clicks immediately start a refresh, canceling any older dashboard request.
+Startup preloads the ten newest completed session overviews using two background
+requests at a time. Prefetch does not mark flags or success dialogs viewed. Full
+terminal histories load when a session is selected. Recently viewed completed
+sessions display from a browser cache while their metadata refreshes. The cache
+holds at most twenty views with a 32 MB estimated serialized-data budget; large
+event histories fall back to overview-only entries. It evicts unviewed prefetch
+entries first, then the least recently viewed sessions, while protecting the
+selected session. Sidebar cards keep their DOM elements across polling to retain
+hover/focus. All saved sessions remain listed, including more than 100; a bounded
+server metadata index avoids repeatedly parsing their complete JSON files.
+HARP reuses unchanged session JSON and activity parsing
+on the server; file changes invalidate these caches. Flags, acknowledgment state,
+and prices are still refreshed from the server.
+
+The success dialog is acknowledged when displayed. HARP saves this per session,
+so viewing that session in a later web UI instance or another browser does not
+show the same confirmation again. This UI acknowledgment does not modify the
+experiment outcome, flag visibility, timing, or human-intervention record.
+
 The event-stream status uses a steady dot and one of three labels:
 
 | Label | Meaning |

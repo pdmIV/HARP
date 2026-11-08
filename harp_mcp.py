@@ -17,6 +17,7 @@ import webbrowser
 
 import harp
 import harp_artifacts
+import harp_whippet
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -115,9 +116,14 @@ def inspect_session(session: str) -> str:
     return json.dumps({"summary": harp.summarize(state), "recon": state["recon"],
                        "http_probes": state.get("http_probes", []),
                        "smb_probes": state.get("smb_probes", []),
+                       "whippet": state.get("whippet"),
+                       "whippet_guidance": harp_whippet.guidance(state),
+                       "smb_tool_guidance": harp_whippet.SMB_TOOL_GUIDANCE,
                        "flags": harp_artifacts.flag_status(run_path(session)),
                        "artifacts": harp_artifacts.list_artifacts(run_path(session)),
-                       "recent_observations": state["observations"][-4:],
+                       "recent_observations": [harp_whippet.observation(x, 3000)
+                                               if harp_whippet.is_query(x.get("command", "")) else x
+                                               for x in state["observations"][-4:]],
                        "memory_notes": state["memory_notes"][-12:]}, indent=2)
 
 
@@ -152,7 +158,17 @@ def capture_document(session: str, path: str, title: str) -> str:
 
 
 def terminal(session: str, command: str) -> str:
+    if harp_whippet.is_query(command):
+        path = run_path(session)
+        harp.direct_exec(path, command, quiet=True)
+        result = harp.load_session(path)["observations"][-1]
+        return json.dumps(harp_whippet.observation(result, 3000))
     return captured(lambda: harp.direct_exec(run_path(session), command))
+
+
+def whippet_query(session: str, inputs: list[str], request: dict, refresh: bool = False) -> str:
+    result = harp.whippet_query(run_path(session), inputs, request, refresh=refresh)
+    return json.dumps(harp_whippet.observation(result, 3000))
 
 
 def terminal_root(session: str, command: str) -> str:
@@ -208,6 +224,10 @@ def record_oracle_plan(session: str, plan: str) -> str:
 
 
 def delegate_local(session: str, objective: str, steps: int | None = None, unbridled: bool = False) -> str:
+    path = run_path(session)
+    if harp_whippet.relevant(harp.load_session(path)):
+        harp.delegate(path, objective, steps, quiet=True, unbridled=unbridled)
+        return inspect_session(session)
     return captured(lambda: harp.delegate(run_path(session), objective, steps, unbridled=unbridled))
 
 
@@ -249,6 +269,10 @@ TOOLS = {
                         {"session": {"type": "string"}}, ["session"]),
     "terminal": (terminal, "Run one bounded command as the nonroot Kali user.",
                  {"session": {"type": "string"}, "command": {"type": "string"}}, ["session", "command"]),
+    "whippet_query": (whippet_query, "Query a reused offline Whippet graph in the selected Kali runtime. Capture files must be in the session workspace. Transport failures stop the process; refresh explicitly to restart.",
+                      {"session": {"type": "string"}, "inputs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32},
+                       "request": {"type": "object"}, "refresh": {"type": "boolean", "default": False}},
+                      ["session", "inputs", "request"]),
     "terminal_root": (terminal_root, "Run one root command after the human approves this exact tool call. Permission is not tactical intervention.",
                       {"session": {"type": "string"}, "command": {"type": "string"}}, ["session", "command"]),
     "record_oracle_plan": (record_oracle_plan, "Publish a concise, user-visible strategy or plan update to the HARP command center.",

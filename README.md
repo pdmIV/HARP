@@ -27,7 +27,7 @@ In an initial Cicada comparison, the adaptive run recovered both flags while usi
 
 ## Getting started
 
-1. Follow [Setup](docs/setup.md) to prepare Python, Kali, and your chosen runtime.
+1. Follow [Setup](docs/setup.md) and run the [dependency installer](docs/dependencies.md) for your Kali runtime. It includes Whippet, NetworkX, BloodHound CE's collector, Certipy, and HARP's existing tools.
 2. Run `python harp_web.py` from the repository root.
 3. Import credentials in **API Keys**, select models in **Oracle model** and **Proxy model**, and save your target and Kali runtime in **Configuration**.
 4. Follow [Running sessions](docs/running-sessions.md) to start a run or connect Codex through MCP.
@@ -39,8 +39,11 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | Guide | Contents |
 | --- | --- |
 | [Setup](docs/setup.md) | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup |
+| [Install dependencies](docs/dependencies.md) | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection |
 | [Configuration](docs/configuration.md) | Providers, model selection, API keys, limits, context, caching, costs, and access errors |
 | [Running sessions](docs/running-sessions.md) | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
+| [Whippet AD analysis](docs/whippet.md) | Optional Kali CLI, model awareness, focused graph queries, and structured context limits |
+| [Whippet batch queries](docs/whippet-batch.md) | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup |
 | [Host protection](docs/host-protection.md) | Runtime boundaries, command validation, and root approvals |
 | [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits |
 | [Operator guide](AGENTS.md) | Instructions for Codex operators |

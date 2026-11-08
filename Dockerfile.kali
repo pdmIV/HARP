@@ -1,9 +1,9 @@
 FROM kalilinux/kali-rolling
 
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    nmap libcap2-bin curl ca-certificates dnsutils iproute2 netcat-openbsd \
-    smbclient ldap-utils enum4linux-ng python3-impacket evil-winrm netexec \
-    whatweb gobuster openssh-client \
+ARG WHIPPET_REF=main
+COPY scripts/install-dependencies.sh /usr/local/share/harp/install-dependencies.sh
+RUN sed -i 's/\r$//' /usr/local/share/harp/install-dependencies.sh \
+    && bash /usr/local/share/harp/install-dependencies.sh --system --whippet-ref "$WHIPPET_REF" \
     && setcap cap_net_raw+ep /usr/lib/nmap/nmap \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 harp

@@ -6,6 +6,16 @@ Run these commands from the repository root in PowerShell. HARP uses Python's st
 
 ## Existing Kali WSL
 
+First run the [dependency installer](dependencies.md) for your selected runtime.
+It installs Whippet with NetworkX, BloodHound CE's collector, Certipy, and the
+existing Kali tools, then verifies them offline. For example, from PowerShell:
+
+```powershell
+python scripts/install_dependencies.py --runtime wsl --distro kali-linux --user kali
+```
+
+Replace the distribution and user with the exact values configured below.
+
 For the existing Kali WSL runtime, select **Existing Kali WSL** in Configuration, set the distribution and user (default `kali-linux` and `kali`), and use the VPN network policy. HARP checks for `nmap`, `nxc`, `timeout`, and `python3` before starting. The Docker network, memory, and CPU settings are ignored in WSL mode. HARP uses TCP connect scans there so nonroot Kali can perform deterministic reconnaissance. Document capture accepts files in the session workspace shown in the session record.
 
 ## Docker and the local demo
@@ -13,7 +23,7 @@ For the existing Kali WSL runtime, select **Existing Kali WSL** in Configuration
 The following Docker setup is optional when using WSL:
 
 1. Start Docker Desktop with its Linux engine and WSL 2 backend.
-2. Build the Kali tool image:
+2. Build the Kali tool image, including Whippet and its AD companion tools:
 
    ```powershell
    docker build -f Dockerfile.kali -t harp-kali:latest .

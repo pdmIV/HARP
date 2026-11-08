@@ -27,6 +27,8 @@ from pathlib import Path
 import harp_secret
 import harp_artifacts
 import harp_effort
+import harp_whippet
+import harp_whippet_batch
 
 
 IMAGE = "harp-kali:latest"
@@ -61,7 +63,9 @@ with scope or require changes you cannot confidently make, request oracle help.
 
 
 def system_prompt(session: dict) -> str:
-    prompt = SYSTEM
+    prompt = SYSTEM + "\n" + harp_whippet.SMB_TOOL_GUIDANCE
+    if harp_whippet.guidance(session):
+        prompt += "\n" + harp_whippet.guidance(session)
     if harp_effort.enabled(session.get("config", {}).get("oracle", {})):
         prompt += harp_effort.PROXY_INSTRUCTION
     if session.get("runtime") != "wsl":
@@ -388,6 +392,8 @@ class KaliTerminal:
             "truncated": size >= MAX_OUTPUT,
             "as_root": as_root,
         }
+        if self.event_dir:
+            harp_whippet.capture(result, self.event_dir)
         if self.recon_mode and self.event_dir:
             append_event(self.event_dir, {"type": "recon_command_finished",
                                           "stage": self.recon_stage, "command": command,
@@ -409,6 +415,11 @@ class KaliTerminal:
     def file_argv(self, script: str, path: str) -> list[str]:
         return ["docker", "exec", "--user", "10001:10001", self.name,
                 "python3", "-c", script, path]
+
+    def batch_argv(self, script: str, args: list[str]) -> list[str]:
+        """Long-lived local analysis transport; all arguments bypass shell parsing."""
+        return ["docker", "exec", "-i", "--user", "10001:10001", "--workdir", "/workspace",
+                self.name, "python3", "-c", script, *args]
 
     def stats(self) -> dict | None:
         try:
@@ -465,6 +476,9 @@ class WslTerminal(KaliTerminal):
 
     def file_argv(self, script: str, path: str) -> list[str]:
         return self._base() + ["python3", "-c", script, path]
+
+    def batch_argv(self, script: str, args: list[str]) -> list[str]:
+        return self._base() + ["python3", "-c", script, *args]
 
     def stats(self) -> dict | None:
         return None
@@ -690,7 +704,7 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
     for attempt in range(7):
         reduced = copy.deepcopy(context)
         reduced["recent_terminal_results"] = [
-            {**item, "output": item["output"][:output_chars]}
+            harp_whippet.observation(item, output_chars)
             for item in reduced["recent_terminal_results"]
         ]
         reduced["unverified_memory_notes"] = [
@@ -1117,6 +1131,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
             append_event(run_dir, {"type": "recon_finished", "seconds": round(
                 session["recon_finished_epoch"] - started_epoch, 2),
                 "services": len(snapshot["recon"]), "reused": True})
+            ensure_whippet(run_dir, session, terminal)
             save_session(run_dir, session)
             if matched_hostname:
                 new_snapshot = {**snapshot, "profile": recon_profile(cfg),
@@ -1223,6 +1238,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
         terminal.recon_mode = False
         append_event(run_dir, {"type": "recon_finished", "seconds": round(
             session["recon_finished_epoch"] - started_epoch, 2), "services": len(findings)})
+        ensure_whippet(run_dir, session, terminal)
         save_session(run_dir, session)
         try:
             save_recon_snapshot(output_root, cfg, recon_snapshot(session, run_dir.name))
@@ -1245,11 +1261,67 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
         raise
 
 
+def ensure_whippet(run_dir: Path, session: dict, terminal=None) -> None:
+    """Discover once per relevant session, through the selected logged runtime."""
+    if not harp_whippet.relevant(session) or ("batch_compatible" in session.get("whippet", {})
+                                             and "tool_executables" in session.get("whippet", {})):
+        return
+    terminal = terminal or terminal_for(session)
+    terminal.event_dir = run_dir
+    try:
+        status, result = harp_whippet.check(terminal)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        status = {"available": False, "compatible": False}
+        result = {"command": harp_whippet.CHECK_COMMAND, "exit_code": -1,
+                  "output": str(error)[:500], "truncated": False}
+    session["whippet"] = status
+    session["tool_discovery_calls"] = session.get("tool_discovery_calls", 0) + 1
+    append_event(run_dir, {"type": "whippet_availability", "status": status, "result": result})
+    save_session(run_dir, session)
+
+
 def terminal_for(session: dict) -> KaliTerminal:
     if session["status"] != "active":
         raise RuntimeError("Session is not active")
     terminal_class = WslTerminal if session.get("runtime", "docker") == "wsl" else KaliTerminal
     return terminal_class.attach(session["config"], session["container"])
+
+
+def whippet_query(run_dir: Path, inputs: list[str], request: dict, *, refresh: bool = False,
+                  session: dict | None = None, origin: str = "oracle") -> dict:
+    """One offline, logged query; proxy callers retain their existing session state."""
+    session = session if session is not None else load_session(run_dir)
+    if session["status"] != "active" or not harp_whippet.relevant(session):
+        raise ValueError("Whippet batch queries require an active AD session")
+    if origin == "oracle" and session.get("mode") == "local-only":
+        raise RuntimeError("Oracle queries are disabled in proxy-only mode")
+    if any((run_dir / name).exists() for name in (".stop_session", ".stop_local")):
+        raise RuntimeError("Session stop was requested")
+    harp_whippet_batch.validate(inputs, request)
+    if type(refresh) is not bool:
+        raise ValueError("refresh must be a boolean")
+    terminal = terminal_for(session)
+    ensure_whippet(run_dir, session, terminal)
+    capability = session.get("whippet", {})
+    if not capability.get("batch_compatible"):
+        append_event(run_dir, {"type": "whippet_batch_unavailable", "policy": "use explicit one-shot CLI or installed alternatives"})
+        raise RuntimeError("Whippet 0.7 batch is unavailable; use the one-shot CLI or installed alternatives")
+    started = time.monotonic()
+    response = harp_whippet_batch.query(run_dir, terminal, inputs, request, capability["executable"],
+        lambda event: append_event(run_dir, event), refresh=refresh,
+        timeout=min(60, int(session["config"]["command_timeout_seconds"])))
+    result = {"command": "whippet-query " + request["mode"] + " id=" + str(response.get("id")),
+              "output": json.dumps(response, separators=(",", ":")), "exit_code": 1 if "error" in response else 0,
+              "seconds": round(time.monotonic() - started, 4), "truncated": False, "as_root": False,
+              "origin": origin, "whippet_batch": True,
+              "whippet_request_key": json.dumps({"inputs": inputs, "request": request, "refresh": refresh}, sort_keys=True)}
+    harp_whippet.capture(result, run_dir)
+    if origin == "oracle":
+        session["oracle_actions"] += 1
+        session["observations"].append(result)
+        append_event(run_dir, {"type": "oracle_terminal", "result": result})
+        save_session(run_dir, session)
+    return result
 
 
 def latest_oracle_plan(run_dir: Path) -> str:
@@ -1364,6 +1436,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     terminal.event_dir = run_dir
     terminal.print_stdout = not quiet
     cfg = session["config"]
+    ensure_whippet(run_dir, session, terminal)
     limit = int(cfg["max_steps"])
     budget = limit if budget is None else budget
     if budget < 1 or (not (unbridled or unlimited_budget) and budget > limit):
@@ -1389,6 +1462,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     stop_file.unlink(missing_ok=True)
     seen = {re.sub(r"\s+", " ", x["command"].strip().lower())
             for x in session["observations"] if x.get("origin") == "local"}
+    seen.update(x["whippet_request_key"] for x in session["observations"] if x.get("whippet_request_key"))
     previous_hash = None
     repeated_output = 0
     invalid = 0
@@ -1414,20 +1488,23 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "delegated_objective": objective, "recon": session["recon"],
                 "http_probes": session.get("http_probes", []),
                 "smb_probes": session.get("smb_probes", []),
+                "whippet": session.get("whippet") if harp_whippet.relevant(session) else None,
                 "last_command_feedback": validation_feedback,
                 "step": step, "remaining": None if unbridled or unlimited_budget else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
                 "memory_search_results": memory_results,
-                "recent_terminal_results": [
-                    {"command": x["command"], "exit_code": x["exit_code"], "output": x["output"][:3000]}
-                    for x in session["observations"][-4:]
-                ],
+                "recent_terminal_results": session["observations"][-4:],
                 "prior_commands": [x["command"] for x in session["observations"]][-30:],
             }
             action_model = ({**cfg["local"], "enable_thinking": False, "temperature": 0.2}
                             if structured_mode else cfg["local"])
             prompt = system_prompt(session)
             fitted_user, prompt_tokens, compacted = fit_context(action_model, context, prompt_budget, prompt)
+            fitted_results = json.loads(fitted_user)["recent_terminal_results"]
+            whippet_chars = sum(len(x["output"]) for x in fitted_results if harp_whippet.is_query(x.get("command", "")))
+            if whippet_chars:
+                append_event(run_dir, {"type": "whippet_context", "role": "proxy", "step": step,
+                                       "output_characters": whippet_chars, "prompt_tokens": prompt_tokens})
             session["max_prompt_tokens_seen"] = max(session.get("max_prompt_tokens_seen", 0), prompt_tokens)
             if compacted:
                 append_event(run_dir, {"type": "context_compaction", "step": step,
@@ -1491,7 +1568,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     break
                 prior.append(query)
                 memory_results = [
-                    {"source": "terminal_evidence", "command": x["command"], "excerpt": x["output"][:1200]}
+                    {"source": "terminal_evidence", "command": x["command"],
+                     "excerpt": harp_whippet.observation(x, 1200)["output"]}
                     for x in session["observations"] if query in x["output"].lower()
                 ][-4:]
                 memory_results += [
@@ -1509,67 +1587,89 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 else:
                     stop_reason = "invalid_root_request"
                 break
-            command = action.get("command")
-            if not isinstance(command, str) or not command.strip():
-                invalid += 1
-                if invalid >= 2:
-                    stop_reason = "missing_command"
+            batch_action = action.get("whippet_query")
+            if batch_action is not None:
+                try:
+                    if (not isinstance(batch_action, dict) or action.get("command")
+                            or set(batch_action) - {"inputs", "request", "refresh"}
+                            or type(batch_action.get("refresh", False)) is not bool):
+                        raise ValueError("Invalid Whippet action; supply inputs, request and optional refresh")
+                    normalized = json.dumps({"inputs": batch_action.get("inputs"), "request": batch_action.get("request"),
+                                             "refresh": batch_action.get("refresh", False)}, sort_keys=True)
+                    if normalized in seen and not unbridled:
+                        stop_reason = "repeated_command"
+                        break
+                    result = whippet_query(run_dir, batch_action.get("inputs"), batch_action.get("request"),
+                                           refresh=batch_action.get("refresh", False), session=session, origin="local")
+                    seen.add(normalized)
+                    command = result["command"]
+                except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                    append_event(run_dir, {"type": "whippet_batch_error", "error": str(error)[:1000]})
+                    session["oracle_help_request"] = "Whippet query failed: " + str(error)[:1000]
+                    stop_reason = "whippet_batch_error"
                     break
-                continue
-            command = command.strip()
-            # Approval cannot make a command executable by the terminal transport.
-            # Ask the worker to repair its format before offering tactical review.
-            if len(command) > 1000 or any(ord(c) < 32 and c != "\t" for c in command):
-                format_rejections += 1
-                validation_feedback = (
-                    "Command cannot run: return one shell command on a single line, "
-                    "at most 1000 characters, without control characters. "
-                    "Split larger scripts into small writes; do not repeat the rejected format.")
-                append_event(run_dir, {"type": "local_command_rejected", "step": step,
-                    "command": command[:1000], "reason": validation_feedback})
-                save_session(run_dir, session)
-                if format_rejections >= 3:
-                    stop_reason = "command_validation_failed"
-                    break
-                continue
-            format_rejections = 0
-            normalized = re.sub(r"\s+", " ", command.strip().lower())
-            checks = cfg["local"].get("command_checks", "essential" if cfg["local"].get("provider") == "zai" else "strict")
-            issue = local_command_issue(command, session["target"], objective,
-                                        session["observations"], checks=checks,
-                                        authorized_scope=cfg.get("authorized_scope"))
-            if normalized in seen and not unbridled:
-                issue = ((issue + " ") if issue else "") + "This exact command was already run in this session."
-            if issue is None:
-                syntax_command = "sh -n -c " + shlex.quote(command)
-                if len(syntax_command) > 1000:
-                    issue = "Command is too long for the shell syntax check; shorten it."
-                else:
-                    syntax = terminal.run(syntax_command, 5, live=False)
-                    append_event(run_dir, {"type": "local_command_check", "step": step,
-                                           "result": syntax})
-                    if syntax["exit_code"] != 0:
-                        issue = "Shell syntax check failed: " + syntax["output"][:500]
-            if issue:
-                if issue.startswith("Do not invoke sudo"):
-                    stop_reason = "root_requested"
-                    session["pending_root_command"] = command[:1000]
-                    break
-                approved, wait_seconds = review_proxy_command(
-                    run_dir, command, issue, step, stop_file, session_stop_file)
-                session["review_wait_seconds"] = session.get("review_wait_seconds", 0) + wait_seconds
-                if approved is None:
-                    stop_reason = "operator_stop"
-                    break
-                if not approved:
-                    validation_feedback = "Operator declined the command after review: " + issue
-                    save_session(run_dir, session)
+            else:
+                command = action.get("command")
+                if not isinstance(command, str) or not command.strip():
+                    invalid += 1
+                    if invalid >= 2:
+                        stop_reason = "missing_command"
+                        break
                     continue
-            if not unbridled:
-                seen.add(normalized)
-            if not quiet:
-                print(f"\n[proxy step {step}] $ {command}")
-            result = terminal.run(command, int(cfg["command_timeout_seconds"]))
+                command = command.strip()
+                # Approval cannot make a command executable by the terminal transport.
+                # Ask the worker to repair its format before offering tactical review.
+                if len(command) > 1000 or any(ord(c) < 32 and c != "\t" for c in command):
+                    format_rejections += 1
+                    validation_feedback = (
+                        "Command cannot run: return one shell command on a single line, "
+                        "at most 1000 characters, without control characters. "
+                        "Split larger scripts into small writes; do not repeat the rejected format.")
+                    append_event(run_dir, {"type": "local_command_rejected", "step": step,
+                        "command": command[:1000], "reason": validation_feedback})
+                    save_session(run_dir, session)
+                    if format_rejections >= 3:
+                        stop_reason = "command_validation_failed"
+                        break
+                    continue
+                format_rejections = 0
+                normalized = re.sub(r"\s+", " ", command.strip().lower())
+                checks = cfg["local"].get("command_checks", "essential" if cfg["local"].get("provider") == "zai" else "strict")
+                issue = local_command_issue(command, session["target"], objective,
+                                            session["observations"], checks=checks,
+                                            authorized_scope=cfg.get("authorized_scope"))
+                if normalized in seen and not unbridled:
+                    issue = ((issue + " ") if issue else "") + "This exact command was already run in this session."
+                if issue is None:
+                    syntax_command = "sh -n -c " + shlex.quote(command)
+                    if len(syntax_command) > 1000:
+                        issue = "Command is too long for the shell syntax check; shorten it."
+                    else:
+                        syntax = terminal.run(syntax_command, 5, live=False)
+                        append_event(run_dir, {"type": "local_command_check", "step": step,
+                                               "result": syntax})
+                        if syntax["exit_code"] != 0:
+                            issue = "Shell syntax check failed: " + syntax["output"][:500]
+                if issue:
+                    if issue.startswith("Do not invoke sudo"):
+                        stop_reason = "root_requested"
+                        session["pending_root_command"] = command[:1000]
+                        break
+                    approved, wait_seconds = review_proxy_command(
+                        run_dir, command, issue, step, stop_file, session_stop_file)
+                    session["review_wait_seconds"] = session.get("review_wait_seconds", 0) + wait_seconds
+                    if approved is None:
+                        stop_reason = "operator_stop"
+                        break
+                    if not approved:
+                        validation_feedback = "Operator declined the command after review: " + issue
+                        save_session(run_dir, session)
+                        continue
+                if not unbridled:
+                    seen.add(normalized)
+                if not quiet:
+                    print(f"\n[proxy step {step}] $ {command}")
+                result = terminal.run(command, int(cfg["command_timeout_seconds"]))
             result["resource_sample"] = terminal.stats()
             session["local_steps"] += 1
             index += 1
@@ -1605,6 +1705,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             stop_reason = "delegation_error"
         raise
     finally:
+        if stop_reason in ("operator_stop", "whippet_batch_error") and (run_dir / "whippet_batch.json").exists():
+            harp_whippet_batch.close_session(run_dir, terminal, lambda event: append_event(run_dir, event))
         stop_file.unlink(missing_ok=True)
         session["last_delegate_stop"] = stop_reason
         save_session(run_dir, session)
@@ -1650,6 +1752,9 @@ def finish_session(run_dir: Path, success: str) -> None:
         session = load_session(run_dir)
     if session["success_epoch"] is not None and success != "yes":
         raise ValueError("Success was already verified; finish with --success yes")
+    # Verify runtime-side exit before changing status or deleting the Docker runtime.
+    if (run_dir / "whippet_batch.json").exists():
+        harp_whippet_batch.close_session(run_dir, terminal_for(session), lambda event: append_event(run_dir, event))
     session["status"] = "finished"
     session["finished_at"] = now()
     session["duration_seconds"] = round(time.time() - session["started_epoch"], 2)
@@ -1703,7 +1808,8 @@ def summarize(session: dict) -> dict:
         "local_steps": session["local_steps"], "local_model_calls": len(calls),
         "terminal_tool_calls": len(session["observations"]) + session.get("recon_tool_calls",
             (1 if session.get("recon") is not None else 0)
-            + len(session.get("http_probes", [])) + len(session.get("smb_probes", []))),
+            + len(session.get("http_probes", [])) + len(session.get("smb_probes", [])))
+            + session.get("tool_discovery_calls", 0),
         "local_input_tokens": sum(x["prompt_tokens"] for x in calls),
         "local_output_tokens": sum(x["completion_tokens"] for x in calls),
         "local_usage_complete": all(x.get("usage_reported", False) for x in calls) if calls else None,
