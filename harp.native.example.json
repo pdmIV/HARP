@@ -1,0 +1,21 @@
+{
+  "target": "REPLACE_WITH_AUTHORIZED_TARGET_IP",
+  "runtime": "native",
+  "network": "harp_vpn",
+  "network_policy": "vpn_bridge",
+  "scan_ports": "21-23,25,53,80,88,135,139,389,443,445,1433,2049,3306,3389,5985,5986,8000,8080,8443",
+  "objective": "Capture user.txt and root.txt flags on only the authorized Hack The Box machine, with terminal evidence for each.",
+  "max_steps": 20,
+  "max_model_calls": 30,
+  "command_timeout_seconds": 60,
+  "container_memory": "512m",
+  "container_cpus": "1.0",
+  "local": {
+    "provider": "unsloth",
+    "base_url": "http://127.0.0.1:8888/v1",
+    "model": "REPLACE_WITH_UNSLOTH_MODEL_ID",
+    "api_key_env": "UNSLOTH_API_KEY",
+    "input_usd_per_million": 0,
+    "output_usd_per_million": 0
+  }
+}

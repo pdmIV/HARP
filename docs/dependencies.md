@@ -1,5 +1,15 @@
 # Install dependencies
 
+Kali WSL is the primary Windows setup. For native Kali, run setup as your ordinary user from a Kali terminal:
+
+```bash
+sudo -v
+python3 scripts/install_dependencies.py --runtime native
+python3 scripts/install_dependencies.py --runtime native --check
+```
+
+Native setup elevates only apt with noninteractive sudo, then installs pipx tools as the current user. Open a new login shell afterward. The dashboard can run offline checks; use the terminal installer when sudo authentication is needed. No hypervisor-specific configuration is required. See [native Kali setup](setup.md#native-kali-linux).
+
 The web command center checks the saved Kali runtime in the background. If tools
 are missing, incompatible, or the runtime cannot be reached, click the dependency
 warning to open a centered setup pane. Review its distribution/user or Docker

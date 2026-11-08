@@ -30,12 +30,12 @@ HARP's managed batch connection reuses one loaded graph across queries and start
 | --------------- | -------------------------------------------------- |
 | Oracle          | OpenAI API, Z.AI API, NVIDIA NIM, or Codex via MCP |
 | Proxy model     | OpenAI API, Z.AI API, NVIDIA NIM, or local Unsloth |
-| Kali runtime    | Existing Kali WSL or disposable Docker container   |
+| Kali runtime    | Kali WSL (primary on Windows), native Kali Linux, or optional Docker |
 | Experiment mode | Hybrid, proxy only, or frontier only               |
 
 ## Getting started
 
-1. Follow [Setup](docs/setup.md) and run the [dependency installer](docs/dependencies.md) for your Kali runtime. It includes Whippet, NetworkX, BloodHound CE's collector, Certipy, and HARP's existing tools.
+1. Follow [Setup](docs/setup.md) for Kali WSL, the primary Windows setup, or native Kali Linux on hardware or in a VM. Run the [dependency installer](docs/dependencies.md) for that runtime. It includes Whippet, NetworkX, BloodHound CE's collector, Certipy, and HARP's existing tools.
 2. Run `python harp_web.py` from the repository root.
 3. Import credentials in **API Keys**, select models in **Oracle model** and **Proxy model**, and save your target and Kali runtime in **Configuration**.
 4. Follow [Running sessions](docs/running-sessions.md) to start a run or connect Codex through MCP.

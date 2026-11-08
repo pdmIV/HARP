@@ -1,6 +1,7 @@
 """Provision HARP's Kali tools before a session, using an explicitly chosen runtime."""
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -13,7 +14,7 @@ SCRIPT = Path(__file__).with_name("install-dependencies.sh")
 
 def parser():
     cli = argparse.ArgumentParser(description=__doc__)
-    cli.add_argument("--runtime", choices=("wsl", "docker"), required=True)
+    cli.add_argument("--runtime", choices=("wsl", "native", "docker"), required=True)
     cli.add_argument("--distro", help="Exact WSL distribution configured in HARP")
     cli.add_argument("--user", help="Exact nonroot Kali user configured in HARP")
     cli.add_argument("--image", default="harp-kali:latest", help="Docker tool image tag")
@@ -26,6 +27,15 @@ def plan(args):
     """Return explicit argv/stage pairs; never infer or switch WSL distributions."""
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", args.whippet_ref):
         raise ValueError("Invalid Whippet Git ref")
+    if args.runtime == "native":
+        if args.distro or args.user:
+            raise ValueError("--distro/--user apply only to WSL")
+        if sys.platform != "linux" or os.geteuid() == 0:
+            raise ValueError("Native setup requires Linux and a nonroot user; run sudo -v first for installation")
+        if args.check:
+            return [(["bash", "-s", "--", "--check"], True)]
+        return [(["sudo", "-n", "--", "bash", "-s", "--", "--apt-only"], True),
+                (["bash", "-s", "--", "--python-only", "--whippet-ref", args.whippet_ref], True)]
     if args.runtime == "wsl":
         for value, label in ((args.distro, "--distro"), (args.user, "--user")):
             if not value or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}", value):

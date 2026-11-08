@@ -44,8 +44,8 @@ print(json.dumps({"issues":issues,"missing":missing,"tools":tools}))
 
 def options(cfg, check=False):
     runtime = cfg.get("runtime", "docker")
-    if runtime not in ("wsl", "docker"):
-        raise ValueError("Choose WSL or Docker in Configuration")
+    if runtime not in ("wsl", "native", "docker"):
+        raise ValueError("Choose WSL, native Kali, or Docker in Configuration")
     args = ["--runtime", runtime]
     if runtime == "wsl":
         args += ["--distro", cfg.get("wsl_distro", "kali-linux"), "--user", cfg.get("wsl_user", "kali")]
@@ -78,7 +78,7 @@ class DependencyManager:
         args = options(cfg)
         return {"key": identity(cfg), "runtime": cfg.get("runtime", "docker"),
                 "target": (f"WSL {cfg.get('wsl_distro', 'kali-linux')} / {cfg.get('wsl_user', 'kali')}"
-                           if cfg.get("runtime") == "wsl" else "Docker harp-kali:latest"),
+                           if cfg.get("runtime") == "wsl" else "Native Kali / current user" if cfg.get("runtime") == "native" else "Docker harp-kali:latest"),
                 "command": "python scripts/install_dependencies.py " + " ".join(args)}
 
     def status(self, cfg, force=False):
@@ -105,6 +105,8 @@ class DependencyManager:
             if cfg.get("runtime") == "wsl":
                 argv = ["wsl.exe", "--distribution", cfg.get("wsl_distro", "kali-linux"), "--user", cfg.get("wsl_user", "kali"),
                         "--exec", "/bin/sh", "-lc", "exec timeout 20s python3 -c " + shlex.quote(PROBE)]
+            elif cfg.get("runtime") == "native":
+                argv = ["timeout", "20s", "python3", "-c", PROBE]
             else:
                 argv = ["docker", "run", "--rm", "--pull=never", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=16m",
                         "harp-kali:latest", "timeout", "20s", "python3", "-c", PROBE]

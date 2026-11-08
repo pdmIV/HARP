@@ -107,6 +107,8 @@ def draft_config() -> dict:
     if CONFIG.is_file():
         return json.loads(CONFIG.read_text(encoding="utf-8"))
     cfg = json.loads((ROOT / "harp.htb.example.json").read_text(encoding="utf-8"))
+    if os.name != "nt":
+        cfg["runtime"] = "native"
     cfg["target"] = ""
     cfg["local"]["model"] = ""
     return cfg
@@ -114,7 +116,7 @@ def draft_config() -> dict:
 
 def prepare_runtime(cfg: dict) -> None:
     """Create the dedicated bridge and rebuild Kali only when its recipe changes."""
-    if cfg.get("runtime") == "wsl":
+    if cfg.get("runtime") in ("wsl", "native"):
         return
     try:
         harp.docker("network", "inspect", cfg["network"])
@@ -441,7 +443,7 @@ class HARPWebState:
             if match:
                 try:
                     harp_secret.save_key(ROOT / ".secrets" / "unsloth.key", match.group(1))
-                    self.add_model_log("Model API key stored encrypted for this Windows account.\n")
+                    self.add_model_log("Model API key saved for this user.\n")
                 except Exception as error:
                     self.add_model_log(f"Could not store model API key: {error}\n")
             self.add_model_log(line)
@@ -716,7 +718,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                         or any(not 33 <= ord(c) <= 126 for c in value.strip())):
                     raise ValueError("Enter a valid API key containing no whitespace or control characters")
                 harp_secret.save_key(ROOT / ".secrets" / filename, value.strip())
-                self._json(200, {"message": label + " key saved encrypted for this Windows account"})
+                self._json(200, {"message": label + " key saved for this user"})
                 return
             if path == "/api/oracle/benchmark":
                 models = body.get("models")

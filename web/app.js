@@ -420,6 +420,7 @@
       objectiveInput: cfg.objective || ""
     };
     for (const [id, value] of Object.entries(values)) $(id).value = value;
+    renderRuntimeFields();
     $("enableThinking").checked = !!local.enable_thinking;
     $("proxyProvider").value = local.provider || "unsloth";
     setModelOptions("proxyNimModel", [], local.provider !== "unsloth" ? local.model || "" : "");
@@ -455,6 +456,12 @@
       settings[field] = value === "" ? null : Number(value);
     }
     return settings;
+  }
+
+  function renderRuntimeFields() {
+    const runtime = $("runtimeSelect").value;
+    document.querySelectorAll("[data-runtime]").forEach(field => { field.hidden = field.dataset.runtime !== runtime; });
+    $("networkPolicy").disabled = runtime !== "docker";
   }
 
   function configPayload() {
@@ -909,7 +916,7 @@
       fillConfig(data.config);
       for (const [prefix, provider] of [["zai", "zai"], ["openai", "openai"], ["nim", "nvidia_nim"], ["unsloth", "unsloth"]]) {
         const status = data.keys?.[provider];
-        $(prefix + "KeyStatus").textContent = status?.environment ? "Environment key active" : status?.saved ? "Encrypted key saved" : "No key imported";
+        $(prefix + "KeyStatus").textContent = status?.environment ? "Environment key active" : status?.saved ? "API key saved" : "No key imported";
         $(prefix + "KeyStatus").className = "key-status " + (status?.environment ? "environment" : status?.saved ? "saved" : "missing");
       }
       renderModel(data.model);
@@ -1148,6 +1155,10 @@
     showPage("settings");
     $("targetInput").focus();
     toast("Enter the authorized HTB target IP, then save configuration");
+  });
+  $("runtimeSelect").addEventListener("change", () => {
+    if ($("runtimeSelect").value !== "docker") $("networkPolicy").value = "vpn_bridge";
+    renderRuntimeFields();
   });
   $("saveConfig").addEventListener("click", async () => { try { await saveConfig(); } catch (error) { toast(error.message, true); } });
   $("dependencyWarning").addEventListener("click", () => {

@@ -1,5 +1,7 @@
 # Host protection
 
+Native Kali uses the current nonroot Linux user and retains the same logging, scope checks, and root approval flow. It is not a host filesystem sandbox. Workspaces persist under `~/.local/share/harp/runs/`; finishing a session stops HARP-managed Whippet processes but does not delete Kali files or shut down the VM. Imported Linux API keys are unencrypted owner-only files, unlike Windows DPAPI storage. Use a dedicated lab VM when host separation is needed.
+
 [Home](../README.md) · [Setup](setup.md) · [Configuration](configuration.md) · [Running sessions](running-sessions.md) · [Host protection](host-protection.md) · [Evaluation](evaluation.md)
 
 In Docker mode, each session gets a disposable Kali container. It runs as UID 10001 by default, with a read only root filesystem, small writable `/tmp` and `/workspace` memory filesystems, no Windows drive mount, no Docker socket, no published ports, no privileged mode, a PID limit, a CPU limit, and a 512 MiB memory limit by default. All Linux capabilities are dropped except `NET_RAW`; Nmap receives that capability through its file capability for SYN scans. Other root commands still require separate approval. Commands and output are time and size bounded. When the session ends, HARP removes the container and its temporary files.

@@ -79,6 +79,12 @@ def system_prompt(session: dict) -> str:
         prompt += "\n" + harp_whippet.guidance(session)
     if harp_effort.enabled(session.get("config", {}).get("oracle", {})):
         prompt += harp_effort.PROXY_INSTRUCTION
+    if session.get("runtime") == "native":
+        return prompt.replace("The terminal is a disposable Kali container on a closed lab network.",
+                              "The terminal runs as the operator's nonroot user on native Kali Linux.").replace(
+            "Do not access other hosts, the Docker gateway, or the host OS.",
+            "Access only the authorized target and this session workspace; do not inspect host files.") + (
+            "\nWork only under " + session["workspace"] + ". Do not access other home directories.")
     if session.get("runtime") != "wsl":
         return prompt
     return prompt.replace(
@@ -168,17 +174,19 @@ def load_config(path: Path) -> dict:
     checked_name(cfg["target"], "target")
     cfg["authorized_scope"] = checked_authorized_scope(cfg.get("authorized_scope"))
     runtime = cfg.get("runtime", "docker")
-    if runtime not in ("docker", "wsl"):
-        raise ValueError("Runtime must be docker or wsl")
+    if runtime not in ("docker", "wsl", "native"):
+        raise ValueError("Runtime must be docker, wsl, or native")
     if runtime == "docker":
         checked_name(cfg["network"], "network")
         if not cfg["network"].startswith("harp_"):
             raise ValueError("Use a dedicated Docker network named harp_...")
-    else:
+    elif runtime == "wsl":
         checked_name(cfg.get("wsl_distro", "kali-linux"), "WSL distribution")
         checked_name(cfg.get("wsl_user", "kali"), "WSL user")
         if cfg.get("network_policy", "internal_lab") != "vpn_bridge":
             raise ValueError("WSL runtime requires the VPN network policy; it cannot provide Docker's isolated lab network")
+    elif cfg.get("network_policy") != "vpn_bridge":
+        raise ValueError("Native Kali requires the VPN/direct network policy")
     if cfg.get("network_policy", "internal_lab") not in ("internal_lab", "vpn_bridge"):
         raise ValueError("network_policy must be internal_lab or vpn_bridge")
     if cfg.get("network_policy", "internal_lab") == "vpn_bridge":
@@ -495,6 +503,53 @@ class WslTerminal(KaliTerminal):
         return None
 
 
+class NativeTerminal(WslTerminal):
+    """Use the same audited execution pipeline directly on nonroot Kali Linux."""
+
+    def __init__(self, cfg: dict):
+        KaliTerminal.__init__(self, cfg)
+        self.workspace = str(Path.home() / ".local/share/harp/runs" / self.name)
+
+    def _base(self, as_root: bool = False) -> list[str]:
+        if sys.platform != "linux":
+            raise RuntimeError("Native Kali requires running HARP on Linux; select Kali WSL on Windows")
+        if os.geteuid() == 0:
+            raise RuntimeError("Run HARP as a nonroot Kali user; approve individual root commands through HARP")
+        return ["sudo", "-n", "--"] if as_root else []
+
+    def __enter__(self):
+        probe = subprocess.run(self._base() + ["/bin/sh", "-lc",
+                               "command -v nmap && command -v nxc && command -v timeout && command -v python3"],
+                               capture_output=True, text=True, timeout=30)
+        if probe.returncode:
+            raise RuntimeError("Native Kali must have nmap, nxc, timeout, and python3 installed")
+        Path(self.workspace).mkdir(parents=True, mode=0o700)
+        self.started = True
+        return self
+
+    @classmethod
+    def attach(cls, cfg: dict, name: str):
+        checked_name(name, "native session")
+        terminal = cls(cfg)
+        terminal._base()
+        terminal.name = name
+        terminal.workspace = str(Path.home() / ".local/share/harp/runs" / name)
+        if not Path(terminal.workspace).is_dir() or Path(terminal.workspace).is_symlink():
+            raise RuntimeError("Native session workspace is missing or is a symlink")
+        terminal.started = True
+        return terminal
+
+
+def runtime_class(runtime: str):
+    if runtime == "native":
+        return NativeTerminal
+    if runtime == "wsl":
+        return WslTerminal
+    if runtime == "docker":
+        return KaliTerminal
+    raise ValueError("Unknown Kali runtime")
+
+
 def parse_nmap_xml(raw: str) -> list[dict]:
     try:
         root = ET.fromstring(raw)
@@ -641,11 +696,11 @@ def local_api_key(model: dict) -> str:
     if key:
         return key
     key_file = Path(__file__).resolve().parent / ".secrets" / "unsloth.key"
-    if os.name == "nt" and key_file.is_file():
+    if key_file.is_file():
         try:
             return harp_secret.load_key(key_file)
         except Exception as error:
-            raise RuntimeError("Could not decrypt the Unsloth key for this Windows account") from error
+            raise RuntimeError("Could not load the Unsloth key for this user; reimport it on this machine") from error
     raise RuntimeError("Import the Unsloth key in the command center's API Keys tab or set UNSLOTH_API_KEY")
 
 
@@ -934,7 +989,7 @@ def recon_profile(cfg: dict) -> dict:
     """Inputs that determine which target and route a scan observed."""
     return {"target": cfg["target"], "runtime": cfg.get("runtime", "docker"),
             "network_policy": cfg.get("network_policy", "internal_lab"),
-            "network": cfg.get("network", "") if cfg.get("runtime") != "wsl" else "",
+            "network": cfg.get("network", "") if cfg.get("runtime", "docker") == "docker" else "",
             "wsl_distro": cfg.get("wsl_distro", "") if cfg.get("runtime") == "wsl" else "",
             "scan_ports": cfg["scan_ports"]}
 
@@ -1064,7 +1119,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
     run_dir.mkdir()
     started_epoch = time.time()
     started_at = now()
-    terminal = WslTerminal(cfg) if cfg.get("runtime") == "wsl" else KaliTerminal(cfg)
+    terminal = runtime_class(cfg.get("runtime", "docker"))(cfg)
     session = {
         "status": "recon", "mode": mode, "container": terminal.name, "config": cfg,
         "runtime": cfg.get("runtime", "docker"),
@@ -1298,7 +1353,7 @@ def ensure_whippet(run_dir: Path, session: dict, terminal=None) -> None:
 def terminal_for(session: dict) -> KaliTerminal:
     if session["status"] != "active":
         raise RuntimeError("Session is not active")
-    terminal_class = WslTerminal if session.get("runtime", "docker") == "wsl" else KaliTerminal
+    terminal_class = runtime_class(session.get("runtime", "docker"))
     return terminal_class.attach(session["config"], session["container"])
 
 
@@ -1939,11 +1994,11 @@ def main() -> None:
     if args.command in ("doctor", "start"):
         cfg = load_config(args.config)
         if args.command == "doctor":
-            if cfg.get("runtime") == "wsl":
-                terminal = WslTerminal(cfg)
+            if cfg.get("runtime") in ("wsl", "native"):
+                terminal = runtime_class(cfg["runtime"])(cfg)
                 terminal.__enter__()
-                print("Kali WSL distribution:", terminal.distro)
-                print("Kali WSL user:", terminal.user)
+                print("Kali runtime:", cfg["runtime"])
+                print("Session workspace:", terminal.workspace)
                 return
             print("Docker server:", docker("version", "--format", "{{.Server.Version}}"))
             print("Kali image:", docker("image", "inspect", "--format", "{{.Id}}", IMAGE)[:24])

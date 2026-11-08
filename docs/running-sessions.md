@@ -72,6 +72,8 @@ For VPN targets, the full TCP sweep uses a bounded, moderate packet rate. If it 
 
 ## Hack The Box through the VPN
 
+Kali WSL is the primary Windows setup. To run HARP inside Kali itself, select **Native Kali Linux** and follow [native setup](setup.md#native-kali-linux). Connect the VPN inside that Kali environment or provide a route from it to the target. Native sessions use the current nonroot user and have no hypervisor dependencies. The **VPN / direct Kali network** policy applies to both WSL and native Kali; it retains the configuration value `vpn_bridge` for compatibility. Native mode does not use Docker bridge settings or enforce a network sandbox.
+
 Choose **Existing Kali WSL** to use Kali's installed tools and its VPN route, or **Disposable Docker** to use a container behind Docker Desktop's Windows networking. Docker Desktop [documents outbound networking](https://docs.docker.com/desktop/features/networking/) and [VPN behavior](https://docs.docker.com/desktop/features/networking/networking-how-tos/). VPN client settings can block container traffic, so check target reachability through HARP's selected Kali runtime before a real assessment.
 
 1. Connect the authorized Hack The Box VPN on Windows.

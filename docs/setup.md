@@ -2,7 +2,7 @@
 
 [Home](../README.md) · [Setup](setup.md) · [Configuration](configuration.md) · [Running sessions](running-sessions.md) · [Host protection](host-protection.md) · [Evaluation](evaluation.md)
 
-Run these commands from the repository root in PowerShell. HARP uses Python's standard library. Hosted models do not require Unsloth or a local GPU. Encrypted key imports require Windows.
+Kali WSL is the primary Windows setup. Native Kali Linux is also supported, whether installed on hardware or in VMware, VirtualBox, or another VM. Docker remains optional. HARP uses Python's standard library. Hosted models do not require Unsloth or a local GPU. Existing saved configurations keep their selected runtime; a fresh dashboard defaults to WSL on Windows and native Kali on Linux.
 
 ## Existing Kali WSL
 
@@ -17,6 +17,29 @@ python scripts/install_dependencies.py --runtime wsl --distro kali-linux --user 
 Replace the distribution and user with the exact values configured below.
 
 For the existing Kali WSL runtime, select **Existing Kali WSL** in Configuration, set the distribution and user (default `kali-linux` and `kali`), and use the VPN network policy. HARP checks for `nmap`, `nxc`, `timeout`, and `python3` before starting. The Docker network, memory, and CPU settings are ignored in WSL mode. HARP uses TCP connect scans there so nonroot Kali can perform deterministic reconnaissance. Document capture accepts files in the session workspace shown in the session record.
+
+## Native Kali Linux
+
+Run HARP inside Kali as your ordinary nonroot user. Clone the repository there, then run these commands from its root:
+
+```bash
+sudo -v
+python3 scripts/install_dependencies.py --runtime native
+python3 scripts/install_dependencies.py --runtime native --check
+python3 harp_web.py
+```
+
+The installer elevates only the apt stage with `sudo -n`; Python tools are installed with pipx as your current user. If sudo authentication is unavailable, the installer fails rather than requesting a password through the web UI. Run setup from your Kali terminal. Open a new login shell after installation so pipx tools are on PATH.
+
+Select **Native Kali Linux**, the **VPN / direct Kali network** policy, and the exact authorized target IP. A fresh Linux dashboard already selects this runtime. For headless configuration, copy `harp.native.example.json` to `harp.json`, replace the target placeholder, and configure your models. The original `harp.example.json` is still the optional Docker demo configuration.
+
+Connect the HTB VPN inside Kali, or supply another working route from Kali to the target. HARP does not configure a hypervisor, VM adapter, or VPN. Run the browser and MCP server inside the same Kali environment. For Codex MCP, use `python3` and the absolute Linux path to `harp_mcp.py`; Windows executable paths do not apply. Keep the dashboard bound to loopback.
+
+Commands run in `~/.local/share/harp/runs/<runtime-session>/`. Images, documents, Whippet captures, and managed batch queries use that workspace. HARP logs commands through the same terminal interface, uses nonroot Nmap TCP connect scans, and preserves files when the session finishes. Native mode does not create containers, invoke WSL, or delete your VM.
+
+Root commands still require the exact-command HARP approvals. Approved native commands use `sudo -n` and fail if local sudo authorization is unavailable. HARP never prompts for, stores, or pipes your sudo password. Do not launch the whole application with sudo. Native mode runs with your user's host permissions, not a filesystem sandbox, so use a dedicated lab VM where appropriate.
+
+API keys can be imported in the dashboard or provided as environment variables. Windows imports use DPAPI. On Linux, imports are stored unencrypted in owner-only mode-600 files under a mode-700 `.secrets` directory. Windows encrypted key files cannot be transferred to Linux; reimport them. Session evidence may contain recovered secrets, so protect the repository and session workspace as well.
 
 ## Docker and the local demo
 

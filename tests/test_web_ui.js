@@ -68,6 +68,15 @@ nodes.get("closeSuccess").handlers.click();
 assert.equal(nodes.get("successDialog").open, false);
 assert.match(html, /rel="icon"[^>]+href="\/favicon.svg"/);
 console.log("UI checks passed: live artifacts, flags, frozen timer, celebration, favicon link.");
+nodes.get("runtimeSelect").value = "native";
+nodes.get("runtimeSelect").handlers.change();
+assert.equal(nodes.get("networkPolicy").value, "vpn_bridge");
+assert.equal(nodes.get("networkPolicy").disabled, true);
+nodes.get("runtimeSelect").value = "docker";
+nodes.get("runtimeSelect").handlers.change();
+assert.equal(nodes.get("networkPolicy").disabled, false);
+assert.match(html, /option value="native">Native Kali Linux/);
+console.log("Runtime UI checks passed: native selection, direct network policy, Docker policy editing.");
 
 (async () => {
   const imageNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
