@@ -6,15 +6,7 @@
        width="100%">
 </p>
 
-<p align="center">
-  <a href="assets/showcase_video.mp4">
-    <img src="assets/showcase-preview.jpg"
-         alt="Watch HARP in action: oracle planning, proxy execution, and recorded evidence"
-         width="100%">
-  </a>
-  <br>
-  <a href="assets/showcase_video.mp4"><strong>&#9654; Watch HARP in action</strong></a> &middot; 1 min 40 sec
-</p>
+https://github.com/user-attachments/assets/e7880361-a596-42fa-8fc2-b1afb1a2b864
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
