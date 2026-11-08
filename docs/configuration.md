@@ -87,3 +87,15 @@ Context compaction still applies and can change a prefix. Caching does not retai
 ## OpenAI access troubleshooting
 
 OpenAI access errors are terminal for the current oracle operation; HARP does not silently change the selected access program or retry a rejected request. An `access_program_not_enabled` error requires checking API organization/project provisioning. Selecting Standard retains standard API policies and does not guarantee acceptance of a cybersecurity workflow. Error reporting preserves bounded error codes, parameter paths, and request IDs while withholding raw provider messages and response bodies. Live Daybreak eligibility and cache savings must be verified with the operator's own project; automated transport tests use mocked API responses.
+
+## Prices entered after a session
+
+Overview recalculates estimates from saved token counts using current configured prices when the provider and model match the recorded session. This also applies to replay, using only the usage revealed so far. Save prices in the model settings and the next dashboard refresh applies them to existing sessions. No new session or model request is needed.
+
+A recalculated estimate is labeled **at current configured prices**. The original configuration, per-call estimates, and event log remain unchanged. If the current configuration selects different models, HARP uses the session's saved rates or recorded estimates instead. Unknown usage or a missing price for a token category actually used keeps the estimate unavailable. Zero is a valid configured price. Estimates are before account credits or allowances.
+
+## Hybrid cost comparison
+
+Overview and replay show combined oracle and proxy cost, an oracle-only estimate, and estimated savings in dollars and percent. The comparison retains recorded oracle work and prices the proxy's recorded token counts at oracle rates, preserving ordinary input, cache reads, cache writes, and output separately. Percentage savings are `(oracle-only estimate - hybrid total) / oracle-only estimate * 100`.
+
+This is a same-workload price comparison, not a measured oracle-only run. Actual oracle-only token usage, cache behavior, and task success may differ. Negative savings appear as extra cost and a higher-cost percentage. A zero oracle-only estimate has no defined percentage. Missing prices or usage keep the comparison unavailable, and non-Hybrid sessions show their total without hybrid savings. In replay, the comparison follows the usage revealed by the playhead.

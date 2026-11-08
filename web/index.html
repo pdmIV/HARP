@@ -44,11 +44,24 @@
       <header class="topbar">
         <div class="breadcrumbs">Workspace <span>/</span> <strong id="pageCrumb">Overview</strong></div>
         <div class="top-actions">
+          <button id="replayStart" class="button secondary" disabled>Replay saved session</button>
           <button id="themeToggle" class="theme-toggle" aria-label="Switch theme" title="Switch theme"><span id="themeIcon" aria-hidden="true">&#9788;</span></button>
         </div>
       </header>
 
       <div id="toast" class="toast hidden" role="status"></div>
+      <section id="replayControls" class="replay-controls hidden" aria-label="Recorded session playback">
+        <div class="replay-title"><strong>Recorded session replay</strong><span>Saved evidence only. No models or target commands run.</span></div>
+        <div class="replay-buttons">
+          <button id="replayPlay" class="button primary">Play</button>
+          <button id="replayRestart" class="button secondary">Restart</button>
+          <button id="replayNext" class="button secondary">Next finding</button>
+          <label>Speed <select id="replaySpeed" aria-label="Replay speed"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option><option value="32">32×</option></select></label>
+          <label><input id="replaySkipIdle" type="checkbox" checked> Shorten idle gaps</label>
+          <button id="replayExit" class="button ghost">Exit replay</button>
+        </div>
+        <div class="replay-timeline"><input id="replaySeek" type="range" min="0" max="1" step="0.1" value="0" aria-label="Replay position"><output id="replayClock">00:00:00 / 00:00:00</output></div>
+      </section>
 
       <section class="page active" data-panel="overview">
         <div class="hero">
@@ -84,7 +97,12 @@
             <div class="cost-summary-item"><strong>Oracle</strong><p id="oracleApiCost" class="cost-value">No calls yet</p><p id="oracleCacheUsage" class="muted-text">No API usage recorded.</p></div>
             <div class="cost-summary-item"><strong>Proxy</strong><p id="proxyApiCost" class="cost-value">No calls yet</p><p id="proxyCacheUsage" class="muted-text">No API usage recorded.</p></div>
           </div>
-          <p class="cost-note muted-text">Estimates use the rates in model settings, before account credits and complimentary tokens. Check your provider dashboard for billed costs.</p>
+          <div class="cost-comparison">
+            <div class="cost-summary-item"><strong>Total cost</strong><p id="totalApiCost" class="cost-value">No calls yet</p><p class="muted-text">Oracle + proxy</p></div>
+            <div class="cost-summary-item"><strong>Oracle-only estimate</strong><p id="oracleOnlyCost" class="cost-value">Awaiting Hybrid usage</p><p class="muted-text">Same workload at oracle prices</p></div>
+            <div class="cost-summary-item"><strong>Estimated hybrid savings</strong><p id="hybridSavings" class="cost-value">Awaiting Hybrid usage</p><p id="hybridSavingsPercent" class="muted-text">Percentage unavailable</p></div>
+          </div>
+          <p class="cost-note muted-text">The oracle-only comparison prices the proxy's recorded token workload at oracle rates and retains recorded oracle work. It assumes the same token counts and cache mix. Actual oracle-only usage may differ. Estimates are before account credits and complimentary tokens.</p>
         </div>
 
         <div id="reconProgress" class="card recon-progress hidden" aria-live="polite">
@@ -96,7 +114,7 @@
 
         <div class="content-grid">
           <div class="card activity-card">
-            <div class="card-head"><div><span class="kicker">EVENT STREAM</span><h3>Live activity</h3></div><span class="live-indicator"><i></i> LIVE</span></div>
+            <div class="card-head"><div><span class="kicker">EVENT STREAM</span><h3>Live activity</h3></div><span class="live-indicator" role="status"><i aria-hidden="true"></i><span id="activityStatusText">LIVE</span></span></div>
             <div class="filter-row"><button class="filter active" data-filter="all">All</button><button class="filter" data-filter="oracle">Oracle</button><button class="filter" data-filter="local">Proxy model</button><button class="filter" data-filter="terminal">Terminal</button><button class="filter" data-filter="system">System</button></div>
             <div id="activityFeed" class="activity-feed"><div class="empty-state"><div class="empty-icon">◎</div><strong>Nothing to show yet</strong><p>Start a session or select one from the sidebar.</p></div></div>
           </div>

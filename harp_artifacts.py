@@ -122,7 +122,8 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
     return record
 
 
-def capture_flags_from_result(run_dir: Path, result: dict) -> list[dict]:
+def flag_values_from_result(result: dict) -> list[tuple[str, str]]:
+    """Recognize flag evidence without modifying a session."""
     command = str(result.get("command", ""))
     output = ANSI.sub("", str(result.get("output", "")))
     mentioned = [name for name in FLAG_NAMES if re.search(r"(?i)(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", command)]
@@ -137,8 +138,16 @@ def capture_flags_from_result(run_dir: Path, result: dict) -> list[dict]:
     hashes = list(dict.fromkeys(values))
     if len(mentioned) != 1 or len(hashes) != 1 or result.get("exit_code") != 0 or not FILE_READ.search(command):
         return []
-    name = mentioned[0]
-    record = register_artifact(run_dir, kind="flag", title=name, value=hashes[0],
+    return [(mentioned[0], hashes[0])]
+
+
+def capture_flags_from_result(run_dir: Path, result: dict) -> list[dict]:
+    flags = flag_values_from_result(result)
+    if not flags:
+        return []
+    name, value = flags[0]
+    command = str(result.get("command", ""))
+    record = register_artifact(run_dir, kind="flag", title=name, value=value,
                                source=command, evidence="Flag-shaped value captured from terminal output",
                                evidence_backed=True)
     return [record]

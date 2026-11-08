@@ -22,3 +22,11 @@ Each session stores elapsed time, wall time to verified success, active time to 
 - Root command approval depends on the Codex MCP tool policy loading in the Codex session. Inspect the approval prompt before using it. HARP's CLI refuses root commands.
 - Obsidian integration is Markdown export plus bounded keyword retrieval. A full retrieval study and automatic vault synchronization are future experiments.
 - There is no automatic Codex plan token or local GPU power measurement. Those fields must come from external measurements.
+
+## Display estimates and measured comparisons
+
+The dashboard can reprice saved usage after a session. It uses current prices only for the matching provider and model, and preserves the original configuration, ledger, and historical per-call estimates. The CLI report reads the recorded session costs. Record the rate source and price date when using dashboard estimates in a report. See [pricing configuration](configuration.md#prices-entered-after-a-session).
+
+The dashboard's oracle-only estimate holds the recorded workload fixed: it retains oracle work and reprices proxy input, cached input, cache writes, and output at oracle rates. Estimated savings are the difference from the combined Hybrid cost, shown in dollars and as a percentage of the oracle-only estimate. This is a token-price comparison. A measured comparison requires separate oracle-only runs with the same target snapshot and objective, since model behavior, token counts, cache hits, and success rates may differ.
+
+Replay reconstructs saved events without running target commands or requesting model output. It is useful for demonstrations and reviewing evidence. Replay elapsed time and accelerated playback speed are not measurements of a new assessment. Missing historical events or usage cannot be recovered through playback. The activity indicator distinguishes live sessions, saved final states, and recorded replay with a steady dot.

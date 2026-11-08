@@ -34,10 +34,14 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | --- | --- |
 | [Setup](docs/setup.md) | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup |
 | [Configuration](docs/configuration.md) | Providers, model selection, API keys, limits, context, caching, costs, and access errors |
-| [Running sessions](docs/running-sessions.md) | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, and VPN routing |
+| [Running sessions](docs/running-sessions.md) | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
 | [Host protection](docs/host-protection.md) | Runtime boundaries, command validation, and root approvals |
 | [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits |
 | [Operator guide](AGENTS.md) | Instructions for Codex operators |
+
+Finished sessions can be replayed from the dashboard with play/pause, speed controls, a seek timeline, and progressive evidence display. Replay uses saved logs without contacting the target or calling models. See [session replay](docs/running-sessions.md#replay-a-saved-session).
+
+Overview also shows total oracle + proxy cost and estimated Hybrid savings in dollars and percent. Prices can be saved after a run. The oracle-only comparison holds recorded token counts and cache behavior fixed; see [cost estimates](docs/configuration.md#hybrid-cost-comparison).
 
 ## Evidence and scope
 
@@ -45,4 +49,4 @@ See the [Cicada case study](docs/case-studies/cicada-2026-11-07/README.md) for a
 
 Use HARP only against targets you are authorized to assess. Model claims are not proof of success. HARP records `user.txt` and `root.txt` flags from terminal evidence and preserves session logs for review. You can stop an active session or permanently delete a finished session and its logs in the command center. Completed reconnaissance is cached separately and reused for matching new sessions; a focused `.htb` hostname check can identify the same box at a new IP. Select **Refresh reconnaissance** to scan again. Root commands require approval.
 
-WSL uses your existing distribution and does not provide Docker's isolation or resource limits. Read [Host protection](docs/host-protection.md) before choosing a runtime. Keep API keys and session evidence out of Git.
+WSL uses your existing distribution and does not provide Docker's isolation or resource limits. Read [Host protection](docs/host-protection.md) before choosing a runtime. Keep API keys out of Git. Review and explicitly authorize session evidence before publishing it, as with the linked case study.

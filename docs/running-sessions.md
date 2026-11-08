@@ -36,7 +36,7 @@ Launch the local web command center from PowerShell:
 python harp_web.py
 ```
 
-The launcher opens a browser on `127.0.0.1:8765`. Codex can launch it through `launch_control_center`; the direct Python command remains available. The control API requires a private token held in that browser tab; other pages cannot control HARP merely by reaching localhost. The interface has light and dark themes, responsive layouts, and side navigation for Overview, Verbose, Flags, Artifacts, Oracle model, Proxy model, API Keys, and Configuration.
+The launcher opens a browser on `127.0.0.1:8765`. Codex can launch it through `launch_control_center`; the direct Python command remains available. The control API requires a private token held in that browser tab; other pages cannot control HARP merely by reaching localhost. The interface has light, dark, and AMOLED Dark themes, responsive layouts, and side navigation for Overview, Verbose, Flags, Artifacts, Oracle model, Proxy model, API Keys, and Configuration.
 
 **Overview** follows each session's event log, showing deterministic recon, explicit oracle plan updates, delegated objectives, proxy model actions and short stated reasons, terminal output, approvals, and outcomes. It also shows elapsed time, model calls, terminal calls, token usage, and flag progress. Codex's private reasoning is not available to the app; the project MCP tool `record_oracle_plan` publishes a concise operator-facing plan, and [AGENTS.md](../AGENTS.md) tells Codex to use it when the strategy changes.
 
@@ -78,3 +78,33 @@ Choose **Existing Kali WSL** to use Kali's installed tools and its VPN route, or
 2. In the GUI, choose **Use HTB VPN profile**, select the Kali runtime, set the exact authorized target IP, and start a Hybrid session. Docker mode creates `harp_vpn` and builds the Kali image if needed; WSL mode uses the configured distribution and user. A successful scan of the expected target service is the connectivity check. If the scan finds nothing, verify VPN routing and target state before delegating.
 
 In Docker mode, HARP refuses host networking, an internal bridge selected as a VPN bridge, and a VPN bridge already occupied by other containers. In VPN mode, neither Docker nor WSL networking enforces the target IP; the target name, prompts, and experiment procedure define the authorized scope. Use only environments you are authorized to test.
+
+## Activity status and cost display
+
+The event-stream status uses a steady dot and one of three labels:
+
+| Label | Meaning |
+| --- | --- |
+| LIVE | The selected session is active or running reconnaissance. |
+| SAVED SESSION | You are viewing the final state of a finished session. |
+| RECORDED REPLAY | You are playing or seeking through saved events, including while paused. |
+
+The dot and label stay steady during dashboard refreshes. The indicator does not blink to imply activity in a saved session.
+
+The **Cache and cost** panel shows oracle and proxy estimates, their combined total, an oracle-only estimate for the same recorded workload, and estimated Hybrid savings in dollars and percent. Prices saved after a run apply on the next refresh when the configured provider and model match. Replay costs follow the playhead. See [late pricing](configuration.md#prices-entered-after-a-session) and [Hybrid cost comparison](configuration.md#hybrid-cost-comparison) for the calculation, unknown-price handling, and assumptions. Historical per-call estimates in the event stream remain as originally recorded.
+
+## Replay a saved session
+
+Select a finished session in the sidebar and click **Replay saved session** in the top bar. Replay loads the saved event log and opens at the beginning, paused. No target commands, model requests, or Kali startup are needed.
+
+- **Play / Pause** controls playback. **Restart** returns to the beginning, paused.
+- **Speed** offers 1× through 32× playback. **Shorten idle gaps** compresses long waits to three seconds of session time before the next event. Turn it off for the original pacing.
+- Drag the timeline to seek. **Next finding** skips to the next oracle plan, artifact, newly detected flag, or session finish.
+- Overview, Verbose, Flags, and Artifacts show only the evidence revealed by the playhead. Rewinding removes later findings from the display. Successful runs end with the green completion dialog.
+- **Exit replay** returns to the saved session view. Selecting another session also exits replay.
+
+The sticky playback bar and status badge identify the display as a recorded replay. The elapsed clock shows original session time, including when waits are shortened. Session controls and write requests are disabled during replay. Playback does not acknowledge flags, change the artifact registry, or alter the original outcome or logs.
+
+Replay recognizes terminal-backed flags using the current detector, including NetExec prefixes, so older runs can show flags at their original file-read event even if their registry entries were repaired later. Other artifacts appear at their recorded registration event. Reconstruction stops at the original finish event, excluding later reconciliation annotations. Proxy usage advances on recorded actions and invalid replies using the saved call ledger, while hosted oracle usage follows recorded usage events. If older logs lack events or usage, the replay cannot reconstruct missing details.
+
+For a demonstration video, choose a successful run, start playback with idle-gap shortening enabled, and record the dashboard with your screen recorder. You can switch tabs or pause on evidence while recording.

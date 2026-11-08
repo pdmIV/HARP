@@ -58,3 +58,25 @@ Before publishing, the saved successful file-read results were reprocessed with 
 The accompanying fixes now recognize these prefixed results, end a delegation after the second verified flag, automatically finish the session, freeze its timer, and show a green celebration dialog. Artifact proposals are also checked after their accompanying command returns, so a matching result can appear without waiting for another model request. Existing evidence requirements still apply.
 
 This export is for reading and analysis. It is not an instruction to replay historical commands, and publishing it does not start a HARP session.
+
+## Retrospective cost estimate
+
+Prices were entered after this run. The following display-time estimate uses the saved token usage and the subsequently configured prices. The original event log still contains the estimates, including unknown values, recorded during execution.
+
+| Price per million tokens | Oracle | Proxy |
+| --- | ---: | ---: |
+| Ordinary input | $1.4 | $0.15 |
+| Cached input | $0.26 | $0.03 |
+| Cache writes | $0 | $0 |
+| Output | $4.4 | $0.5 |
+
+| Measure | Estimate |
+| --- | ---: |
+| Oracle | $0.331819 |
+| Proxy | $0.045148 |
+| Hybrid total | $0.376967 |
+| Oracle-only at the same workload | $0.749675 |
+| Hybrid savings | $0.372708 |
+| Estimated percentage savings | 49.72% |
+
+The oracle-only estimate retains recorded oracle work and reprices proxy work at oracle rates with the same token counts and cache mix. It does not measure a separate oracle-only run or establish billed costs after credits and allowances. See [cost comparison assumptions](../../configuration.md#hybrid-cost-comparison).

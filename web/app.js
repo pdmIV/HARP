@@ -9,6 +9,7 @@
   }
   const token = sessionStorage.getItem("harpControlToken") || "";
   let currentPage = "overview";
+  let replay = null;
   let selectedId = localStorage.getItem("harpSelectedSession") || "";
   let selected = null;
   let sessions = [];
@@ -78,7 +79,10 @@
     return data;
   }
 
-  const post = (path, body = {}) => api(path, {method: "POST", body: JSON.stringify(body)});
+  const post = (path, body = {}) => {
+    if (replay) throw new Error("Exit recorded replay before making changes.");
+    return api(path, {method: "POST", body: JSON.stringify(body)});
+  };
   const el = (tag, cls, text) => {
     const node = document.createElement(tag);
     if (cls) node.className = cls;
@@ -93,7 +97,8 @@
   };
 
   function switchSession(id) {
-    if (!id || id === selectedId) return;
+    if (!id || (id === selectedId && !replay)) return;
+    if (replay) exitReplay(false);
     selectedId = id;
     localStorage.setItem("harpSelectedSession", id);
     selected = null;
@@ -107,7 +112,7 @@
   }
 
   function showPage(name) {
-    if (name === "flags" && selected && !Object.values(selected.flags || {}).some(x => x.unseen)) {
+    if (!replay && name === "flags" && selected && !Object.values(selected.flags || {}).some(x => x.unseen)) {
       const unseenSession = sessions.find(s => s.unseen_flags > 0);
       if (unseenSession && unseenSession.id !== selectedId) switchSession(unseenSession.id);
     }
@@ -160,9 +165,10 @@
     button.classList.toggle("danger", !!running);
     button.classList.toggle("primary", !running);
     button.replaceChildren(document.createTextNode(running ? "■ Stop session" : startPending ? "Starting session…" : "＋ Start session"));
-    button.disabled = startPending && !running;
+    button.disabled = !!replay || (startPending && !running);
+    $("replayStart").disabled = !!replay || selected?.summary.status !== "finished";
     button.dataset.stopId = running?.id || "";
-    $("modeSelect").disabled = !!running;
+    $("modeSelect").disabled = !!replay || !!running;
   }
 
   function deleteFinishedSession(session) {
@@ -185,13 +191,25 @@
   }
 
   function renderCostSummary(sum = {}) {
+    const money = value => value == null ? "Estimate unavailable" : `$${value.toFixed(6)}`;
+    const hasCalls = (sum.oracle_model_calls || 0) + (sum.local_model_calls || 0) > 0;
+    $("totalApiCost").textContent = hasCalls ? money(sum.total_estimated_usd) : "No calls yet";
+    const comparable = sum.cost_comparison_status === "same_workload_estimate";
+    const unavailable = sum.cost_comparison_status === "missing_prices_or_usage" ? "Check token prices and usage" : "Requires Hybrid proxy usage";
+    $("oracleOnlyCost").textContent = comparable ? money(sum.oracle_only_estimated_usd) : unavailable;
+    $("hybridSavings").textContent = comparable ? (sum.hybrid_savings_usd < 0
+      ? `${money(-sum.hybrid_savings_usd)} extra cost` : `${money(sum.hybrid_savings_usd)} saved`) : unavailable;
+    $("hybridSavingsPercent").textContent = !comparable ? "Percentage unavailable" : sum.hybrid_savings_percent == null
+      ? "Percentage undefined: oracle-only estimate is $0" : sum.hybrid_savings_percent < 0
+      ? `${Math.abs(sum.hybrid_savings_percent).toFixed(1)}% higher cost` : `${sum.hybrid_savings_percent.toFixed(1)}% estimated savings`;
     for (const [role, prefix] of [["oracle", "oracle"], ["proxy", "local"]]) {
       const calls = sum[prefix + "_model_calls"] || 0;
       const input = sum[prefix + "_input_tokens"] || 0;
       const cached = sum[prefix + "_cached_input_tokens"] || 0;
       const writes = sum[prefix + "_cache_write_tokens"] || 0;
       const cost = sum[prefix + "_estimated_usd"];
-      $(role + "ApiCost").textContent = !calls ? "No calls yet" : cost == null ? "Set token prices for an estimate" : `$${cost.toFixed(6)} estimated`;
+      const basis = sum[prefix + "_cost_basis"] === "current_configured_prices" ? " at current configured prices" : "";
+      $(role + "ApiCost").textContent = !calls ? "No calls yet" : cost == null ? "Set prices for this session's model and all used token types; usage must be recorded" : `$${cost.toFixed(6)} estimated${basis}`;
       $(role + "CacheUsage").textContent = !calls ? "No API usage recorded." : `${input.toLocaleString()} input / ${cached.toLocaleString()} cached (${input ? (100 * cached / input).toFixed(1) : "0"}%) / ${writes.toLocaleString()} cache writes`;
     }
   }
@@ -497,7 +515,7 @@
     const sum = selected.summary;
     $("sessionHeading").textContent = `${sum.target} · ${sum.mode}`;
     $("sessionState").className = "status-pill" + (["active", "recon"].includes(sum.status) ? "" : " muted");
-    $("sessionState").textContent = sum.status.toUpperCase();
+    $("sessionState").textContent = replay ? "RECORDED REPLAY" : sum.status.toUpperCase();
     $("metricTools").textContent = sum.terminal_tool_calls ?? "0";
     $("metricModel").textContent = sum.local_model_calls ?? "0";
     $("metricTokens").textContent = ((sum.local_input_tokens || 0) + (sum.local_output_tokens || 0)).toLocaleString();
@@ -507,15 +525,16 @@
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.success === "no" ? "No" : "Pending";
     $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";
     const live = document.querySelector(".live-indicator");
-    live.classList.toggle("muted", !["active", "recon"].includes(sum.status));
-    live.replaceChildren(el("i"), document.createTextNode(["active", "recon"].includes(sum.status) ? " LIVE" : " REPLAY"));
+    live.classList.toggle("muted", !!replay || !["active", "recon"].includes(sum.status));
+    const activityStatus = replay ? "RECORDED REPLAY" : ["active", "recon"].includes(sum.status) ? "LIVE" : "SAVED SESSION";
+    if ($("activityStatusText").textContent !== activityStatus) $("activityStatusText").textContent = activityStatus;
     $("reconProgress").classList.toggle("hidden", sum.status !== "recon");
     $("reconProgressTitle").textContent = sum.recon_stage || "Reconnaissance";
     $("reconStage").textContent = sum.recon_command ? "Running now" : "Preparing the next command";
     $("reconCurrentCommand").textContent = sum.recon_command || "Waiting for the next command";
     $("verboseSession").textContent = `${sum.target} · ${sum.mode}`;
     $("verboseStage").textContent = sum.status === "recon" ? `Reconnaissance: ${sum.recon_stage || "Preparing Kali"}` : `Session ${sum.status}`;
-    const active = sum.status === "active";
+    const active = !replay && sum.status === "active";
     for (const id of ["delegateButton", "stopLocal", "runManual", "markSuccess", "finishSession"]) $(id).disabled = !active;
     const canResumeOracle = active && ["nvidia_nim", "openai", "zai"].includes(selected.oracle_provider) && !!selected.activity.oracle_stopped;
     $("resumeOracle").classList.toggle("hidden", !canResumeOracle);
@@ -549,8 +568,9 @@
     if (document.activeElement !== $("objectiveInput") && !$("objectiveInput").value.trim()) $("objectiveInput").value = selected.objective || "";
     renderElapsed();
     renderFlags();
-    if (sum.status === "finished" && sum.success === "yes" && flagCount === 2 && !celebratedSessions.has(selected.id)) {
-      celebratedSessions.add(selected.id);
+    const celebrationId = (replay ? "replay:" : "") + selected.id;
+    if (sum.status === "finished" && sum.success === "yes" && flagCount === 2 && !celebratedSessions.has(celebrationId)) {
+      celebratedSessions.add(celebrationId);
       $("successDialog").showModal();
     }
     const signature = JSON.stringify((selected.artifacts || []).map(x => [x.id, x.value]));
@@ -569,11 +589,11 @@
       return;
     }
     const live = ["active", "recon"].includes(selected.summary.status);
-    const seconds = live ? Date.now() / 1000 - selected.started_epoch : selected.duration_seconds;
+    const seconds = replay ? replay.seconds : live ? Date.now() / 1000 - selected.started_epoch : selected.duration_seconds;
     $("metricElapsed").textContent = formatDuration(seconds);
     $("verboseElapsed").textContent = formatDuration(seconds);
     $("reconClock").textContent = formatDuration(selected.summary.status === "recon"
-      ? Date.now() / 1000 - selected.started_epoch : selected.summary.recon_elapsed_seconds);
+      ? (replay ? replay.seconds : Date.now() / 1000 - selected.started_epoch) : selected.summary.recon_elapsed_seconds);
   }
 
   function renderFlags() {
@@ -647,7 +667,7 @@
   }
 
   async function acknowledgeFlags() {
-    if (seenPending || !selectedId || !selected || !Object.values(selected.flags || {}).some(x => x.unseen)) return;
+    if (replay || seenPending || !selectedId || !selected || !Object.values(selected.flags || {}).some(x => x.unseen)) return;
     seenPending = true;
     try {
       const ids = Object.values(selected.flags || {}).filter(x => x.found).map(x => x.artifact_id);
@@ -671,11 +691,12 @@
   }
 
   async function poll() {
-    if (pollBusy) return;
+    if (pollBusy || replay) return;
     pollBusy = true;
     try {
       const query = new URLSearchParams({session: selectedId, cursor: String(cursor), model_cursor: String(modelCursor)});
       const data = await api(`/api/state?${query}`);
+      if (replay) return;
       sessions = data.sessions || [];
       if (startPending) {
         const reconSession = sessions.find(x => x.status === "recon");
@@ -722,6 +743,113 @@
       if (!token) toast(error.message, true);
     } finally { pollBusy = false; }
   }
+
+  async function startReplay() {
+    if (!selected || selected.summary.status !== "finished" || replay) return;
+    const playback = {id: selectedId, loading: true, playing: false, seconds: 0, index: -1};
+    replay = playback;
+    renderStartStop();
+    try {
+      const data = await api(`/api/sessions/${encodeURIComponent(selectedId)}/replay`);
+      if (replay !== playback) return;
+      Object.assign(playback, data, {loading: false, lastTick: performance.now()});
+      celebratedSessions.delete("replay:" + selectedId);
+      $("rootDialog").close();
+      $("successDialog").close();
+      $("replayControls").classList.remove("hidden");
+      $("replaySeek").max = data.duration_seconds;
+      showPage("overview");
+      renderReplay(true);
+    } catch (error) {
+      if (replay === playback) exitReplay();
+      toast(error.message, true);
+    }
+  }
+
+  function exitReplay(refresh = true) {
+    replay = null;
+    selected = null;
+    cursor = 0;
+    artifactSignature = "";
+    verboseEvents = [];
+    $("activityFeed").replaceChildren();
+    $("verboseFeed").replaceChildren();
+    $("successDialog").close();
+    $("replayControls").classList.add("hidden");
+    if (refresh) poll();
+  }
+
+  function renderReplay(force = false) {
+    if (!replay || replay.loading) return;
+    const frames = replay.frames;
+    let index = 0;
+    while (index + 1 < frames.length && frames[index + 1].seconds <= replay.seconds) index++;
+    if (force || index !== replay.index) {
+      replay.index = index;
+      const frame = frames[index];
+      selected = {...replay.session, ...frame, duration_seconds: replay.seconds, pending_approval: null};
+      // Rebuild from the prefix so rewinding removes future findings and terminal output.
+      verboseEvents = [];
+      $("activityFeed").replaceChildren();
+      $("verboseFeed").replaceChildren();
+      appendEvents(frames.slice(0, index + 1).map(x => x.event).filter(Boolean));
+      renderSummary();
+      updateBadges();
+      renderStartStop();
+    }
+    renderElapsed();
+    $("replaySeek").value = replay.seconds;
+    $("replayClock").textContent = `${formatDuration(replay.seconds)} / ${formatDuration(replay.duration_seconds)}`;
+    $("replayPlay").textContent = replay.playing ? "Pause" : "Play";
+  }
+
+  function seekReplay(seconds) {
+    if (!replay || replay.loading) return;
+    replay.seconds = Math.max(0, Math.min(replay.duration_seconds, seconds));
+    replay.lastTick = performance.now();
+    if (replay.seconds < replay.duration_seconds) {
+      celebratedSessions.delete("replay:" + replay.id);
+      $("successDialog").close();
+    }
+    if (replay.seconds >= replay.duration_seconds) replay.playing = false;
+    renderReplay(true);
+  }
+
+  function tickReplay() {
+    if (!replay || replay.loading || !replay.playing) return;
+    const now = performance.now();
+    const delta = Math.min((now - replay.lastTick) / 1000, 1);
+    replay.lastTick = now;
+    replay.seconds += delta * Number($("replaySpeed").value || 1);
+    const next = replay.frames[replay.index + 1];
+    if ($("replaySkipIdle").checked && next && next.seconds - replay.seconds > 3) replay.seconds = next.seconds - 3;
+    if (replay.seconds >= replay.duration_seconds) {
+      replay.seconds = replay.duration_seconds;
+      replay.playing = false;
+    }
+    renderReplay();
+  }
+
+  $("replayStart").addEventListener("click", startReplay);
+  $("replayExit").addEventListener("click", () => exitReplay());
+  $("replayRestart").addEventListener("click", () => { if (replay) replay.playing = false; seekReplay(0); });
+  $("replaySeek").addEventListener("input", () => seekReplay(Number($("replaySeek").value)));
+  $("replayPlay").addEventListener("click", () => {
+    if (!replay || replay.loading) return;
+    if (replay.seconds >= replay.duration_seconds) seekReplay(0);
+    replay.playing = !replay.playing;
+    replay.lastTick = performance.now();
+    renderReplay();
+  });
+  $("replayNext").addEventListener("click", () => {
+    if (!replay || replay.loading) return;
+    const finding = replay.frames.find(x => x.seconds > replay.seconds &&
+      (x.event?.type === "oracle_plan" || x.event?.type === "artifact_recorded" ||
+       x.event?.type === "finish" || Object.values(x.flags).filter(f => f.found).length >
+       Object.values(selected.flags || {}).filter(f => f.found).length));
+    seekReplay(finding?.seconds ?? replay.duration_seconds);
+  });
+  setInterval(tickReplay, 100);
 
   async function watchJob(id) {
     if (!id) { await poll(); return; }

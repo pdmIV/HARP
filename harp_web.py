@@ -28,6 +28,8 @@ import harp_secret
 import harp_nim
 import harp_openai
 import harp_zai
+import harp_replay
+import harp_costs
 
 
 ROOT = Path(__file__).resolve().parent
@@ -411,7 +413,8 @@ class HARPWebState:
         path = session_path(session_id)
         state = harp.load_session(path)
         events, next_cursor = read_events(path, cursor)
-        return {"id": session_id, "summary": harp.summarize(state),
+        summary = {**harp.summarize(state), **harp_costs.cost_summary(state, draft_config())}
+        return {"id": session_id, "summary": summary,
                 "started_epoch": state["started_epoch"],
                 "duration_seconds": state.get("duration_seconds"),
                 "delegation_limit": state["config"]["max_steps"],
@@ -540,6 +543,10 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                                      "owned_running": bool(state.model_process and state.model_process.poll() is None),
                                      "logs": state.model_logs_since(model_cursor)}}
                 self._json(200, payload)
+            elif (match := re.fullmatch(r"/api/sessions/([^/]+)/replay", parsed.path)):
+                session_id = match.group(1)
+                path = session_path(session_id)
+                self._json(200, harp_replay.build_replay(path, self.server.state.session_view(session_id, 0), draft_config()))
             elif parsed.path == "/api/health":
                 self._json(200, {"ready": True})
             elif parsed.path.startswith("/api/jobs/"):
