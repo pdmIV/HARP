@@ -2,7 +2,15 @@
 
 <div align="center"><img src=".gitbook/assets/harp-banner.png" alt="HARP - Hierarchical AI-Agent Penetration Testing" width="100%"></div>
 
+<<<<<<< HEAD
 {% embed url="https://drive.google.com/file/d/1BAiDD7IASI5ddH3yrRy89OVPtSh359V4/view?usp=sharing" %}
+=======
+<p align="center">
+  <a href="https://peter-mora-iv.gitbook.io/harp-docs">https://peter-mora-iv.gitbook.io/harp-docs</a>
+</p>
+
+https://github.com/user-attachments/assets/e7880361-a596-42fa-8fc2-b1afb1a2b864
+>>>>>>> 1a820de (added gitbook url)
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
