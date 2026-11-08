@@ -6,6 +6,16 @@
        width="100%">
 </p>
 
+<p align="center">
+  <a href="assets/showcase_video.mp4">
+    <img src="assets/showcase-preview.jpg"
+         alt="Watch HARP in action: oracle planning, proxy execution, and recorded evidence"
+         width="100%">
+  </a>
+  <br>
+  <a href="assets/showcase_video.mp4"><strong>&#9654; Watch HARP in action</strong></a> &middot; 1 min 40 sec
+</p>
+
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
 For complex work, a hosted oracle can provide an exact implementation for the proxy to execute, and the proxy can request oracle help when it encounters a blocker. Z.AI GLM-5.3 and GLM-5.3-Flash sessions can use configurable oracle evidence depth and larger token ceilings; see [GLM configuration](docs/configuration.md#zai-api--glm) for practical starting settings.
