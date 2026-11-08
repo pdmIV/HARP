@@ -203,6 +203,17 @@ nodes.get("oracleProvider").value = "codex";
 nodes.get("oracleAdaptive").checked = true;
 assert.equal(context.ui.configPayload().oracle.adaptive_reasoning, false);
 console.log("Adaptive effort UI checks passed: toggle, fixed controls, and provider-scoped persistence.");
+assert(html.indexOf('id="oracleSearch"') > html.indexOf('id="oracleAdaptive"'));
+assert(html.indexOf('id="oracleSearch"') < html.indexOf('id="oracleReasoning"'));
+assert(!/id="oracleSearch"[^>]*\bchecked/.test(html), "Search defaults off");
+nodes.get("oracleSearch").checked = true;
+for (const provider of ["codex", "zai", "openai", "nvidia_nim"]) {
+  nodes.get("oracleProvider").value = provider;
+  assert.equal(context.ui.configPayload().oracle.web_search_enabled, true);
+}
+nodes.get("oracleSearch").checked = false;
+assert.equal(context.ui.configPayload().oracle.web_search_enabled, false);
+console.log("Research UI checks passed: toggle beneath adaptive reasoning, defaults off, provider-independent persistence.");
 
 context.ui.setReplay(null);
 context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL lab / peter", issues: ["Missing tools: whippet"], command: "python scripts/install_dependencies.py --runtime wsl --distro lab --user peter", tools: {bloodhound_collector: "bloodhound-python", certipy: "certipy-ad"}});

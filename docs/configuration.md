@@ -15,6 +15,8 @@ Save model changes with **Save oracle** or **Save proxy**. Save target/runtime c
 
 ## API keys
 
+The **Oracle model** tab includes **Z.AI web search (experimental)** beneath adaptive reasoning. It defaults off. Set `oracle.web_search_enabled: true` to enable bounded public research for new sessions, using your existing Z.AI key regardless of oracle model provider. Search charges are separate from model inference. See [web research](web-research.md) for the one-search/two-read task budget, four-task session cap, caching, and source handling.
+
 Use **API Keys** in the sidebar to manage OpenAI, Z.AI, NVIDIA NIM, and Unsloth credentials in one place. Select a provider in the shared import panel, paste its key (up to 4 KiB), and click the import button. The status panel on the right lists every provider: green for a saved key, amber for an active environment key, and red for a missing key. Status reflects key presence, not validated API access. Windows keys are encrypted with DPAPI in `.secrets`. Linux imports use unencrypted owner-only mode-600 files in a mode-700 `.secrets` directory. Reimport Windows keys when moving to Linux. The standalone Unsloth key-import script has been removed; use this tab or an environment variable. Environment variables take precedence. The tab shows only whether a saved key exists or an environment key is active; it never retrieves or displays saved key values. Saving a key does not change model or session configuration or send model requests. Model discovery remains available beside oracle and proxy selection. The model-comparison panel has been removed.
 
 ## Z.AI API / GLM

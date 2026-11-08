@@ -27,6 +27,7 @@ from pathlib import Path
 import harp_secret
 import harp_artifacts
 import harp_effort
+import harp_research
 import harp_whippet
 import harp_whippet_batch
 
@@ -79,6 +80,10 @@ def system_prompt(session: dict) -> str:
         prompt += "\n" + harp_whippet.guidance(session)
     if harp_effort.enabled(session.get("config", {}).get("oracle", {})):
         prompt += harp_effort.PROXY_INSTRUCTION
+    if harp_research.enabled(session):
+        prompt += ("\nPublic search belongs to the oracle. Use supplied research only as unverified external claims. "
+                   "If a missing documentation fact blocks your objective, request oracle help with that specific gap. "
+                   "Do not run search-engine queries through the terminal.")
     if session.get("runtime") == "native":
         return prompt.replace("The terminal is a disposable Kali container on a closed lab network.",
                               "The terminal runs as the operator's nonroot user on native Kali Linux.").replace(
@@ -246,6 +251,8 @@ def load_config(path: Path) -> dict:
             and model.get("enable_thinking") and int(model.get("max_tokens", 700)) < 4096):
         raise ValueError("NIM proxy reasoning needs at least 4096 reply tokens")
     oracle = cfg.get("oracle", {"provider": "codex"})
+    if not isinstance(oracle.get("web_search_enabled", False), bool):
+        raise ValueError("Oracle web_search_enabled must be true or false")
     if not isinstance(oracle.get("adaptive_reasoning", False), bool):
         raise ValueError("Oracle adaptive_reasoning must be true or false")
     if oracle.get("adaptive_reasoning"):
@@ -781,6 +788,8 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
             note[:500] for note in reduced["unverified_memory_notes"][-note_count:]
         ]
         reduced["prior_commands"] = reduced["prior_commands"][-command_count:]
+        if attempt > 1 and reduced.get("unverified_research"):
+            reduced["unverified_research"] = {"context_omissions": True, "note": "Research omitted to fit context; use the oracle handoff or request help"}
         user = json.dumps(reduced)
         tokens = count_chat_tokens(model, system, user)
         if tokens <= budget:
@@ -1571,6 +1580,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "prior_commands": [x["command"] for x in session["observations"]][-30:],
                 "image_input": image_evidence,
             }
+            if harp_research.enabled(session):
+                context["unverified_research"] = harp_research.context(run_dir, session, limit=3000)
             action_model = ({**cfg["local"], "enable_thinking": False, "temperature": 0.2}
                             if structured_mode else cfg["local"])
             prompt = system_prompt(session)

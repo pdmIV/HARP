@@ -51,6 +51,7 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors              |
 | [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
 | [Image evidence](docs/image-evidence.md)         | PNG/JPEG previews, oracle-directed GLM 5.3 Flash image input, and transcription verification          |
+| [Web research](docs/web-research.md)             | Experimental oracle-directed Z.AI search, bounded source reads, caching, and research budgets          |
 | [Whippet AD analysis](docs/whippet.md)           | Optional Kali CLI, model awareness, focused graph queries, and structured context limits              |
 | [Whippet batch queries](docs/whippet-batch.md)   | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup                     |
 | [Host protection](docs/host-protection.md)       | Runtime boundaries, command validation, and root approvals                                            |

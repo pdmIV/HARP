@@ -9,6 +9,7 @@
   * [Host protection](docs/host-protection.md)
   * [Running sessions](docs/running-sessions.md)
   * [Image evidence](docs/image-evidence.md)
+  * [Web research](docs/web-research.md)
   * [Setup](docs/setup.md)
   * [Managed Whippet batch queries](docs/whippet-batch.md)
   * [Whippet AD analysis](docs/whippet.md)

@@ -430,6 +430,7 @@
     $("oracleProvider").value = oracle.provider || "codex";
     $("oracleReasoning").value = oracle.reasoning_effort || "low";
     $("oracleAdaptive").checked = oracle.adaptive_reasoning === true;
+    $("oracleSearch").checked = oracle.web_search_enabled === true;
     $("oracleTemperature").value = oracle.temperature ?? 1;
     $("oracleTopP").value = oracle.top_p ?? 0.95;
     $("oracleReply").value = oracle.max_tokens || 16384;
@@ -489,6 +490,7 @@
                ...(["openai", "zai"].includes($("oracleProvider").value) ? cacheConfig("oracle") : {}),
                reasoning_effort: $("oracleReasoning").value,
                adaptive_reasoning: ["zai", "openai"].includes($("oracleProvider").value) && $("oracleAdaptive").checked,
+               web_search_enabled: $("oracleSearch").checked,
                ...($("oracleProvider").value === "zai" ? {temperature: Number($("oracleTemperature").value), top_p: Number($("oracleTopP").value)} : {}),
                max_cycles: Number($("oracleCycles").value), steps_per_cycle: Number($("oracleSteps").value),
                unlimited_budget: $("oracleUnlimited").checked,
@@ -506,6 +508,7 @@
 
   function eventCategory(event) {
     const kind = event.type || "";
+    if (kind.startsWith("research_")) return "oracle";
     if (kind === "oracle_effort_selected" || kind === "proxy_effort_recommendation" || kind === "oracle_plan" || kind === "delegation" || kind === "oracle_terminal" ||
         kind === "oracle_nim_recovery" || kind === "oracle_nim_probe" ||
         kind === "oracle_nim_probe_rejected" || kind === "oracle_nim_resumed") return "oracle";
@@ -533,6 +536,8 @@
     if (kind === "recon_cache_error") return ["Recon save failed", event.error || "The run can continue, but its findings were not cached", ""];
     if (kind === "recon_failed") return ["Reconnaissance failed", event.error || "Startup failed", ""];
     if (kind === "recon_cancelled") return ["Reconnaissance stopped", "Stopped after the current command", ""];
+    if (kind.startsWith("research_")) return [kind === "research_cache_hit" ? "Research cache reused" : kind === "research_started" ? "Oracle research started" : "Oracle research completed",
+      `${event.operation || ""} ${event.status || ""}${event.seconds != null ? ` · ${event.seconds}s` : ""}`, event.reason || (event.result ? JSON.stringify(event.result, null, 2) : event.source_id || event.task_id || "")];
     if (kind === "oracle_effort_selected") return ["Oracle reasoning effort", `${event.effort} / ${event.source} / cycle ${event.cycle}`, ""];
     if (kind === "proxy_effort_recommendation") return ["Proxy effort recommendation", event.effort, ""];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];

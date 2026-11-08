@@ -16,6 +16,7 @@ import harp
 import harp_artifacts
 import harp_secret
 import harp_effort
+import harp_research
 import harp_whippet
 
 BASE = "https://integrate.api.nvidia.com/v1"
@@ -333,6 +334,7 @@ def run(run_dir: Path) -> None:
     oracle_probes = history["probes"]
     probe_rejections = history["rejections"]
     probe_feedback: dict | None = history["probe_feedback"]
+    research_seen = set()
     cycles = (itertools.count(history["cycles"]) if unlimited_budget else
               range(history["cycles"], int(cfg.get("max_cycles", 12))))
     for cycle in cycles:
@@ -367,6 +369,8 @@ def run(run_dir: Path) -> None:
                                    for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
         if probe_feedback:
             context["probe_feedback"] = probe_feedback
+        if harp_research.enabled(session):
+            context["unverified_research"] = harp_research.context(run_dir, session)
         if harp_whippet.relevant(session):
             context["whippet"] = session.get("whippet")
         whippet_chars = sum(len(x.get("output", "")) for x in observations
@@ -447,7 +451,8 @@ def run(run_dir: Path) -> None:
                 "that principal; choose the smallest evidence-gathering step that may change the plan. "
                 "Copy any authentication limits from the plan into the objective. Stop only when "
                 "blocked, repeated after correction, or no evidence-backed step remains."
-                + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_whippet.guidance(session)},
+                + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_whippet.guidance(session)
+                + (harp_research.INSTRUCTION if harp_research.enabled(session) else "")},
                 {"role": "user", "content": json.dumps(context)}]})
         usage = reply.get("usage") or {}
         choice = reply["choices"][0]
@@ -485,6 +490,23 @@ def run(run_dir: Path) -> None:
             return
         decision = harp.json_object(content)
         plan = str(decision.get("plan", "")).strip()[:1000]
+        if "research" in decision:
+            if plan:
+                harp.append_event(run_dir, {"type": "oracle_plan", "plan": plan})
+            try:
+                if decision.get("objective") or decision.get("implementation") or decision.get("oracle_command") or decision.get("stop") is not False:
+                    raise ValueError("Research must be a standalone oracle action with stop=false and empty objective")
+                action = decision["research"]
+                identity = ("query:" + " ".join(str(action["query"]).casefold().split()) if isinstance(action, dict) and "query" in action
+                            else "source:" + str(action.get("source_id")) if isinstance(action, dict) else "invalid")
+                if identity in research_seen:
+                    raise ValueError("Repeated oracle research action; use the preserved results")
+                research_seen.add(identity)
+                harp_research.request(run_dir, decision["research"])
+            except (ValueError, RuntimeError) as error:
+                harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "research_rejected", "detail": str(error)[:500]})
+                return
+            continue
         try:
             objective = assisted_objective(decision, plan)
         except ValueError as error:

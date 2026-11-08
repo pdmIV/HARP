@@ -32,6 +32,7 @@ import harp_zai
 import harp_replay
 import harp_costs
 import harp_dependencies
+import harp_research
 
 
 ROOT = Path(__file__).resolve().parent
@@ -443,7 +444,8 @@ class HARPWebState:
             if match:
                 try:
                     harp_secret.save_key(ROOT / ".secrets" / "unsloth.key", match.group(1))
-                    self.add_model_log("Model API key saved for this user.\n")
+                    self.add_model_log("Model API key stored encrypted for this Windows account.\n" if os.name == "nt"
+                                       else "Model API key saved with owner-only Linux permissions.\n")
                 except Exception as error:
                     self.add_model_log(f"Could not store model API key: {error}\n")
             self.add_model_log(line)
@@ -482,6 +484,8 @@ class HARPWebState:
         state = web_session(path)
         events, next_cursor = read_events(path, cursor) if include_events else ([], 0)
         summary = {**harp.summarize(state), **harp_costs.cost_summary(state, draft_config())}
+        if harp_research.enabled(state):
+            summary["research_usage"] = harp_research.metrics(path)
         return {"id": session_id, "summary": summary,
                 "success_viewed": (path / "success-viewed.json").is_file(),
                 "started_epoch": state["started_epoch"],
