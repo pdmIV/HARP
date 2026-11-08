@@ -1,0 +1,16 @@
+# Table of contents
+
+* [HARP](README.md)
+* [HARP Codex operator guide](AGENTS.md)
+* [docs](docs/README.md)
+  * [Configuration](docs/configuration.md)
+  * [Install dependencies](docs/dependencies.md)
+  * [Evaluation and limitations](docs/evaluation.md)
+  * [Host protection](docs/host-protection.md)
+  * [Running sessions](docs/running-sessions.md)
+  * [Setup](docs/setup.md)
+  * [Managed Whippet batch queries](docs/whippet-batch.md)
+  * [Whippet AD analysis](docs/whippet.md)
+  * [case-studies](docs/case-studies/README.md)
+    * [Cicada: a HARP Hybrid case study](docs/case-studies/cicada-2026-11-07/README.md)
+      * [transcript](docs/case-studies/cicada-2026-11-07/transcript.md)

@@ -1,12 +1,8 @@
 # HARP
 
-<p align="center">
-  <img src="assets/harp-banner.png"
-       alt="HARP - Hierarchical AI-Agent Penetration Testing"
-       width="100%">
-</p>
+<div align="center"><img src=".gitbook/assets/harp-banner.png" alt="HARP - Hierarchical AI-Agent Penetration Testing" width="100%"></div>
 
-https://github.com/user-attachments/assets/e7880361-a596-42fa-8fc2-b1afb1a2b864
+{% embed url="https://drive.google.com/file/d/1BAiDD7IASI5ddH3yrRy89OVPtSh359V4/view?usp=sharing" %}
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
@@ -26,12 +22,12 @@ HARP's managed batch connection reuses one loaded graph across queries and start
 
 ## Supported configurations
 
-| Component | Options |
-| --- | --- |
-| Oracle | OpenAI API, Z.AI API, NVIDIA NIM, or Codex via MCP |
-| Proxy model | OpenAI API, Z.AI API, NVIDIA NIM, or local Unsloth |
-| Kali runtime | Existing Kali WSL or disposable Docker container |
-| Experiment mode | Hybrid, proxy only, or frontier only |
+| Component       | Options                                            |
+| --------------- | -------------------------------------------------- |
+| Oracle          | OpenAI API, Z.AI API, NVIDIA NIM, or Codex via MCP |
+| Proxy model     | OpenAI API, Z.AI API, NVIDIA NIM, or local Unsloth |
+| Kali runtime    | Existing Kali WSL or disposable Docker container   |
+| Experiment mode | Hybrid, proxy only, or frontier only               |
 
 ## Getting started
 
@@ -44,17 +40,17 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 
 ## Documentation
 
-| Guide | Contents |
-| --- | --- |
-| [Setup](docs/setup.md) | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup |
-| [Install dependencies](docs/dependencies.md) | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection |
-| [Configuration](docs/configuration.md) | Providers, model selection, API keys, limits, context, caching, costs, and access errors |
-| [Running sessions](docs/running-sessions.md) | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
-| [Whippet AD analysis](docs/whippet.md) | Optional Kali CLI, model awareness, focused graph queries, and structured context limits |
-| [Whippet batch queries](docs/whippet-batch.md) | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup |
-| [Host protection](docs/host-protection.md) | Runtime boundaries, command validation, and root approvals |
-| [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits |
-| [Operator guide](AGENTS.md) | Instructions for Codex operators |
+| Guide                                            | Contents                                                                                              |
+| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| [Setup](docs/setup.md)                           | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup                                               |
+| [Install dependencies](docs/dependencies.md)     | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection                   |
+| [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors              |
+| [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
+| [Whippet AD analysis](docs/whippet.md)           | Optional Kali CLI, model awareness, focused graph queries, and structured context limits              |
+| [Whippet batch queries](docs/whippet-batch.md)   | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup                     |
+| [Host protection](docs/host-protection.md)       | Runtime boundaries, command validation, and root approvals                                            |
+| [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits                        |
+| [Operator guide](AGENTS.md)                      | Instructions for Codex operators                                                                      |
 
 Finished sessions can be replayed from the dashboard with play/pause, speed controls, a seek timeline, and progressive evidence display. Replay uses saved logs without contacting the target or calling models. See [session replay](docs/running-sessions.md#replay-a-saved-session).
 
@@ -62,7 +58,7 @@ Overview also shows total oracle + proxy cost and estimated Hybrid savings in do
 
 ## Evidence and scope
 
-See the [Cicada case study](docs/case-studies/cicada-2026-11-07/README.md) for a complete Hybrid run with oracle plans, proxy commands, terminal evidence, artifacts, and both lab flags.
+See the [Cicada case study](docs/case-studies/cicada-2026-11-07/) for a complete Hybrid run with oracle plans, proxy commands, terminal evidence, artifacts, and both lab flags.
 
 Use HARP only against targets you are authorized to assess. Model claims are not proof of success. HARP records `user.txt` and `root.txt` flags from terminal evidence and preserves session logs for review. You can stop an active session or permanently delete a finished session and its logs in the command center. Completed reconnaissance is cached separately and reused for matching new sessions; a focused `.htb` hostname check can identify the same box at a new IP. Select **Refresh reconnaissance** to scan again. Root commands require approval.
 
