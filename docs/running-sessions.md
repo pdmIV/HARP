@@ -115,6 +115,8 @@ The **Cache and cost** panel shows oracle and proxy estimates, their combined to
 
 ## Replay a saved session
 
+Relevant downloaded PNG/JPEG files can be preserved and previewed in **Artifacts**. With a Z.AI GLM 5.3 Flash proxy, the oracle can delegate reading the actual image pixels. See [image evidence](image-evidence.md) for the capture actions, limits, and verification rules.
+
 Select a finished session in the sidebar and click **Replay saved session** in the top bar. Replay loads the saved event log and opens at the beginning, paused. No target commands, model requests, or Kali startup are needed.
 
 - **Play / Pause** controls playback. **Restart** returns to the beginning, paused.

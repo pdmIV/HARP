@@ -118,6 +118,9 @@ def inspect_session(session: str) -> str:
                        "smb_probes": state.get("smb_probes", []),
                        "whippet": state.get("whippet"),
                        "whippet_guidance": harp_whippet.guidance(state),
+                       "proxy_image_input_available": harp.supports_image_input(state.get("config", {}).get("local", {})),
+                       "unverified_local_conclusion": state.get("local_conclusion"),
+                       "oracle_help_request": state.get("oracle_help_request"),
                        "smb_tool_guidance": harp_whippet.SMB_TOOL_GUIDANCE,
                        "flags": harp_artifacts.flag_status(run_path(session)),
                        "artifacts": harp_artifacts.list_artifacts(run_path(session)),
@@ -225,7 +228,8 @@ def record_oracle_plan(session: str, plan: str) -> str:
 
 def delegate_local(session: str, objective: str, steps: int | None = None, unbridled: bool = False) -> str:
     path = run_path(session)
-    if harp_whippet.relevant(harp.load_session(path)):
+    state = harp.load_session(path)
+    if harp_whippet.relevant(state) or harp.supports_image_input(state["config"]["local"]):
         harp.delegate(path, objective, steps, quiet=True, unbridled=unbridled)
         return inspect_session(session)
     return captured(lambda: harp.delegate(run_path(session), objective, steps, unbridled=unbridled))
@@ -282,7 +286,7 @@ TOOLS = {
                          "kind": {"type": "string", "enum": ["credential", "document", "other", "flag"]},
                          "title": {"type": "string"}, "value": {"type": "string"}},
                         ["session", "kind", "title", "value"]),
-    "capture_document": (capture_document, "Preserve one regular file under the active Kali session workspace (8 MiB maximum) as a downloadable document artifact.",
+    "capture_document": (capture_document, "Preserve one regular file under the active Kali session workspace (8 MiB maximum). PNG/JPEG files become image artifacts with dashboard previews; other files remain downloadable documents.",
                          {"session": {"type": "string"}, "path": {"type": "string"},
                           "title": {"type": "string"}}, ["session", "path", "title"]),
     "delegate_local": (delegate_local, "Give the proxy model one narrow objective. The configured proxy step limit applies afresh to each delegation; total proxy steps remain a statistic. Unbridled=true removes step, model-call, and repetition limits until done, operator stop, or another required stop. Review terminal evidence and the stop reason afterward.",

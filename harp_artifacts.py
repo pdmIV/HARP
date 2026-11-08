@@ -7,10 +7,12 @@ import hashlib
 import re
 import subprocess
 import uuid
+import struct
+import base64
 from pathlib import Path, PurePosixPath
 
 
-KINDS = {"credential", "document", "other", "flag"}
+KINDS = {"credential", "document", "image", "other", "flag"}
 FLAG_NAMES = ("user.txt", "root.txt")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 FILE_READ = re.compile(r"(?i)(?<![A-Za-z0-9_-])(?:cat|type|get-content|more|head|tail|sed|awk)(?![A-Za-z0-9_-])")
@@ -44,7 +46,7 @@ def register_artifact(run_dir: Path, *, kind: str, title: str, value: str,
                       source: str, evidence: str, evidence_backed: bool,
                       artifact_id: str | None = None, attachment: dict | None = None) -> dict:
     if kind not in KINDS:
-        raise ValueError("Artifact kind must be credential, document, flag, or other")
+        raise ValueError("Artifact kind must be credential, document, image, flag, or other")
     title, value, source, evidence = (str(x).strip() for x in (title, value, source, evidence))
     if not title or not value or len(title) > 160 or len(value) > 8000 or len(source) > 1000:
         raise ValueError("Artifact title or value is empty or too long")
@@ -66,6 +68,61 @@ def register_artifact(run_dir: Path, *, kind: str, title: str, value: str,
     return record
 
 
+def image_metadata(data: bytes) -> dict | None:
+    """Recognize raster headers without executing a host-side image decoder."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 33 and data[8:16] == b"\x00\x00\x00\rIHDR":
+        width, height = struct.unpack(">II", data[16:24])
+        mime = "image/png"
+    elif data.startswith(b"\xff\xd8"):
+        pos = 2
+        while pos < len(data):
+            if data[pos] != 255:
+                return None
+            while pos < len(data) and data[pos] == 255:
+                pos += 1
+            if pos >= len(data):
+                return None
+            marker = data[pos]
+            pos += 1
+            if marker in (0xD9, 0xDA):
+                return None
+            if marker in (0x01, *range(0xD0, 0xD8)):
+                continue
+            if pos + 2 > len(data):
+                return None
+            size = int.from_bytes(data[pos:pos + 2], "big")
+            if size < 2 or pos + size > len(data):
+                return None
+            if marker in (0xC0, 0xC1, 0xC2):
+                if size < 8:
+                    return None
+                height, width = struct.unpack(">HH", data[pos + 3:pos + 7])
+                mime = "image/jpeg"
+                break
+            pos += size
+        else:
+            return None
+    else:
+        return None
+    if not (0 < width <= 6000 and 0 < height <= 6000):
+        return None
+    return {"media_type": mime, "width": width, "height": height}
+
+
+def image_input(run_dir: Path, artifact: dict) -> tuple[dict, int]:
+    """Build an inline image from preserved bytes, never a target or host URL."""
+    data = (run_dir / "artifact_files" / artifact["id"]).read_bytes()
+    metadata = image_metadata(data)
+    if metadata is None or len(data) > 5_000_000:
+        raise ValueError("Vision input requires PNG/JPEG, at most 5 MB and 6000 by 6000 pixels")
+    if hashlib.sha256(data).hexdigest() != artifact["attachment"]["sha256"]:
+        raise ValueError("Image attachment hash mismatch")
+    url = "data:" + metadata["media_type"] + ";base64," + base64.b64encode(data).decode("ascii")
+    # Conservative patch estimate, not a provider tokenizer or a cost claim.
+    reserve = ((metadata["width"] + 27) // 28) * ((metadata["height"] + 27) // 28) * 2 + 1024
+    return {"type": "image_url", "image_url": {"url": url}}, reserve
+
+
 def capture_document_file(run_dir: Path, session: dict, container_path: str, title: str) -> dict:
     """Copy one regular session-workspace file through bounded stdout."""
     workspace = session.get("workspace", "/workspace")
@@ -82,7 +139,7 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
         "import os,stat,sys\n"
         "p=os.path.realpath(sys.argv[1])\n"
         "if not p.startswith(sys.argv[2].rstrip('/')+'/'): sys.exit(2)\n"
-        "fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW)\n"
+        "fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)\n"
         "s=os.fstat(fd)\n"
         "if not stat.S_ISREG(s.st_mode) or s.st_size>8388608: sys.exit(3)\n"
         "left=8388609\n"
@@ -102,7 +159,8 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
         raise ValueError("Document exceeds 8 MiB maximum")
     digest = hashlib.sha256(data).hexdigest()
     filename = path.name
-    text_preview = data[:3000].decode("utf-8", errors="replace") if b"\x00" not in data[:3000] else "Binary file"
+    image = image_metadata(data)
+    text_preview = "Raster image (see preview)" if image else data[:3000].decode("utf-8", errors="replace") if b"\x00" not in data[:3000] else "Binary file"
     value = f"File: {filename}\nSHA-256: {digest}\nSize: {len(data)} bytes\n\nPreview:\n{text_preview}"
     artifact_id = uuid.uuid4().hex
     files = run_dir / "artifact_files"
@@ -110,10 +168,10 @@ def capture_document_file(run_dir: Path, session: dict, container_path: str, tit
     stored = files / artifact_id
     stored.write_bytes(data)
     try:
-        record = register_artifact(run_dir, kind="document", title=title, value=value,
+        record = register_artifact(run_dir, kind="image" if image else "document", title=title, value=value,
                                    source=container_path, evidence="Copied regular file from Kali session workspace",
                                    evidence_backed=True, artifact_id=artifact_id,
-                                   attachment={"filename": filename, "size": len(data), "sha256": digest})
+                                   attachment={"filename": filename, "size": len(data), "sha256": digest, **(image or {})})
     except Exception:
         stored.unlink(missing_ok=True)
         raise

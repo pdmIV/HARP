@@ -551,7 +551,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         self.end_headers()
 
     def _json(self, status: int, payload: dict):
@@ -656,10 +656,15 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("Document attachment not found")
                 stored = run_dir / "artifact_files" / artifact_id
                 data = stored.read_bytes()
+                inline = parse_qs(parsed.query).get("preview") == ["1"]
+                image = harp_artifacts.image_metadata(data) if inline else None
+                if inline and (not image or hashlib.sha256(data).hexdigest() != artifact["attachment"]["sha256"]):
+                    raise ValueError("Attachment is not a supported, intact raster image")
                 filename = re.sub(r"[^A-Za-z0-9._-]", "_", artifact["attachment"]["filename"])
                 self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+                self.send_header("Content-Type", image["media_type"] if image else "application/octet-stream")
+                self.send_header("Content-Disposition", f'{"inline" if inline else "attachment"}; filename="{filename}"')
+                self.send_header("Content-Security-Policy", "default-src 'none'; sandbox")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")

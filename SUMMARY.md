@@ -8,6 +8,7 @@
   * [Evaluation and limitations](docs/evaluation.md)
   * [Host protection](docs/host-protection.md)
   * [Running sessions](docs/running-sessions.md)
+  * [Image evidence](docs/image-evidence.md)
   * [Setup](docs/setup.md)
   * [Managed Whippet batch queries](docs/whippet-batch.md)
   * [Whippet AD analysis](docs/whippet.md)

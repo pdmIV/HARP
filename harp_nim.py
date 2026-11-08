@@ -349,7 +349,7 @@ def run(run_dir: Path) -> None:
             {"kind": item.get("kind"), "title": item.get("title", "")[:120],
              "value": item.get("value", "")[:700], "source": item.get("source", "")[:200]}
             for item in harp_artifacts.list_artifacts(run_dir)
-            if item.get("kind") in {"credential", "document", "other"} and item.get("evidence_backed")
+            if item.get("kind") in {"credential", "document", "image", "other"} and item.get("evidence_backed")
         ][-8:]
         context = {"target": session["target"], "objective": session["config"]["objective"],
                    "authorized_scope": session["config"].get("authorized_scope", []),
@@ -361,6 +361,8 @@ def run(run_dir: Path) -> None:
                    "prior_attempts": attempts[-8:],
                    "last_stop": session.get("last_delegate_stop"),
                    "oracle_help_request": session.get("oracle_help_request"),
+                   "proxy_image_input_available": harp.supports_image_input(session["config"]["local"]),
+                   "unverified_local_conclusion": session.get("local_conclusion"),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                    for name in ("user.txt", "root.txt")}, "cycle": cycle + 1}
         if probe_feedback:
@@ -403,6 +405,11 @@ def run(run_dir: Path) -> None:
             "messages": [{"role": "system", "content":
                 "You are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
                 "objective for the proxy model. Never claim a flag without terminal evidence. "
+                "When a relevant image has been downloaded into the session Kali workspace and "
+                "proxy_image_input_available is true, delegate reading that exact file using read_image. "
+                "The proxy can also preserve relevant evidence using capture_file. Preserved image bytes "
+                "are evidence, but visual transcriptions and password candidates in unverified_local_conclusion "
+                "are model interpretations. Validate them with a bounded follow-up before treating them as facts. "
                 "Return only JSON with keys plan (short operator-facing sentence), objective "
                 "(specific bounded task, at most 1000 characters), stop (boolean), optional "
                 "implementation (string, at most 16000 characters), and optional oracle_command. "

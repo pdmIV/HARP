@@ -29,7 +29,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -68,6 +68,53 @@ nodes.get("closeSuccess").handlers.click();
 assert.equal(nodes.get("successDialog").open, false);
 assert.match(html, /rel="icon"[^>]+href="\/favicon.svg"/);
 console.log("UI checks passed: live artifacts, flags, frozen timer, celebration, favicon link.");
+
+(async () => {
+  const imageNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
+  imageNodes.get("artifactFilter").value = "image";
+  const revoked = [], fetched = [];
+  let resolveFetch;
+  const imageContext = {...context, document: {...document, documentElement: element(), getElementById: id => imageNodes.get(id)},
+    localStorage: {getItem: () => "image-session", setItem() {}},
+    sessionStorage: {getItem: () => "test-token", setItem() {}},
+    URL: {createObjectURL: () => "blob:image-clue", revokeObjectURL: url => revoked.push(url)},
+    fetch: (url, options) => { fetched.push({url, options}); return new Promise(resolve => { resolveFetch = resolve; }); }};
+  delete imageContext.ui;
+  vm.createContext(imageContext); vm.runInContext(source, imageContext);
+  const imageState = {id: "image-session", artifacts: [{id: "a".repeat(32), kind: "image", title: "Lab clue",
+    value: "SHA-256: test", source: "/workspace/clue.png", evidence_backed: true,
+    attachment: {filename: "clue.png", media_type: "image/png"}}]};
+  imageContext.ui.setSelected(imageState);
+  imageContext.ui.renderArtifacts(true);
+  assert.equal(fetched[0].options.headers["X-HARP-Token"], "test-token");
+  assert(fetched[0].url.endsWith("?preview=1"));
+  const card = imageNodes.get("artifactGrid").children[0];
+  const preview = card.children.find(child => child.className === "artifact-image-wrap");
+  resolveFetch({ok: true, blob: async () => ({type: "image/png"})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(preview.children[0].src, "blob:image-clue");
+  assert.equal(preview.children[0].alt, "Lab clue");
+  assert.equal(preview.children[1].target, "_blank");
+  assert.equal(preview.children[1].rel, "noopener noreferrer");
+  preview.children[0].handlers.error();
+  assert.match(preview.children[0].textContent, /could not be rendered/);
+  assert.deepEqual(revoked, ["blob:image-clue"]);
+  imageContext.ui.renderArtifacts(true);
+  const stale = resolveFetch;
+  imageContext.ui.setSelected({id: "other", artifacts: []});
+  imageContext.ui.renderArtifacts(true);
+  stale({ok: true, blob: async () => ({type: "image/png"})});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(imageNodes.get("artifactGrid").children[0].children[1].textContent, "No artifacts yet");
+  imageContext.ui.setSelected(imageState);
+  imageContext.ui.renderArtifacts(true);
+  resolveFetch({ok: false});
+  await new Promise(resolve => setImmediate(resolve));
+  const failure = imageNodes.get("artifactGrid").children[0].children.find(child => child.className === "artifact-image-wrap");
+  assert.match(failure.children[0].textContent, /preview unavailable/);
+  assert.match(html, /option value="image">Images/);
+  console.log("Image UI checks passed: authenticated preview, full-size link, filter, stale response, rendering fallback, URL cleanup.");
+})().catch(error => { console.error(error); process.exitCode = 1; });
 
 // A rewind must clear future flags/artifacts, and replay must never send a POST.
 const initial = {seconds: 0, event: null, summary: {status: "recon", success: "unknown"}, activity: {}, flags: {}, artifacts: [], recon: []};

@@ -19,6 +19,8 @@
   let budgetSessionId = "";
   let currentFilter = "all";
   let artifactSignature = "";
+  let artifactGeneration = 0;
+  const artifactImageUrls = new Set();
   let configLoaded = false;
   let pollBusy = false;
   let pollController = null;
@@ -765,6 +767,9 @@
 
   function renderArtifacts(force = false) {
     if (!force || !selected) return;
+    const generation = ++artifactGeneration;
+    for (const url of artifactImageUrls) URL.revokeObjectURL(url);
+    artifactImageUrls.clear();
     const all = selected.artifacts || [];
     const query = $("artifactSearch").value.trim().toLowerCase();
     const kind = $("artifactFilter").value;
@@ -793,11 +798,42 @@
       source.append(el("strong", "", "SOURCE  "), document.createTextNode(item.source || "—"));
       card.append(source);
       if (item.attachment) {
+        if (["image/png", "image/jpeg"].includes(item.attachment.media_type)) {
+          const preview = el("div", "artifact-image-wrap");
+          preview.append(el("p", "muted-text", "Loading image…"));
+          card.append(preview);
+          loadArtifactImage(item, selectedId, preview, generation);
+        }
         const download = el("button", "button secondary artifact-download", `↓ Download ${item.attachment.filename}`);
         download.addEventListener("click", () => downloadAttachment(item));
         card.append(download);
       }
       grid.append(card);
+    }
+  }
+
+  async function loadArtifactImage(item, sessionId, preview, generation) {
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${item.id}?preview=1`,
+        {cache: "no-store", headers: {"X-HARP-Token": token}});
+      if (!response.ok) throw new Error("Image preview unavailable. Download the preserved file to inspect it in Kali.");
+      const blob = await response.blob();
+      if (generation !== artifactGeneration) return;
+      if (!["image/png", "image/jpeg"].includes(blob.type)) throw new Error("Unsupported image preview.");
+      const url = URL.createObjectURL(blob);
+      artifactImageUrls.add(url);
+      const image = el("img", "artifact-image");
+      image.alt = item.title;
+      image.addEventListener("error", () => {
+        preview.replaceChildren(el("p", "muted-text", "Image could not be rendered. Original download is available."));
+        URL.revokeObjectURL(url); artifactImageUrls.delete(url);
+      });
+      image.src = url;
+      const fullSize = el("a", "artifact-image-link", "Open full-size image");
+      fullSize.href = url; fullSize.target = "_blank"; fullSize.rel = "noopener noreferrer";
+      preview.replaceChildren(image, fullSize);
+    } catch (error) {
+      if (generation === artifactGeneration) preview.replaceChildren(el("p", "muted-text", error.message));
     }
   }
 
