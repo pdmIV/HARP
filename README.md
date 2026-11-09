@@ -1,6 +1,6 @@
 # HARP
 
-<div align="center"><img src=".gitbook/assets/harp-banner.png" alt="HARP - Hierarchical AI-Agent Penetration Testing" width="100%"></div>
+<div align="center"><img src=".gitbook/assets/harp-banner-green.png" alt="Harp wordmark and green harp emblem on a dark command-center banner" width="100%"></div>
 
 <p align="center">
   <a href="https://peter-mora-iv.gitbook.io/harp-docs">https://peter-mora-iv.gitbook.io/harp-docs</a>
