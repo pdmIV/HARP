@@ -18,10 +18,14 @@ import shutil
 import socket
 import subprocess
 import threading
+import tempfile
+import zipfile
 import time
 from urllib.parse import parse_qs, urlparse
 import uuid
 import webbrowser
+import harp_session_archive
+import harp_version
 
 import harp
 import harp_artifacts
@@ -224,6 +228,7 @@ def _cached_sidebar_row(directory: str, version: tuple) -> dict:
     flags = harp_artifacts.flag_status(path)
     return {"id": path.name, "status": state["status"], "mode": state["mode"],
             "target": state["target"], "started_at": state["started_at"],
+            "imported": bool(state.get("imported_from")),
             "_pending_root_command": state.get("pending_root_command"),
             "unseen_flags": sum(1 for flag in flags.values() if flag["unseen"]),
             "flags_found": sum(1 for flag in flags.values() if flag["found"])}
@@ -600,7 +605,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
                   "/favicon.svg": ("favicon.svg", "image/svg+xml"),
                   "/app.css": ("app.css", "text/css; charset=utf-8"),
-                  "/app.js": ("app.js", "application/javascript; charset=utf-8")}
+                  "/app.js": ("app.js", "application/javascript; charset=utf-8"),
+                  "/fonts/Chomsky.woff2": ("fonts/Chomsky.woff2", "font/woff2")}
         if parsed.path in assets:
             filename, content_type = assets[parsed.path]
             body = (WEB / filename).read_bytes()
@@ -623,6 +629,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 port = int(studio_settings(cfg)["port"])
                 listed = state.session_list()
                 payload = {"config": cfg, "keys": key_status(), "sessions": listed,
+                           "version": harp_version.VERSION,
                            "dependencies": {**state.dependencies.status(cfg),
                                             "blocked": state.starting_session or any(x["status"] in ("active", "recon") for x in listed)},
                            "selected": state.session_view(selected, cursor) if selected and any(x["id"] == selected for x in listed) else None,
@@ -636,6 +643,21 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 self._json(200, harp_replay.build_replay(path, self.server.state.session_view(session_id, 0), draft_config()))
             elif (match := re.fullmatch(r"/api/sessions/([^/]+)/view", parsed.path)):
                 self._json(200, self.server.state.session_view(match.group(1), 0, include_events=False))
+            elif (match := re.fullmatch(r"/api/sessions/([^/]+)/archive", parsed.path)):
+                run_dir = session_path(match.group(1))
+                RUNS.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".export-", dir=RUNS) as temp:
+                    archive = Path(temp) / "session.zip"
+                    harp_session_archive.export_session(run_dir, archive)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Disposition", f'attachment; filename="harp-session-{run_dir.name}.zip"')
+                    self.send_header("Content-Length", str(archive.stat().st_size))
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    with archive.open("rb") as stream:
+                        shutil.copyfileobj(stream, self.wfile, length=1024 * 1024)
             elif parsed.path == "/api/health":
                 self._json(200, {"ready": True})
             elif parsed.path.startswith("/api/jobs/"):
@@ -682,7 +704,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "Not found"})
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             self.close_connection = True
-        except (ValueError, KeyError, OSError) as error:
+        except (ValueError, KeyError, OSError, zipfile.BadZipFile, EOFError) as error:
             self._json(400, {"error": str(error)})
         except Exception as error:
             self._json(500, {"error": str(error)})
@@ -694,6 +716,26 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         try:
+            if urlparse(self.path).path == "/api/sessions/import":
+                if self.headers.get("Content-Type", "").split(";", 1)[0] != "application/zip":
+                    raise ValueError("Choose a HARP session ZIP archive")
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= harp_session_archive.MAX_ARCHIVE_BYTES:
+                    raise ValueError("Session archive must be at most 512 MiB")
+                RUNS.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(prefix=".upload-", dir=RUNS) as temp:
+                    upload = Path(temp) / "upload.zip"
+                    remaining = length
+                    with upload.open("wb") as output:
+                        while remaining:
+                            chunk = self.rfile.read(min(1024 * 1024, remaining))
+                            if not chunk:
+                                raise ValueError("Session upload ended early")
+                            output.write(chunk)
+                            remaining -= len(chunk)
+                    imported = harp_session_archive.import_session(upload, RUNS)
+                self._json(200, {"message": "Session imported", "session": imported.name})
+                return
             body = self._body()
             state = self.server.state
             path = urlparse(self.path).path
@@ -958,7 +1000,7 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
             self._json(202, {"job": job})
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             self.close_connection = True
-        except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        except (ValueError, KeyError, OSError, json.JSONDecodeError, zipfile.BadZipFile, EOFError) as error:
             self._json(400, {"error": str(error)})
         except Exception as error:
             self._json(500, {"error": str(error)})
@@ -974,6 +1016,7 @@ class HARPHTTPServer(ThreadingHTTPServer):
 
 def main():
     parser = argparse.ArgumentParser(description="HARP local web command center")
+    parser.add_argument("--version", action="version", version="HARP " + harp_version.VERSION)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()

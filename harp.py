@@ -26,6 +26,7 @@ from pathlib import Path
 
 import harp_secret
 import harp_artifacts
+import harp_version
 import harp_effort
 import harp_research
 import harp_whippet
@@ -48,6 +49,8 @@ or {"thought":"brief reason", "done":true, "finding":"evidence-based conclusion"
 When you recover a credential, document excerpt, or other useful artifact, you may add
 "artifact":{"kind":"credential|document|other|flag","title":"short label (user.txt or root.txt for flags)","value":"exact observed value"}
 to your JSON action. HARP records it only if that value appears in terminal evidence.
+Passwords and NTLM/LM:NTLM hashes are credential artifacts, never flag artifacts.
+Use kind=flag only for user.txt or root.txt read from the corresponding file.
 Report recovered artifacts on your next reply, even when ending the objective.
 Avoid repeating commands. No interactive programs. Do not run sudo; use needs_root
 to request approval if a root command is essential.
@@ -855,7 +858,7 @@ def api_chat(model: dict, system: str, user: str | list[dict], ledger: list[dict
     return content if isinstance(content, str) else ""
 
 
-def json_object(text: str) -> dict:
+def json_object(text: str, *, allow_preamble: bool = False) -> dict:
     text = text.strip()
     if text.startswith("<think>"):
         closing = text.find("</think>")
@@ -865,7 +868,23 @@ def json_object(text: str) -> dict:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I)
     decoder = json.JSONDecoder()
-    value, end = decoder.raw_decode(text)
+    try:
+        value, end = decoder.raw_decode(text)
+    except json.JSONDecodeError:
+        if not allow_preamble:
+            raise
+        # Some proxies prepend narration to their final action. Accept only a
+        # complete standalone final object, never a JSON example embedded in
+        # prose, a choice between actions, or an object taken from reasoning.
+        for match in re.finditer(r"(?m)^[ \t]*(?=\{|```(?:json)?[ \t]*$)", text):
+            prefix = text[:match.start()]
+            if any(char in prefix for char in "{}[]") or "```" in prefix:
+                continue
+            try:
+                return json_object(text[match.start():])
+            except (ValueError, json.JSONDecodeError):
+                continue
+        raise ValueError("Reply has no unambiguous final JSON object") from None
     remainder = text[end:].strip()
     if remainder:
         duplicate, duplicate_end = decoder.raw_decode(remainder)
@@ -1131,6 +1150,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
     terminal = runtime_class(cfg.get("runtime", "docker"))(cfg)
     session = {
         "status": "recon", "mode": mode, "container": terminal.name, "config": cfg,
+        "harp_version": harp_version.VERSION,
         "runtime": cfg.get("runtime", "docker"),
         "workspace": terminal.workspace if isinstance(terminal, WslTerminal) else "/workspace",
         "kali_image_id": None, "target": cfg["target"],
@@ -1585,6 +1605,10 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             action_model = ({**cfg["local"], "enable_thinking": False, "temperature": 0.2}
                             if structured_mode else cfg["local"])
             prompt = system_prompt(session)
+            if structured_mode:
+                prompt += ("\nFORMAT RETRY: Return exactly one JSON action object and nothing else. "
+                           "Do not narrate the plan, include alternatives, or quote prior actions. "
+                           "If no command is needed, use done or needs_oracle in that one object.\n")
             fitted_user, prompt_tokens, compacted = fit_context(action_model, context, prompt_budget - image_reserve, prompt)
             fitted_results = json.loads(fitted_user)["recent_terminal_results"]
             whippet_chars = sum(len(x["output"]) for x in fitted_results if harp_whippet.is_query(x.get("command", "")))
@@ -1606,7 +1630,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 stop_reason = "proxy_api_error"
                 raise
             try:
-                action = json_object(reply)
+                action = json_object(reply, allow_preamble=True)
             except (json.JSONDecodeError, ValueError):
                 invalid += 1
                 call = session["local_calls"][-1]
@@ -1614,11 +1638,18 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 append_event(run_dir, {"type": "invalid_local_reply", "text": excerpt,
                                        "finish_reason": call.get("finish_reason"),
                                        "reasoning_chars": call.get("reasoning_chars", 0)})
+                validation_feedback = (
+                    "Your previous reply was not one valid JSON action; no action from it was executed. "
+                    "Return exactly one JSON object, starting with { and ending with }. "
+                    "Do not add narration, markdown, examples, or multiple objects. "
+                    "Use the existing terminal evidence to choose the next action; do not repeat completed commands. "
+                    'If finished, return {"done":true,"finding":"evidence-based conclusion"}.')
                 if invalid == 1 and not structured_mode:
                     structured_mode = True
                     append_event(run_dir, {"type": "local_response_mode_changed",
-                                           "reason": "retry_without_thinking"})
-                if invalid >= 2:
+                                           "reason": ("retry_json_only" if cfg["local"].get("provider") in ("zai", "openai")
+                                                      else "retry_without_thinking")})
+                if invalid >= (3 if cfg["local"].get("provider") == "zai" else 2):
                     stop_reason = "invalid_replies"
                     break
                 continue
@@ -1972,6 +2003,7 @@ def summarize(session: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--version", action="version", version="HARP " + harp_version.VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "start"):
         p = sub.add_parser(name)

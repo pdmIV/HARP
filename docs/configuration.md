@@ -119,4 +119,6 @@ Recommendations apply once. Missing, invalid, or truncated-response recommendati
 
 Proxy commands that exceed the terminal's 1000-character limit or contain forbidden control characters are returned to the proxy for formatting correction before command approval. After three consecutive format rejections, the delegation returns `command_validation_failed` for bounded oracle recovery. These commands cannot be made executable through approval; other command reviews retain their normal behavior.
 
+If the Z.AI proxy replies with prose or ambiguous JSON instead of one action, HARP issues a stricter JSON-only retry instruction at a lower temperature. It permits two bounded format retries, then returns control to the oracle if the third reply is still invalid. No terminal step is consumed by these retries, but the model calls and tokens are recorded. HARP does not execute an action extracted from ambiguous prose.
+
 The activity log shows **Proxy effort recommendation** and **Oracle reasoning effort**, including the selection source. Saved oracle call records include `reasoning_effort`, `effort_source`, `adaptive_reasoning`, elapsed seconds, and normal token usage. Compare fixed high, fixed max, and adaptive runs on separate evaluation targets. This experiment does not establish savings or routing accuracy by itself.

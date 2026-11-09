@@ -1240,6 +1240,46 @@ class HarpTests(unittest.TestCase):
                 {"kind": "credential", "title": "Hallucinated", "value": "not-in-output"}))
             self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
 
+    def test_mislabeled_ntlm_hash_is_saved_as_credential(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            lm, nt = "a" * 32, "b" * 32
+            session = {"observations": [{"command": "secretsdump example", "exit_code": 0,
+                        "output": f"domain\\Administrator:500:{lm}:{nt}:::\n"}]}
+            proposal = {"kind": "flag", "title": "Administrator NTLM hash", "value": f"{lm}:{nt}"}
+            item = harp_artifacts.capture_model_artifact(path, session, proposal)
+            self.assertEqual(item["kind"], "credential")
+            self.assertTrue(item["evidence_backed"])
+            self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
+
+    def test_zai_format_retry_accepts_third_valid_reply(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["local"].update(provider="zai", model="glm-5.3-flash")
+            harp.save_session(path, state)
+            replies = iter(["A narrative instead of JSON.", "Another narrative.",
+                            '{"thought":"No further work","done":true,"finding":"Done"}'])
+            prompts = []
+
+            def fake_chat(_model, prompt, _user, calls):
+                prompts.append(prompt)
+                calls.append({"prompt_tokens": 10, "completion_tokens": 10,
+                              "finish_reason": "stop", "reasoning_chars": 0})
+                return next(replies)
+
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=fake_chat):
+                harp.delegate(path, "Inspect the service", 1, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(len(prompts), 3)
+            self.assertIn("FORMAT RETRY", prompts[1])
+            self.assertEqual(saved["last_delegate_stop"], "local_done")
+            self.assertEqual(saved["local_steps"], 0)
+
     def test_artifact_value_deduplicates_across_titles_and_old_records(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)

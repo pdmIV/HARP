@@ -18,6 +18,9 @@ ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 FILE_READ = re.compile(r"(?i)(?<![A-Za-z0-9_-])(?:cat|type|get-content|more|head|tail|sed|awk)(?![A-Za-z0-9_-])")
 # NetExec wraps remote stdout in service, address, port and hostname columns.
 NETEXEC_OUTPUT = re.compile(r"^(?:WINRM|SMB|SSH|MSSQL)\s+\S+\s+\d+\s+\S+\s+([0-9a-fA-F]{32})\s*$", re.I)
+# A structured secretsdump row provides credential type evidence, unlike a bare
+# 32-character hex string, which could also be a flag or unrelated digest.
+NTLM_ROW = re.compile(r"^([^:\r\n]+):([0-9]+):([0-9a-fA-F]{32}):([0-9a-fA-F]{32}):::\s*$", re.M)
 
 
 def list_artifacts(run_dir: Path) -> list[dict]:
@@ -221,6 +224,18 @@ def capture_model_artifact(run_dir: Path, session: dict, proposal: dict) -> dict
         return None
     if not 2 <= len(value) <= 8000:
         return None
+    if kind == "flag" and title not in FLAG_NAMES:
+        # Recover a mistyped NTLM proposal only from an exact structured dump
+        # row. Arbitrary mislabeled flags still fail the normal flag checks.
+        for observation in reversed(session.get("observations", [])):
+            if observation.get("exit_code") != 0:
+                continue
+            for row in NTLM_ROW.finditer(ANSI.sub("", str(observation.get("output", "")))):
+                if value in (row[4], row[3] + ":" + row[4]):
+                    return register_artifact(run_dir, kind="credential", title=title, value=value,
+                                             source=observation["command"],
+                                             evidence="Exact NTLM value appears in a structured account hash row",
+                                             evidence_backed=True)
     for observation in reversed(session.get("observations", [])):
         # A mislabeled flag must still be classified from file-reading evidence.
         for flag in capture_flags_from_result(run_dir, observation):

@@ -6,9 +6,9 @@
   <a href="https://peter-mora-iv.gitbook.io/harp-docs">https://peter-mora-iv.gitbook.io/harp-docs</a>
 </p>
 
-[Watch the HARP overview video](https://drive.google.com/file/d/1BAiDD7IASI5ddH3yrRy89OVPtSh359V4/view?usp=sharing)
-
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
+
+The current release is **v0.1.0**. The Overview wordmark and `python harp.py --version` show the installed version. See [versioning](docs/versioning.md) for the release and session archive formats.
 
 For complex work, a hosted oracle can provide an exact implementation for the proxy to execute, and the proxy can request oracle help when it encounters a blocker. Z.AI GLM-5.3 and GLM-5.3-Flash sessions can use configurable oracle evidence depth and larger token ceilings; see [GLM configuration](docs/configuration.md#zai-api--glm) for practical starting settings.
 
@@ -51,6 +51,7 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors              |
 | [Settings snapshots](docs/settings-snapshots.md) | Export and restore complete saved settings, interface preferences, optional API keys, and recovery copies |
 | [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
+| [Versioning](docs/versioning.md)                  | Release numbering, archive compatibility, and version updates                                        |
 | [Image evidence](docs/image-evidence.md)         | PNG/JPEG previews, oracle-directed GLM 5.3 Flash image input, and transcription verification          |
 | [Web research](docs/web-research.md)             | Experimental oracle-directed Z.AI search, bounded source reads, caching, and research budgets          |
 | [Whippet AD analysis](docs/whippet.md)           | Optional Kali CLI, model awareness, focused graph queries, and structured context limits              |
@@ -60,6 +61,8 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | [Operator guide](AGENTS.md)                      | Instructions for Codex operators                                                                      |
 
 Finished sessions can be replayed from the dashboard with play/pause, speed controls, a seek timeline, and progressive evidence display. Replay uses saved logs without contacting the target or calling models. See [session replay](docs/running-sessions.md#replay-a-saved-session).
+
+Use **Save session** to download a complete ZIP of a selected finished session, or **Import session** to add one to the sidebar for review and replay. Imported sessions show **(upload)** next to their target. See [portable session archives](docs/running-sessions.md#portable-session-archives).
 
 Overview also shows total oracle + proxy cost and estimated Hybrid savings in dollars and percent. Prices can be saved after a run. The oracle-only comparison holds recorded token counts and cache behavior fixed; see [cost estimates](docs/configuration.md#hybrid-cost-comparison).
 

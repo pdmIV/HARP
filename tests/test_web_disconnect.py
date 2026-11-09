@@ -49,6 +49,14 @@ class WebDisconnectTests(unittest.TestCase):
         self.assertEqual(handler.wfile.getvalue(), b'{"ready": true}')
         self.assertFalse(handler.close_connection)
 
+    def test_chomsky_wordmark_font_is_served(self):
+        handler = self.handler()
+        handler.path = "/fonts/Chomsky.woff2"
+        handler.wfile = io.BytesIO()
+        handler.do_GET()
+        self.assertEqual(handler._headers.call_args.args[1], "font/woff2")
+        self.assertEqual(handler.wfile.getvalue()[:4], b"wOF2")
+
 
 if __name__ == "__main__":
     unittest.main()

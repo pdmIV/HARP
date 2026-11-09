@@ -13,7 +13,7 @@
   <div class="shell">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark" aria-hidden="true"><span>H</span></div>
+        <div class="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt=""></div>
         <div><strong>HARP</strong><small>COMMAND CENTER</small></div>
       </div>
 
@@ -44,6 +44,9 @@
       <header class="topbar">
         <div class="breadcrumbs">Workspace <span>/</span> <strong id="pageCrumb">Overview</strong></div>
         <div class="top-actions">
+          <button id="saveSession" class="button secondary" disabled>Save session</button>
+          <button id="importSession" class="button secondary">Import session</button>
+          <input id="sessionArchiveFile" class="hidden" type="file" accept=".zip,application/zip" aria-label="Choose HARP session ZIP">
           <button id="replayStart" class="button secondary" disabled>Replay saved session</button>
           <button id="themeToggle" class="theme-toggle" aria-label="Switch theme" title="Switch theme"><span id="themeIcon" aria-hidden="true">&#9788;</span></button>
         </div>
@@ -68,8 +71,7 @@
         <div class="hero">
           <div class="hero-copy">
             <div class="eyebrow"><span class="eyebrow-line"></span> OPERATIONS / LIVE</div>
-            <h1>One clear view of every move.</h1>
-            <p>Set your authorized target, oracle, and proxy model, then start a Hybrid session here.</p>
+            <h1 class="hero-wordmark"><span>Harp</span><small id="appVersion">v—</small></h1>
             <div class="hero-actions">
               <select id="modeSelect" aria-label="Experiment mode"><option value="hybrid">Hybrid</option><option value="local-only">Proxy only</option><option value="frontier-only">Frontier only</option></select>
               <button id="startSession" class="button primary"><span>＋</span> Start session</button>
@@ -77,8 +79,10 @@
             <label class="field checkbox-field"><input id="freshRecon" type="checkbox"> Refresh reconnaissance instead of using saved results</label>
           </div>
           <div class="hero-graphic" aria-hidden="true">
-            <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div>
-            <div class="orbit-core">H</div><span class="orbit-point point-a"></span><span class="orbit-point point-b"></span><span class="orbit-point point-c"></span>
+            <div class="orbit orbit-one"><span class="orbit-point"></span></div>
+            <div class="orbit orbit-two"><span class="orbit-point"></span></div>
+            <div class="orbit orbit-three"><span class="orbit-point"></span></div>
+            <div class="orbit-core"><img src="/favicon.svg" alt=""></div>
           </div>
         </div>
 

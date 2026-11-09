@@ -34,7 +34,9 @@ const source = fs.readFileSync("web/app.js", "utf8").replace(
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
 const context = {document, localStorage: storage, sessionStorage: storage,
-  setInterval() {}, performance: {now: () => 1000}, location: {hash: ""}, URLSearchParams, matchMedia: () => ({matches: false})};
+  setInterval() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
+  performance: {now: () => 1000}, location: {hash: ""}, URLSearchParams,
+  matchMedia: () => ({matches: false, addEventListener() {}})};
 vm.createContext(context);
 vm.runInContext(source, context);
 nodes.get("artifactFilter").value = "all";
@@ -360,6 +362,9 @@ context.ui.setSessions(manySessions.map((item, index) => ({...item, unseen_flags
 context.ui.renderSessions();
 assert.equal(sidebar.children[4], originalRows[4]);
 assert.equal(sidebar.children[4].children[0].children[0].children[1].textContent, "!");
+context.ui.setSessions(manySessions.map((item, index) => ({...item, imported: index === 4})));
+context.ui.renderSessions();
+assert.equal(sidebar.children[4].children[0].children[0].children[0].textContent, "lab-4 (upload)");
 context.ui.setSessions(manySessions.slice(1));
 context.ui.renderSessions();
 assert.equal(sidebar.children[0], originalRows[1]);

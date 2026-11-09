@@ -22,6 +22,7 @@
   let pendingSnapshot = null;
   let snapshotRecoveryId = "";
   let snapshotBusy = false;
+  let archiveBusy = false;
   let artifactGeneration = 0;
   const artifactImageUrls = new Set();
   let configLoaded = false;
@@ -72,6 +73,98 @@
   let dependencyPending = false;
   const celebratedSessions = new Set();
   const successAcknowledgments = new Set();
+  const orbitRings = [...document.querySelectorAll(".hero-graphic .orbit")];
+  const orbitStartAngles = [36, -112, 142];
+  const orbitAngles = [...orbitStartAngles];
+  const orbitDirections = [1, -0.78, 1.18];
+  const reducedOrbitMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  let orbitRunning = false;
+  let orbitStartedAt = 0;
+  let orbitLastFrame = 0;
+  let orbitFrame = 0;
+  let replayOrbitFrame = 0;
+
+  function easeOrbit(value) {
+    const t = Math.max(0, Math.min(1, value));
+    return t * t * (3 - 2 * t);
+  }
+
+  function orbitSpeed(seconds) {
+    if (seconds < 1.25) return 210 * easeOrbit(seconds / 1.25);
+    if (seconds < 4.25) return 210 + (22 - 210) * easeOrbit((seconds - 1.25) / 3);
+    return 22;
+  }
+
+  function orbitTravel(seconds) {
+    const t = Math.max(0, seconds);
+    const smoothArea = value => value ** 3 - 0.5 * value ** 4;
+    if (t < 1.25) return 210 * 1.25 * smoothArea(t / 1.25);
+    const burst = 210 * 1.25 / 2;
+    if (t < 4.25) {
+      const deceleration = t - 1.25;
+      return burst + 210 * deceleration - 188 * 3 * smoothArea(deceleration / 3);
+    }
+    return burst + (210 - 188 / 2) * 3 + 22 * (t - 4.25);
+  }
+
+  function renderReplayOrbits(seconds) {
+    const travel = orbitTravel(seconds);
+    orbitRings.forEach((ring, index) => {
+      orbitAngles[index] = (orbitStartAngles[index] + travel * orbitDirections[index]) % 360;
+      ring.style.transform = `rotate(${orbitAngles[index]}deg)`;
+    });
+  }
+
+  function replayOrbitTick(now) {
+    if (!replay || replay.loading || !replay.playing) {
+      replayOrbitFrame = 0;
+      return;
+    }
+    const ahead = Math.min(Math.max(0, (now - replay.lastTick) / 1000), 0.1);
+    const seconds = Math.min(replay.duration_seconds,
+      replay.seconds + ahead * Number($("replaySpeed").value || 1));
+    renderReplayOrbits(seconds);
+    replayOrbitFrame = requestAnimationFrame(replayOrbitTick);
+  }
+
+  function syncReplayOrbitMotion() {
+    if (replayOrbitFrame) cancelAnimationFrame(replayOrbitFrame);
+    replayOrbitFrame = 0;
+    if (replay && !replay.loading && replay.playing)
+      replayOrbitFrame = requestAnimationFrame(replayOrbitTick);
+  }
+
+  function orbitTick(now) {
+    if (!orbitRunning || reducedOrbitMotion.matches) return;
+    const elapsed = (now - orbitStartedAt) / 1000;
+    const delta = Math.min((now - orbitLastFrame) / 1000, 0.1);
+    orbitLastFrame = now;
+    const advance = orbitSpeed(elapsed) * Math.max(0, delta);
+    orbitRings.forEach((ring, index) => {
+      orbitAngles[index] = (orbitAngles[index] + advance * orbitDirections[index]) % 360;
+      ring.style.transform = `rotate(${orbitAngles[index]}deg)`;
+    });
+    orbitFrame = requestAnimationFrame(orbitTick);
+  }
+
+  function setOrbitRunning(running) {
+    if (reducedOrbitMotion.matches) running = false;
+    if (running === orbitRunning) return;
+    orbitRunning = running;
+    if (orbitFrame) cancelAnimationFrame(orbitFrame);
+    orbitFrame = 0;
+    if (running) {
+      orbitStartedAt = orbitLastFrame = performance.now();
+      orbitFrame = requestAnimationFrame(orbitTick);
+    }
+  }
+
+  reducedOrbitMotion.addEventListener("change", () => {
+    if (replay) renderReplayOrbits(replay.seconds);
+    syncReplayOrbitMotion();
+    setOrbitRunning(!replay && (startPending || sessions.some(session =>
+      session.status === "active" || session.status === "recon")));
+  });
 
   function acknowledgeSuccess(session) {
     if (!token || replay || session.success_viewed || successAcknowledgments.has(session.id)) return;
@@ -378,7 +471,7 @@
         sessionRows.set(session.id, record);
       }
       record.row.classList.toggle("selected", session.id === selectedId);
-      text(record.target, session.target);
+      text(record.target, session.target + (session.imported ? " (upload)" : ""));
       const marker = session.pending_approval ? "!" : session.unseen_flags ? "!" : session.flags_found ? "\u2713" : "";
       text(record.marker, marker);
       text(record.sub, `${session.mode} \u00b7 ${session.status} \u00b7 ${session.id.slice(9,15)}`);
@@ -404,6 +497,7 @@
                    sessions.find(session => session.status === "active");
     const recon = sessions.find(session => session.status === "recon");
     const running = active || recon;
+    setOrbitRunning(!replay && (startPending || !!running));
     const button = $("startSession");
     if (running) startPending = false;
     button.classList.toggle("danger", !!running);
@@ -411,6 +505,8 @@
     button.replaceChildren(document.createTextNode(running ? "■ Stop session" : startPending ? "Starting session…" : "＋ Start session"));
     button.disabled = !!replay || (startPending && !running) || (dependencies?.status === "installing" && !running);
     $("replayStart").disabled = !!replay || selected?.summary.status !== "finished";
+    $("saveSession").disabled = archiveBusy || !!replay || selected?.summary.status !== "finished";
+    $("importSession").disabled = archiveBusy || !!replay;
     button.dataset.stopId = running?.id || "";
     $("modeSelect").disabled = !!replay || !!running;
   }
@@ -1005,6 +1101,7 @@
       const data = await api(`/api/state?${query}`, {signal: controller.signal});
       if (replay || pollController !== controller || controller.signal.aborted) return;
       sessions = data.sessions || [];
+      if (data.version) $("appVersion").textContent = `v${data.version}`;
       renderDependencies(data.dependencies);
       if (startPending) {
         const reconSession = sessions.find(x => x.status === "recon");
@@ -1063,10 +1160,11 @@
     const playback = {id: selectedId, loading: true, playing: false, seconds: 0, index: -1};
     replay = playback;
     renderStartStop();
+    renderReplayOrbits(0);
     try {
       const data = await api(`/api/sessions/${encodeURIComponent(selectedId)}/replay`);
       if (replay !== playback) return;
-      Object.assign(playback, data, {loading: false, lastTick: performance.now()});
+      Object.assign(playback, data, {loading: false, playing: true, lastTick: performance.now()});
       celebratedSessions.delete("replay:" + selectedId);
       $("rootDialog").close();
       $("successDialog").close();
@@ -1082,6 +1180,7 @@
 
   function exitReplay(refresh = true) {
     replay = null;
+    syncReplayOrbitMotion();
     selected = null;
     cursor = 0;
     artifactSignature = "";
@@ -1095,6 +1194,8 @@
 
   function renderReplay(force = false) {
     if (!replay || replay.loading) return;
+    renderReplayOrbits(replay.seconds);
+    syncReplayOrbitMotion();
     const frames = replay.frames;
     let index = 0;
     while (index + 1 < frames.length && frames[index + 1].seconds <= replay.seconds) index++;
@@ -1136,7 +1237,9 @@
     replay.lastTick = now;
     replay.seconds += delta * Number($("replaySpeed").value || 1);
     const next = replay.frames[replay.index + 1];
-    if ($("replaySkipIdle").checked && next && next.seconds - replay.seconds > 3) replay.seconds = next.seconds - 3;
+    // Keep the startup burst visible before shortening long gaps in the evidence log.
+    if ($("replaySkipIdle").checked && replay.seconds >= 4.25 && next &&
+        next.seconds - replay.seconds > 3) replay.seconds = next.seconds - 3;
     if (replay.seconds >= replay.duration_seconds) {
       replay.seconds = replay.duration_seconds;
       replay.playing = false;
@@ -1195,6 +1298,41 @@
     } catch (error) { toast(error.message, true); return null; }
   }
 
+  async function saveSessionArchive() {
+    if (archiveBusy || !selectedId || selected?.summary.status !== "finished") return;
+    archiveBusy = true;
+    renderStartStop();
+    try {
+      const response = await fetch(`/api/sessions/${encodeURIComponent(selectedId)}/archive`,
+        {cache: "no-store", headers: {"X-HARP-Token": token}});
+      if (!response.ok) throw new Error((await response.json()).error || "Session export failed");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `harp-session-${selectedId}.zip`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 30000);
+      toast("Session ZIP downloaded. It contains the session's private evidence.");
+    } catch (error) { toast(error.message, true); }
+    finally { archiveBusy = false; renderStartStop(); }
+  }
+
+  async function importSessionArchive(file) {
+    if (archiveBusy || !file) return;
+    archiveBusy = true;
+    renderStartStop();
+    try {
+      if (file.size > 512 * 1024 * 1024) throw new Error("Session ZIP exceeds 512 MiB");
+      const response = await fetch("/api/sessions/import", {method: "POST", cache: "no-store",
+        headers: {"X-HARP-Token": token, "Content-Type": "application/zip"}, body: file});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Session import failed");
+      toast("Session imported. Its evidence is available as a saved replay.");
+      switchSession(result.session);
+    } catch (error) { toast(error.message, true); }
+    finally { archiveBusy = false; $("sessionArchiveFile").value = ""; renderStartStop(); }
+  }
+
   function sessionAction(name, body = {}) {
     if (!selectedId) { toast("Select or start a session first", true); return; }
     return action(`/api/sessions/${encodeURIComponent(selectedId)}/${name}`, body);
@@ -1210,6 +1348,9 @@
     localStorage.setItem("harpTheme", next);
     rememberInterfaceSettings();
   });
+  $("saveSession").addEventListener("click", saveSessionArchive);
+  $("importSession").addEventListener("click", () => $("sessionArchiveFile").click());
+  $("sessionArchiveFile").addEventListener("change", () => importSessionArchive($("sessionArchiveFile").files[0]));
   $("refreshSessions").addEventListener("click", poll);
   for (const id of ["modeSelect", "replaySpeed", "replaySkipIdle", "freshRecon", "apiKeyProvider"]) $(id).addEventListener("change", rememberInterfaceSettings);
   $("snapshotExport").addEventListener("click", exportSettings);

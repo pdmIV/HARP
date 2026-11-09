@@ -131,4 +131,10 @@ The sticky playback bar and status badge identify the display as a recorded repl
 
 Replay recognizes terminal-backed flags using the current detector, including NetExec prefixes, so older runs can show flags at their original file-read event even if their registry entries were repaired later. Other artifacts appear at their recorded registration event. Reconstruction stops at the original finish event, excluding later reconciliation annotations. Proxy usage advances on recorded actions and invalid replies using the saved call ledger, while hosted oracle usage follows recorded usage events. If older logs lack events or usage, the replay cannot reconstruct missing details.
 
-For a demonstration video, choose a successful run, start playback with idle-gap shortening enabled, and record the dashboard with your screen recorder. You can switch tabs or pause on evidence while recording.
+## Portable session archives
+
+Select a **finished** session and click **Save session** in the top bar to download a ZIP containing its complete HARP session directory: the session record, event log, artifact registry, captured files, and other session files. Active sessions must be finished first so the archive has a stable outcome. The ZIP can contain credentials, flags, and target evidence; handle it as private assessment data.
+
+Click **Import session** and choose a HARP session ZIP. HARP validates the archive and adds the saved run under a new local session ID. The sidebar shows **(upload)** next to the target IP so it is distinguishable from a run made on this installation. Select it to inspect evidence or replay it. Import does not start Kali, contact the target, or call a model. The imported copy can be deleted like any other finished session; the source ZIP is unaffected.
+
+Archives include a small `harp-session.json` manifest with a separate archive format version. The importer currently accepts format 1, limits compressed uploads to 512 MiB and extracted data to 1 GiB, and rejects unsafe paths and symbolic links. See [versioning](versioning.md).
