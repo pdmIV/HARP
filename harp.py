@@ -1225,7 +1225,8 @@ def hostname_recon_candidates(output_root: Path, cfg: dict) -> list[dict]:
     return sorted(candidates, key=lambda item: item["captured_at"], reverse=True)
 
 
-def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_recon: bool = False) -> Path:
+def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_recon: bool = False,
+                  owner_id: str | None = None) -> Path:
     if mode not in ("local-only", "frontier-only", "hybrid"):
         raise ValueError("Invalid experiment mode")
     output_root.mkdir(parents=True, exist_ok=True)
@@ -1236,6 +1237,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
     terminal = runtime_class(cfg.get("runtime", "docker"))(cfg)
     session = {
         "status": "recon", "mode": mode, "container": terminal.name, "config": cfg,
+        "owner_id": owner_id,
         "harp_version": harp_version.VERSION,
         "runtime": cfg.get("runtime", "docker"),
         "workspace": terminal.workspace if isinstance(terminal, WslTerminal) else "/workspace",
@@ -2083,6 +2085,45 @@ def finish_session(run_dir: Path, success: str) -> None:
     print("Session finished:", run_dir.resolve())
 
 
+def recover_interrupted_session(run_dir: Path, last_seen_epoch: float) -> None:
+    """Finalize a command-center-owned run after its heartbeat has stopped."""
+    session = load_session(run_dir)
+    if session.get("status") not in ("active", "recon"):
+        return
+    errors = []
+    (run_dir / ".stop_session").touch()
+    (run_dir / ".stop_local").touch()
+    if (run_dir / "whippet_batch.json").exists():
+        try:
+            harp_whippet_batch.close_session(run_dir, terminal_for(session),
+                                             lambda event: append_event(run_dir, event))
+        except Exception as error:
+            errors.append("Whippet cleanup: " + str(error)[:300])
+    if session.get("runtime", "docker") == "docker":
+        name = str(session.get("container", ""))
+        if re.fullmatch(r"harp-run-[0-9a-f]{12}", name):
+            try:
+                docker("rm", "--force", name)
+            except Exception as error:
+                errors.append("Docker cleanup: " + str(error)[:300])
+        else:
+            errors.append("Docker cleanup: invalid recorded container name")
+    # A reboot may occur long before recovery; do not count offline time as assessment time.
+    end_epoch = max(float(session.get("started_epoch", last_seen_epoch)), last_seen_epoch)
+    session.update(status="finished", finished_at=datetime.fromtimestamp(end_epoch, timezone.utc).isoformat(),
+                   duration_seconds=round(end_epoch - float(session.get("started_epoch", end_epoch)), 2),
+                   termination_reason="host_interrupted", recovered_at=now(),
+                   cleanup_error="; ".join(errors) if errors else None,
+                   recon_stage="Interrupted" if session.get("status") == "recon" else session.get("recon_stage"))
+    session["success"] = "yes" if session.get("success_epoch") is not None else "unknown"
+    append_event(run_dir, {"type": "session_recovered_after_host_interrupt",
+                           "at": session["finished_at"], "recovered_at": session["recovered_at"],
+                           "last_seen_at": session["finished_at"], "cleanup_error": session["cleanup_error"]})
+    append_event(run_dir, {"type": "finish", "success": session["success"],
+                           "at": session["finished_at"], "reason": "host_interrupted"})
+    save_session(run_dir, session)
+
+
 def summarize(session: dict) -> dict:
     calls = session["local_calls"]
     recon_end = session.get("recon_finished_epoch")
@@ -2097,6 +2138,8 @@ def summarize(session: dict) -> dict:
             memory_mib.append(float(match.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[match.group(2)])
     return {
         "status": session["status"], "mode": session.get("mode", "hybrid"), "target": session["target"],
+        "termination_reason": session.get("termination_reason"),
+        "cleanup_error": session.get("cleanup_error"),
         "recon_stage": session.get("recon_stage"),
         "recon_source_session": session.get("recon_source_session"),
         "recon_source_target": session.get("recon_source_target"),

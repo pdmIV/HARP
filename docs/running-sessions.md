@@ -2,6 +2,12 @@
 
 [Home](../README.md) · [Setup](setup.md) · [Configuration](configuration.md) · [Running sessions](running-sessions.md) · [Host protection](host-protection.md) · [Evaluation](evaluation.md)
 
+## Recovery after a host interruption
+
+For sessions started in the command center or through HARP's MCP server, HARP records which process owns the run and updates a heartbeat while that process is alive. After a computer crash, forced shutdown, or controller crash, start HARP again. It detects owned sessions whose heartbeat stopped, marks them **finished** with `termination_reason: host_interrupted`, and retains their recorded commands, artifacts, and logs. The recorded duration ends at the last heartbeat, so offline time is not counted as assessment time. A verified success remains recorded; HARP does not infer success from unfinished work.
+
+Recovery requests a stop, cleans up a managed Whippet process if one is recorded, and removes an exact HARP-owned Docker container when applicable. Kali WSL and native Kali workspaces remain on disk. Cleanup failures are saved as `cleanup_error` in the session and do not erase evidence. A live owner process is left alone even if its heartbeat is momentarily late. A hard crash cannot run cleanup at the instant it occurs; recovery takes place on the next command-center or MCP-server launch. Sessions created before ownership tracking or through standalone CLI commands are not automatically finalized, because those commands intentionally return while the session remains active.
+
 ## Start with a hosted oracle
 
 1. Launch `python harp_web.py` from the repository root.

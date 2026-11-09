@@ -897,15 +897,16 @@
     const sum = selected.summary;
     $("sessionHeading").textContent = `${sum.target} · ${sum.mode}`;
     $("sessionState").className = "status-pill" + (["active", "recon"].includes(sum.status) ? "" : " muted");
-    $("sessionState").textContent = replay ? "RECORDED REPLAY" : sum.status.toUpperCase();
+    $("sessionState").textContent = replay ? "RECORDED REPLAY" :
+      sum.termination_reason === "host_interrupted" ? "INTERRUPTED" : sum.status.toUpperCase();
     $("metricTools").textContent = sum.terminal_tool_calls ?? "0";
     $("metricModel").textContent = sum.local_model_calls ?? "0";
     $("metricTokens").textContent = ((sum.local_input_tokens || 0) + (sum.local_output_tokens || 0)).toLocaleString();
     renderCostSummary(sum);
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
     $("metricFlags").textContent = `${flagCount} / 2`;
-    $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.success === "no" ? "No" : "Pending";
-    $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";
+    $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.termination_reason === "host_interrupted" ? "Interrupted" : sum.success === "no" ? "No" : "Pending";
+    $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.termination_reason === "host_interrupted" && sum.success !== "yes" ? (sum.cleanup_error ? "Recovery needs runtime cleanup" : "Recovered after host interruption") : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";
     const live = document.querySelector(".live-indicator");
     live.classList.toggle("muted", !!replay || !["active", "recon"].includes(sum.status));
     const activityStatus = replay ? "RECORDED REPLAY" : ["active", "recon"].includes(sum.status) ? "LIVE" : "SAVED SESSION";

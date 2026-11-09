@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from collections import deque
 from datetime import datetime, timezone
 import hmac
@@ -17,6 +18,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import tempfile
 import zipfile
@@ -48,6 +50,7 @@ CONFIG = ROOT / "harp.json"
 WEB = ASSETS / "web"
 HEARTBEAT = ROOT / ".gui_heartbeat"
 CONTROL_STATE = ROOT / ".control_center.json"
+OWNER_HEARTBEAT_AGE = 30
 KV_TYPES = ("f16", "bf16", "q8_0", "q4_0")
 SESSION_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}\Z")
 KEY_PATTERN = re.compile(r"API Key:\s*(sk-unsloth-[A-Za-z0-9_-]+)")
@@ -310,6 +313,10 @@ def pending_approval(run_dir: Path, state: dict) -> dict | None:
 class HARPWebState:
     def __init__(self):
         self.token = secrets.token_urlsafe(32)
+        self.owner_id = uuid.uuid4().hex
+        self.owner_heartbeat = ROOT / (".session-owner-" + self.owner_id + ".heartbeat")
+        self.owner_heartbeat.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        atexit.register(self.owner_heartbeat.unlink, missing_ok=True)
         self.lock = threading.RLock()
         self.jobs: dict[str, dict] = {}
         self.session_jobs: set[str] = set()
@@ -326,6 +333,7 @@ class HARPWebState:
 
     def _heartbeat_loop(self):
         while self.alive:
+            self.owner_heartbeat.touch()
             if time.monotonic() - self.last_browser_seen < 75:
                 HEARTBEAT.touch()
             else:
@@ -336,6 +344,7 @@ class HARPWebState:
         self.alive = False
         self.heartbeat_thread.join(timeout=2)
         HEARTBEAT.unlink(missing_ok=True)
+        self.owner_heartbeat.unlink(missing_ok=True)
         if self.model_process is not None and self.model_process.poll() is None:
             self.stop_model()
 
@@ -843,7 +852,8 @@ class HARPRequestHandler(BaseHTTPRequestHandler):
                 def start_job():
                     try:
                         prepare_runtime(cfg)
-                        run_dir = harp.start_session(cfg, RUNS, mode, fresh_recon=fresh_recon)
+                        run_dir = harp.start_session(cfg, RUNS, mode, fresh_recon=fresh_recon,
+                                                     owner_id=state.owner_id)
                         if mode == "hybrid" and cfg.get("oracle", {}).get("provider") in ("nvidia_nim", "openai", "zai"):
                             def run_oracle():
                                 try:
@@ -1016,6 +1026,40 @@ class HARPHTTPServer(ThreadingHTTPServer):
         self.state = state
 
 
+def recover_interrupted_sessions(runs: Path, root: Path, *, now_epoch: float | None = None) -> int:
+    """Recover only sessions whose owning command center has stopped heartbeating."""
+    current = time.time() if now_epoch is None else now_epoch
+    recovered = 0
+    for path in runs.glob("*/session.json"):
+        try:
+            session = harp.load_session(path.parent)
+            owner = session.get("owner_id")
+            if session.get("status") not in ("active", "recon") or not isinstance(owner, str):
+                continue
+            if not re.fullmatch(r"[0-9a-f]{32}", owner):
+                continue
+            heartbeat = root / (".session-owner-" + owner + ".heartbeat")
+            last_seen = heartbeat.stat().st_mtime if heartbeat.exists() else max(
+                float(session.get("started_epoch", 0)), path.stat().st_mtime)
+            if heartbeat.exists() and current - last_seen < OWNER_HEARTBEAT_AGE:
+                continue
+            if heartbeat.exists():
+                try:
+                    pid = int(json.loads(heartbeat.read_text(encoding="utf-8"))["pid"])
+                    if pid > 0:
+                        os.kill(pid, 0)
+                        continue
+                except PermissionError:
+                    continue
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            harp.recover_interrupted_session(path.parent, last_seen)
+            recovered += 1
+        except (OSError, ValueError, KeyError) as error:
+            print(f"Session recovery skipped {path.parent.name}: {error}", file=sys.stderr)
+    return recovered
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="HARP local web command center")
     parser.add_argument("--version", action="version", version="HARP " + harp_version.VERSION)
@@ -1023,6 +1067,9 @@ def main(argv=None):
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
     harp_paths.ensure_data_dir()
+    recovered = recover_interrupted_sessions(RUNS, ROOT)
+    if recovered:
+        print(f"Recovered {recovered} interrupted HARP session(s).")
     state = HARPWebState()
     server = HARPHTTPServer(("127.0.0.1", args.port), state)
     url = f"http://127.0.0.1:{server.server_port}/#token={state.token}"

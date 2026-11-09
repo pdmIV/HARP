@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +27,24 @@ ROOT = harp_paths.data_dir()
 RUNS = ROOT / "runs"
 GUI_HEARTBEAT = ROOT / ".gui_heartbeat"
 CONTROL_STATE = ROOT / ".control_center.json"
+_owner_id: str | None = None
+_owner_heartbeat: Path | None = None
+_owner_stop = threading.Event()
+
+
+def _session_owner() -> str:
+    global _owner_id, _owner_heartbeat
+    if _owner_id is None:
+        harp_paths.ensure_data_dir()
+        _owner_id = uuid.uuid4().hex
+        _owner_heartbeat = ROOT / (".session-owner-" + _owner_id + ".heartbeat")
+        _owner_heartbeat.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        def heartbeat():
+            while not _owner_stop.is_set():
+                _owner_heartbeat.touch()
+                _owner_stop.wait(1)
+        threading.Thread(target=heartbeat, name="HARP-MCP-session-heartbeat", daemon=True).start()
+    return _owner_id
 
 
 def _control_record() -> dict | None:
@@ -112,7 +131,7 @@ def captured(operation) -> str:
 
 def start_session(mode: str = "hybrid", fresh_recon: bool = False) -> str:
     return captured(lambda: harp.start_session(harp.load_config(ROOT / "harp.json"), RUNS, mode,
-                                               fresh_recon=fresh_recon))
+                                               fresh_recon=fresh_recon, owner_id=_session_owner()))
 
 
 def inspect_session(session: str) -> str:
@@ -375,15 +394,22 @@ def response(request: dict) -> dict | None:
 
 
 def main() -> None:
-    for line in sys.stdin:
-        try:
-            result = response(json.loads(line))
-        except Exception as error:
-            result = {"jsonrpc": "2.0", "id": None,
-                      "error": {"code": -32700, "message": str(error)}}
-        if result is not None:
-            sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
+    import harp_web
+    harp_web.recover_interrupted_sessions(RUNS, ROOT)
+    try:
+        for line in sys.stdin:
+            try:
+                result = response(json.loads(line))
+            except Exception as error:
+                result = {"jsonrpc": "2.0", "id": None,
+                          "error": {"code": -32700, "message": str(error)}}
+            if result is not None:
+                sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
+                sys.stdout.flush()
+    finally:
+        _owner_stop.set()
+        if _owner_heartbeat is not None:
+            _owner_heartbeat.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
