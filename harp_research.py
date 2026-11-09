@@ -125,7 +125,8 @@ def search_api(query):
 
 def source_fetch(session, url):
     import harp
-    script = (Path(__file__).parent / "scripts/research_fetch.py").read_text(encoding="utf-8")
+    import harp_paths
+    script = (harp_paths.assets_dir() / "scripts/research_fetch.py").read_text(encoding="utf-8")
     terminal = harp.terminal_for(session)
     result = subprocess.run(terminal.file_argv(script, url), capture_output=True, timeout=25)
     if len(result.stdout) > 12_100_000:

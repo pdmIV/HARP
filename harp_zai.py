@@ -10,6 +10,7 @@ import urllib.request
 
 import harp_openai
 import harp_secret
+import harp_paths
 import harp_effort
 
 BASE = "https://api.z.ai/api/paas/v4"
@@ -45,7 +46,7 @@ def key() -> str:
     value = os.environ.get("ZAI_API_KEY")
     if value:
         return value
-    path = Path(__file__).resolve().parent / ".secrets" / "zai.key"
+    path = harp_paths.data_dir() / ".secrets" / "zai.key"
     if not path.is_file():
         raise ValueError("Import a Z.AI API key in API Keys or set ZAI_API_KEY")
     return harp_secret.load_key(path)

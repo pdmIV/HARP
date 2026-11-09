@@ -1,5 +1,10 @@
 # Install dependencies
 
+Installed packages expose the same installer as `harp-ai deps`. For example,
+use `sudo -v` then `harp-ai deps --runtime native` on Kali, or
+`harp-ai deps --runtime wsl --distro kali-linux --user kali` on Windows.
+See [package installation](packaging.md) for pipx setup and distribution builds.
+
 Kali WSL is the primary Windows setup. For native Kali, run setup as your ordinary user from a Kali terminal:
 
 ```bash

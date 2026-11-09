@@ -8,7 +8,12 @@ import subprocess
 import sys
 
 
-ROOT = Path(__file__).resolve().parents[1]
+if __package__ in (None, ""):
+    # Preserve python scripts/install_dependencies.py in source checkouts.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import harp_paths
+
+ROOT = harp_paths.assets_dir()
 SCRIPT = Path(__file__).with_name("install-dependencies.sh")
 
 
@@ -90,7 +95,7 @@ def main(argv=None):
             if command[0] == "pkexec":
                 raise RuntimeError("System authentication was canceled or unavailable. "
                                    "From a Kali terminal, run sudo -v and then "
-                                   "python3 scripts/install_dependencies.py --runtime native.") from error
+                                   "harp-ai deps --runtime native.") from error
             raise
     print("Dependency setup complete. Select this same runtime/user in HARP.")
 

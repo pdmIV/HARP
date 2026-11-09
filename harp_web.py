@@ -26,6 +26,7 @@ import uuid
 import webbrowser
 import harp_session_archive
 import harp_version
+import harp_paths
 
 import harp
 import harp_artifacts
@@ -40,10 +41,11 @@ import harp_research
 import harp_snapshots
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = harp_paths.data_dir()
+ASSETS = harp_paths.assets_dir()
 RUNS = ROOT / "runs"
 CONFIG = ROOT / "harp.json"
-WEB = ROOT / "web"
+WEB = ASSETS / "web"
 HEARTBEAT = ROOT / ".gui_heartbeat"
 CONTROL_STATE = ROOT / ".control_center.json"
 KV_TYPES = ("f16", "bf16", "q8_0", "q4_0")
@@ -112,7 +114,7 @@ def draft_config() -> dict:
     """Load the GUI draft, including before the first valid target is supplied."""
     if CONFIG.is_file():
         return json.loads(CONFIG.read_text(encoding="utf-8"))
-    cfg = json.loads((ROOT / "harp.htb.example.json").read_text(encoding="utf-8"))
+    cfg = json.loads((ASSETS / "harp.htb.example.json").read_text(encoding="utf-8"))
     if os.name != "nt":
         cfg["runtime"] = "native"
     cfg["target"] = ""
@@ -131,8 +133,8 @@ def prepare_runtime(cfg: dict) -> None:
             raise
         harp.docker("network", "create", cfg["network"], timeout=30)
     harp.check_network(cfg, starting=True)
-    recipe_hash = hashlib.sha256((ROOT / "Dockerfile.kali").read_bytes() + b"\0"
-                                 + (ROOT / "scripts" / "install-dependencies.sh").read_bytes()).hexdigest()
+    recipe_hash = hashlib.sha256((ASSETS / "Dockerfile.kali").read_bytes() + b"\0"
+                                 + (ASSETS / "scripts" / "install-dependencies.sh").read_bytes()).hexdigest()
     stamp = ROOT / ".kali_image_stamp"
     if stamp.is_file() and stamp.read_text(encoding="ascii") == recipe_hash:
         try:
@@ -141,7 +143,7 @@ def prepare_runtime(cfg: dict) -> None:
         except RuntimeError:
             pass
     built = subprocess.run(["docker", "build", "-f", "Dockerfile.kali", "-t", harp.IMAGE, "."],
-                           cwd=ROOT, capture_output=True, text=True, timeout=900)
+                           cwd=ASSETS, capture_output=True, text=True, timeout=900)
     if built.returncode:
         raise RuntimeError("Kali image build failed: " + (built.stderr or built.stdout)[-3000:])
     stamp.write_text(recipe_hash, encoding="ascii")
@@ -1014,12 +1016,13 @@ class HARPHTTPServer(ThreadingHTTPServer):
         self.state = state
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="HARP local web command center")
     parser.add_argument("--version", action="version", version="HARP " + harp_version.VERSION)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-browser", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    harp_paths.ensure_data_dir()
     state = HARPWebState()
     server = HARPHTTPServer(("127.0.0.1", args.port), state)
     url = f"http://127.0.0.1:{server.server_port}/#token={state.token}"

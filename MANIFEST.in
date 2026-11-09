@@ -1,0 +1,12 @@
+include README.md CHANGELOG.md AGENTS.md
+include Dockerfile.kali harp.example.json harp.htb.example.json harp.native.example.json
+include scripts/install-dependencies.sh scripts/research_fetch.py
+include web/index.html web/app.js web/app.css web/favicon.svg
+include web/fonts/Chomsky.woff2 web/fonts/LICENSE.txt
+include docs/*.md
+recursive-include tests *.py *.js
+prune runs
+prune .secrets
+prune .settings_backups
+exclude harp.json .control_center.json .gui_heartbeat .kali_image_stamp
+global-exclude __pycache__ *.py[cod]

@@ -6,6 +6,7 @@
   * [Configuration](docs/configuration.md)
   * [Settings snapshots](docs/settings-snapshots.md)
   * [Install dependencies](docs/dependencies.md)
+  * [Package installation and releases](docs/packaging.md)
   * [Evaluation and limitations](docs/evaluation.md)
   * [Host protection](docs/host-protection.md)
   * [Running sessions](docs/running-sessions.md)

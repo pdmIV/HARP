@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add the `harp-ai` installable Python distribution and terminal launcher, bundled dashboard/setup resources, persistent per-user installed data, and Kali dependency setup through `harp-ai deps`.
+- Add Linux/Windows package validation and a GitHub release workflow for PyPI Trusted Publishing after repository/PyPI setup.
+
 - Prioritize a bounded user-flag read after verified user-level access, before escalation or authorized pivots, without assuming both flags share a host. Supply live verified flag status to every proxy request.
 - Scale model read timeouts with the effective reasoning effort: 4 minutes for low/default, 6 for medium, 10 for high, and 20 for max/xhigh, including adaptive oracle changes.
 - Accept unused nullable oracle fields without format retries, while retaining type validation for executable commands.

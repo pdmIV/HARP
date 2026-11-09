@@ -9,3 +9,6 @@ __pycache__/
 .control_center.json
 .kali_image_stamp
 .settings_backups/
+build/
+dist/
+*.egg-info/

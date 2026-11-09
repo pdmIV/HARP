@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import harp_secret
+import harp_paths
 import harp_artifacts
 import harp_version
 import harp_effort
@@ -762,7 +763,7 @@ def local_api_key(model: dict) -> str:
     key = os.environ.get(model["api_key_env"], "")
     if key:
         return key
-    key_file = Path(__file__).resolve().parent / ".secrets" / "unsloth.key"
+    key_file = harp_paths.data_dir() / ".secrets" / "unsloth.key"
     if key_file.is_file():
         try:
             return harp_secret.load_key(key_file)
@@ -2122,15 +2123,15 @@ def summarize(session: dict) -> dict:
     }
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version="HARP " + harp_version.VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("doctor", "start"):
         p = sub.add_parser(name)
-        p.add_argument("--config", type=Path, default=Path("harp.json"))
+        p.add_argument("--config", type=Path, default=harp_paths.data_dir() / "harp.json")
         if name == "start":
-            p.add_argument("--output", type=Path, default=Path("runs"))
+            p.add_argument("--output", type=Path, default=harp_paths.data_dir() / "runs")
             p.add_argument("--mode", choices=["local-only", "frontier-only", "hybrid"], default="hybrid")
             p.add_argument("--fresh-recon", action="store_true", help="Ignore saved reconnaissance and scan again")
     for name in ("inspect", "exec", "root-exec", "delegate", "mark-human", "mark-success", "record-oracle-usage", "finish"):
@@ -2149,8 +2150,8 @@ def main() -> None:
         elif name == "finish":
             p.add_argument("--success", choices=["yes", "no", "unknown"], required=True)
     p = sub.add_parser("report")
-    p.add_argument("--output", type=Path, default=Path("runs"))
-    args = parser.parse_args()
+    p.add_argument("--output", type=Path, default=harp_paths.data_dir() / "runs")
+    args = parser.parse_args(argv)
     if args.command == "report":
         for path in sorted(args.output.glob("*/session.json")):
             print(json.dumps({"session": str(path.parent), **summarize(load_session(path.parent))}))

@@ -33,6 +33,23 @@ HARP's managed batch connection reuses one loaded graph across queries and start
 
 ## Getting started
 
+Install the current GitHub source in an isolated environment (Python 3.10+):
+
+```bash
+pipx install "git+https://github.com/pdmIV/HARP.git"
+harp-ai
+```
+
+The `harp-ai` command opens the dashboard from any directory. Use its dependency
+setup pane, or `harp-ai deps`, to install the tools in your selected Kali runtime.
+For native Kali, run `sudo -v` followed by `harp-ai deps --runtime native`.
+On Windows, use `harp-ai deps --runtime wsl --distro kali-linux --user kali`
+with your actual distribution and user. See [package installation and releases](docs/packaging.md)
+for pipx setup, upgrades, data locations, wheel installation, and PyPI publishing.
+`pipx install harp-ai` becomes available after the first PyPI release.
+
+For a source checkout:
+
 1. Follow [Setup](docs/setup.md) for Kali WSL, the primary Windows setup, or native Kali Linux on hardware or in a VM. Run the [dependency installer](docs/dependencies.md) for that runtime. It includes Whippet, NetworkX, BloodHound CE's collector, Certipy, and HARP's existing tools.
 2. Run `python harp_web.py` from the repository root.
 3. Import credentials in **API Keys**, select models in **Oracle model** and **Proxy model**, and save your target and Kali runtime in **Configuration**.
@@ -45,6 +62,7 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 | Guide                                            | Contents                                                                                                  |
 | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
 | [Setup](docs/setup.md)                           | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup                                                   |
+| [Packaging and releases](docs/packaging.md)      | `harp-ai`, pipx installation, bundled resources, CI checks, and PyPI Trusted Publishing                    |
 | [Install dependencies](docs/dependencies.md)     | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection                       |
 | [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors                  |
 | [Settings snapshots](docs/settings-snapshots.md) | Export and restore complete saved settings, interface preferences, optional API keys, and recovery copies |

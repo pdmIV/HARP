@@ -12,6 +12,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 import harp_secret
+import harp_paths
 import harp_effort
 
 BASE = "https://api.openai.com/v1"
@@ -111,7 +112,7 @@ def key() -> str:
     value = os.environ.get("OPENAI_API_KEY")
     if value:
         return value
-    path = Path(__file__).resolve().parent / ".secrets" / "openai.key"
+    path = harp_paths.data_dir() / ".secrets" / "openai.key"
     if not path.is_file():
         raise ValueError("Import an OpenAI API key in Configuration or set OPENAI_API_KEY")
     return harp_secret.load_key(path)

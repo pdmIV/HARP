@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harp-ai"
+dynamic = ["version"]
+description = "Hierarchical AI-agent penetration testing for authorized labs"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "Peter Mora IV"}]
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/pdmIV/HARP"
+Documentation = "https://peter-mora-iv.gitbook.io/harp-docs"
+Issues = "https://github.com/pdmIV/HARP/issues"
+
+[project.scripts]
+harp-ai = "harp_cli:main"
+
+[tool.setuptools]
+packages = ["harp_data", "scripts"]
+include-package-data = false
+py-modules = [
+    "harp", "harp_artifacts", "harp_cli", "harp_costs", "harp_dependencies",
+    "harp_effort", "harp_gui", "harp_mcp", "harp_nim", "harp_openai",
+    "harp_paths", "harp_replay", "harp_research", "harp_resources", "harp_secret",
+    "harp_session_archive", "harp_snapshots", "harp_version", "harp_web",
+    "harp_whippet", "harp_whippet_batch", "harp_zai",
+]
+
+[tool.setuptools.package-data]
+scripts = ["install-dependencies.sh"]
+
+[tool.setuptools.dynamic]
+version = {attr = "harp_version.VERSION"}

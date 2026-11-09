@@ -1163,7 +1163,7 @@ class HarpTests(unittest.TestCase):
             key_file = secret_dir / "unsloth.key"
             harp_secret.save_key(key_file, "test-value")
             model = {"api_key_env": "UNSLOTH_API_KEY"}
-            with patch.object(harp, "__file__", str(Path(temp) / "harp.py")), \
+            with patch.object(harp.harp_paths, "data_dir", return_value=Path(temp)), \
                  patch.dict(os.environ, {"UNSLOTH_API_KEY": ""}):
                 self.assertEqual(harp.local_api_key(model), "test-value")
 

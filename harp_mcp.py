@@ -19,8 +19,10 @@ import harp
 import harp_artifacts
 import harp_whippet
 import harp_research
+import harp_paths
+import harp_version
 
-ROOT = Path(__file__).resolve().parent
+ROOT = harp_paths.data_dir()
 RUNS = ROOT / "runs"
 GUI_HEARTBEAT = ROOT / ".gui_heartbeat"
 CONTROL_STATE = ROOT / ".control_center.json"
@@ -48,7 +50,8 @@ def launch_control_center() -> str:
     record = _control_record()
     if record is None:
         flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        process = subprocess.Popen([sys.executable, str(ROOT / "harp_web.py"), "--no-browser"],
+        harp_paths.ensure_data_dir()
+        process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("harp_web.py")), "--no-browser"],
                                    cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                    stderr=subprocess.DEVNULL, creationflags=flags,
                                    start_new_session=os.name != "nt")
@@ -63,7 +66,7 @@ def launch_control_center() -> str:
             raise RuntimeError("HARP command center did not become ready")
     url = f"http://127.0.0.1:{record['port']}/#token={record['token']}"
     if not webbrowser.open(url):
-        raise RuntimeError("The command center is running, but the browser did not open. Run python harp_web.py from the project folder.")
+        raise RuntimeError("The command center is running, but the browser did not open. Run harp-ai from your terminal.")
     return json.dumps({"status": "opened", "url": f"http://127.0.0.1:{record['port']}/",
                        "opened_at": opened_at,
                        "next": "Operator sets model and target in browser and starts Hybrid session. Call wait_for_session with after=opened_at."})
@@ -348,7 +351,7 @@ def response(request: dict) -> dict | None:
         version = request.get("params", {}).get("protocolVersion", "2025-06-18")
         return {**base, "result": {"protocolVersion": version,
                                    "capabilities": {"tools": {"listChanged": False}},
-                                   "serverInfo": {"name": "harp", "version": "0.1.0"}}}
+                                   "serverInfo": {"name": "harp", "version": harp_version.VERSION}}}
     if method == "ping":
         return {**base, "result": {}}
     if method == "tools/list":

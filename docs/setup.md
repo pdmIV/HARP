@@ -1,5 +1,9 @@
 # Setup
 
+For installation without a checkout, see [package installation](packaging.md).
+The installed `harp-ai` command launches the dashboard from any directory;
+`harp-ai deps` runs the same dependency setup described below.
+
 [Home](../README.md) · [Setup](setup.md) · [Configuration](configuration.md) · [Running sessions](running-sessions.md) · [Host protection](host-protection.md) · [Evaluation](evaluation.md)
 
 Kali WSL is the primary Windows setup. Native Kali Linux is also supported, whether installed on hardware or in VMware, VirtualBox, or another VM. Docker remains optional. HARP uses Python's standard library. Hosted models do not require Unsloth or a local GPU. Existing saved configurations keep their selected runtime; a fresh dashboard defaults to WSL on Windows and native Kali on Linux.

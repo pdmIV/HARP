@@ -15,6 +15,7 @@ import urllib.request
 import harp
 import harp_artifacts
 import harp_secret
+import harp_paths
 import harp_effort
 import harp_research
 import harp_whippet
@@ -43,7 +44,7 @@ def key() -> str:
     value = os.environ.get("NVIDIA_API_KEY")
     if value:
         return value
-    path = Path(__file__).resolve().parent / ".secrets" / "nvidia.key"
+    path = harp_paths.data_dir() / ".secrets" / "nvidia.key"
     if not path.is_file():
         raise ValueError("Save a NVIDIA API key in Configuration or set NVIDIA_API_KEY")
     return harp_secret.load_key(path)
