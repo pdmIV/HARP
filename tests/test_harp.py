@@ -1028,6 +1028,79 @@ class HarpTests(unittest.TestCase):
                 saved = state.save_config({"target": "10.10.11.123"})
                 self.assertEqual(harp.load_config(config_path)["target"], "10.10.11.123")
 
+    def test_whippet_setting_defaults_on_and_persists_for_new_sessions(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["target"] = "10.10.11.123"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "harp.json"
+            cfg.pop("whippet_enabled")
+            path.write_text(json.dumps(cfg), encoding="utf-8")
+            self.assertNotIn("whippet_enabled", harp.load_config(path))
+            state = object.__new__(harp_web.HARPWebState)
+            state.lock = threading.RLock()
+            with patch.object(harp_web, "CONFIG", path):
+                saved = state.save_config({"whippet_enabled": False})
+                self.assertIs(saved["whippet_enabled"], False)
+                self.assertIs(harp.load_config(path)["whippet_enabled"], False)
+                saved = state.save_config({"whippet_enabled": True})
+                self.assertIs(saved["whippet_enabled"], True)
+            cfg["whippet_enabled"] = "off"
+            path.write_text(json.dumps(cfg), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "whippet_enabled"):
+                harp.load_config(path)
+
+    def test_whippet_disabled_in_hosted_oracle_and_direct_terminal(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["whippet_enabled"] = False
+            state["recon"] = [{"port": 88}, {"port": 389}]
+            state["config"]["oracle"] = {"provider": "nvidia_nim", "model": "example/model",
+                                             "max_cycles": 1, "steps_per_cycle": 1}
+            harp.save_session(path, state)
+            reply = {"choices": [{"message": {"content":
+                     '{"plan":"Use another tool","objective":"","stop":true}'}}]}
+            with patch.object(harp_nim, "request", return_value=reply) as request, \
+                 patch.object(harp, "terminal_for") as terminal:
+                harp_nim.run(path)
+                for command in ("whippet capture.zip --triage USER",):
+                    with self.assertRaisesRegex(ValueError, "disabled"):
+                        harp.direct_exec(path, command)
+                    with self.assertRaisesRegex(ValueError, "disabled"):
+                        harp.root_exec(path, command)
+            terminal.assert_not_called()
+            body = request.call_args.args[1]
+            self.assertIn("Whippet is disabled", body["messages"][0]["content"])
+            self.assertNotIn("Whippet tool card", body["messages"][0]["content"])
+            context = json.loads(body["messages"][1]["content"])
+            self.assertIs(context["whippet_enabled"], False)
+            self.assertNotIn("whippet", context)
+
+    def test_disabled_proxy_recovers_from_whippet_cli_to_other_command(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["config"]["whippet_enabled"] = False
+            state["recon"] = [{"port": 88}, {"port": 389}]
+            harp.save_session(path, state)
+            replies = iter([
+                '{"thought":"Try graph","command":"whippet capture.zip --triage USER","done":false}',
+                '{"thought":"Use another tool","command":"echo ready","done":false}',
+            ])
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=lambda *_args: next(replies)):
+                harp.delegate(path, "Inspect one AD lead", 1, quiet=True)
+            saved = harp.load_session(path)
+            self.assertEqual(saved["local_steps"], 1)
+            self.assertEqual(saved["observations"][-1]["command"], "echo ready")
+            self.assertEqual(saved["last_delegate_stop"], "step_budget")
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(event["type"] == "local_command_rejected" for event in events), 1)
+
     def test_codex_picks_up_gui_started_hybrid_session(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             runs = Path(temp) / "runs"

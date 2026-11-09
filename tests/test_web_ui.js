@@ -29,11 +29,13 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, renderStartStop, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setStartPending(value) { startPending = value; }, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, renderStartStop, switchSession, cacheCompletedSession, poll, renderDependencies, fillConfig, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setStartPending(value) { startPending = value; }, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
 const context = {document, localStorage: storage, sessionStorage: storage,
+  Option: function(text, value) { return {...element(), textContent: text, value}; },
+  URL,
   setInterval() {}, requestAnimationFrame: () => 1, cancelAnimationFrame() {},
   performance: {now: () => 1000}, location: {hash: ""}, URLSearchParams,
   matchMedia: () => ({matches: false, addEventListener() {}})};
@@ -216,6 +218,17 @@ for (const provider of ["codex", "zai", "openai", "nvidia_nim"]) {
 nodes.get("oracleSearch").checked = false;
 assert.equal(context.ui.configPayload().oracle.web_search_enabled, false);
 console.log("Research UI checks passed: toggle beneath adaptive reasoning, defaults off, provider-independent persistence.");
+
+const whippetConfig = JSON.parse(fs.readFileSync("harp.example.json", "utf8"));
+assert(/id="whippetEnabled"[^>]*\bchecked/.test(html), "Whippet should appear enabled before configuration loads");
+delete whippetConfig.whippet_enabled;
+context.ui.fillConfig(whippetConfig);
+assert.equal(nodes.get("whippetEnabled").checked, true, "Older configurations must keep Whippet enabled");
+nodes.get("whippetEnabled").checked = false;
+assert.equal(context.ui.configPayload().whippet_enabled, false);
+nodes.get("whippetEnabled").checked = true;
+assert.equal(context.ui.configPayload().whippet_enabled, true);
+console.log("Whippet UI checks passed: legacy default and saved toggle values.");
 
 (async () => {
   const backupNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));

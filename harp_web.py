@@ -387,7 +387,7 @@ class HARPWebState:
             if proxy_provider == "unsloth":
                 build_launch_args(studio)
             for key in ("target", "runtime", "wsl_distro", "wsl_user", "network", "network_policy", "scan_ports", "objective",
-                        "container_memory", "container_cpus", "max_steps", "command_timeout_seconds"):
+                        "container_memory", "container_cpus", "max_steps", "command_timeout_seconds", "whippet_enabled"):
                 if key in payload:
                     cfg[key] = payload[key]
             local_input = proxy_input

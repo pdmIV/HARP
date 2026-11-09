@@ -94,7 +94,13 @@ CHECK_COMMAND = (
 )
 
 
+def enabled(session):
+    return session.get("config", {}).get("whippet_enabled", True) is not False
+
+
 def relevant(session):
+    if not enabled(session):
+        return False
     ports = {x.get("port") for x in session.get("recon", [])}
     return (88 in ports and bool(ports & {389, 636, 3268, 3269})
             or any("active directory" in str(x).lower() for x in session.get("recon", []))

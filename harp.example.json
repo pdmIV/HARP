@@ -5,6 +5,7 @@
   "scan_ports": "8000",
   "objective": "Capture user.txt and root.txt flags on the authorized target, with terminal evidence for each.",
   "max_steps": 20,
+  "whippet_enabled": true,
   "max_model_calls": 30,
   "command_timeout_seconds": 45,
   "container_memory": "512m",

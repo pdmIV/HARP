@@ -476,6 +476,7 @@ def run(run_dir: Path) -> None:
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
                    "seclists": session.get("seclists"),
+                   "whippet_enabled": harp_whippet.enabled(session),
                    "observations": observations, "verified_artifacts": verified_artifacts,
                    "historical_evidence": compact_past_observations(
                        session["observations"], recent=recent_count),
@@ -588,7 +589,9 @@ def run(run_dir: Path) -> None:
                 "that principal; choose the smallest evidence-gathering step that may change the plan. "
                 "Copy any authentication limits from the plan into the objective. Stop only when "
                 "blocked, repeated after correction, or no evidence-backed step remains."
-                + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_whippet.guidance(session)
+                + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n"
+                + (harp_whippet.guidance(session) if harp_whippet.enabled(session) else
+                   "Whippet is disabled for this session. Do not plan or delegate Whippet or whippet_query commands; use other installed AD analysis tools.")
                 + (harp_research.INSTRUCTION if harp_research.enabled(session) else "")},
                 {"role": "user", "content": json.dumps(context)}]})
         if decision is None:

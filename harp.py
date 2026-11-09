@@ -110,6 +110,8 @@ def system_prompt(session: dict) -> str:
                    "Use memory_note or finding to report them, never claim terminal verification.")
     if harp_whippet.guidance(session):
         prompt += "\n" + harp_whippet.guidance(session)
+    elif not harp_whippet.enabled(session):
+        prompt += "\nWhippet is disabled for this session. Use other installed tools for AD analysis; do not invoke Whippet or whippet_query."
     if harp_effort.enabled(session.get("config", {}).get("oracle", {})):
         prompt += harp_effort.PROXY_INSTRUCTION
     if harp_research.enabled(session):
@@ -208,6 +210,8 @@ def command_scope_issue(command: str, target: str, authorized_scope: list[str] |
 
 def load_config(path: Path) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(cfg.get("whippet_enabled", True), bool):
+        raise ValueError("whippet_enabled must be true or false")
     checked_name(cfg["target"], "target")
     cfg["authorized_scope"] = checked_authorized_scope(cfg.get("authorized_scope"))
     runtime = cfg.get("runtime", "docker")
@@ -1495,6 +1499,8 @@ def whippet_query(run_dir: Path, inputs: list[str], request: dict, *, refresh: b
                   session: dict | None = None, origin: str = "oracle") -> dict:
     """One offline, logged query; proxy callers retain their existing session state."""
     session = session if session is not None else load_session(run_dir)
+    if not harp_whippet.enabled(session):
+        raise ValueError("Whippet is disabled for this session")
     if session["status"] != "active" or not harp_whippet.relevant(session):
         raise ValueError("Whippet batch queries require an active AD session")
     if origin == "oracle" and session.get("mode") == "local-only":
@@ -1580,6 +1586,8 @@ def review_proxy_command(run_dir: Path, command: str, reason: str, step: int,
 
 def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     session = load_session(run_dir)
+    if not harp_whippet.enabled(session) and harp_whippet.is_query(command):
+        raise ValueError("Whippet is disabled for this session")
     if session.get("mode", "hybrid") == "local-only":
         raise RuntimeError("Direct oracle terminal commands are disabled in proxy-only mode")
     issue = command_scope_issue(command, session["target"], session["config"].get("authorized_scope"),
@@ -1606,6 +1614,8 @@ def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
 def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     """Called only after an external human approval of this exact tool invocation."""
     session = load_session(run_dir)
+    if not harp_whippet.enabled(session) and harp_whippet.is_query(command):
+        raise ValueError("Whippet is disabled for this session")
     if session.get("mode", "hybrid") == "local-only" and command != session.get("pending_root_command"):
         raise RuntimeError("In proxy-only mode, approve only the proxy model's pending root command")
     issue = command_scope_issue(command, session["target"], session["config"].get("authorized_scope"),
@@ -1702,8 +1712,10 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "http_probes": session.get("http_probes", []),
                 "smb_probes": session.get("smb_probes", []),
                 "seclists": session.get("seclists"),
+                "whippet_enabled": harp_whippet.enabled(session),
                 "whippet": session.get("whippet") if harp_whippet.relevant(session) else None,
-                "whippet_query_history": harp_whippet.query_history(session),
+                "whippet_query_history": (harp_whippet.query_history(session)
+                                          if harp_whippet.enabled(session) else []),
                 "last_command_feedback": validation_feedback,
                 "step": step, "remaining": None if unbridled or unlimited_budget else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
@@ -1880,9 +1892,12 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     command = result["command"]
                 except ValueError as error:
                     whippet_rejections += 1
-                    validation_feedback = ("Whippet query was rejected before execution: " + str(error)[:1000]
-                        + ". Use captures under workspace=" + session.get("workspace", "/workspace")
-                        + "; correct inputs/request without refresh or a CLI fallback. Do not recollect existing data.")
+                    if not harp_whippet.enabled(session):
+                        validation_feedback = "Whippet is disabled for this session. Use another installed AD analysis tool."
+                    else:
+                        validation_feedback = ("Whippet query was rejected before execution: " + str(error)[:1000]
+                            + ". Use captures under workspace=" + session.get("workspace", "/workspace")
+                            + "; correct inputs/request without refresh or a CLI fallback. Do not recollect existing data.")
                     append_event(run_dir, {"type": "whippet_query_rejected", "step": step,
                                            "reason": validation_feedback})
                     session["oracle_help_request"] = validation_feedback
@@ -1905,6 +1920,16 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                         break
                     continue
                 command = command.strip()
+                if not harp_whippet.enabled(session) and harp_whippet.is_query(command):
+                    format_rejections += 1
+                    validation_feedback = "Whippet is disabled for this session. Use another installed AD analysis tool."
+                    append_event(run_dir, {"type": "local_command_rejected", "step": step,
+                        "command": command, "reason": validation_feedback})
+                    save_session(run_dir, session)
+                    if format_rejections >= 3:
+                        stop_reason = "command_validation_failed"
+                        break
+                    continue
                 # Approval cannot make a command executable by the terminal transport.
                 # Ask the worker to repair its format before offering tactical review.
                 format_issue = command_format_issue(command)

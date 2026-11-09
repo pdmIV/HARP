@@ -179,6 +179,14 @@ class BatchTests(unittest.TestCase):
             harp.whippet_query(self.root, ["capture.zip"], {"mode": "ping"}, session=state)
         query.assert_not_called()
 
+    def test_disabled_session_rejects_query_before_runtime_access(self):
+        state = {"status": "active", "recon": [{"port": 88}, {"port": 389}],
+                 "config": {"whippet_enabled": False}, "mode": "hybrid"}
+        with patch.object(harp, "terminal_for") as terminal, \
+             self.assertRaisesRegex(ValueError, "disabled"):
+            harp.whippet_query(self.root, ["capture.zip"], {"mode": "triage"}, session=state)
+        terminal.assert_not_called()
+
     def test_api_records_structured_evidence_and_mcp_contract(self):
         state = {"status": "active", "recon": [{"port": 88}, {"port": 389}], "mode": "hybrid",
                  "whippet": {"batch_compatible": True, "executable": "normal"},
@@ -223,6 +231,38 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(saved["last_delegate_stop"], "step_budget")
         self.assertEqual(saved["observations"][0]["output"], result["output"])
         self.assertEqual(query.call_args.kwargs["origin"], "local")
+
+    def test_disabled_proxy_gets_no_whippet_card_or_query_execution(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["whippet_enabled"] = False
+        state = {"status": "active", "mode": "hybrid", "container": "test", "config": cfg,
+                 "target": "target", "recon": [{"port": 88}, {"port": 389}],
+                 "local_steps": 0, "local_calls": [], "observations": [], "memory_notes": [],
+                 "oracle_actions": 0, "success": "unknown"}
+        harp.save_session(self.root, state)
+        prompts, contexts = [], []
+        def chat(_model, system, user, ledger):
+            prompts.append(system)
+            contexts.append(json.loads(user))
+            ledger.append({"finish_reason": "stop"})
+            return json.dumps({"whippet_query": {"inputs": ["capture.zip"],
+                               "request": {"mode": "triage", "node": "USER"}}, "done": False})
+        terminal = type("Terminal", (), {"stats": lambda self: None})()
+        with patch.object(harp, "terminal_for", return_value=terminal), \
+             patch.object(harp_whippet, "check") as check, \
+             patch.object(harp, "model_context_tokens", return_value=8192), \
+             patch.object(harp, "count_chat_tokens", return_value=300), \
+             patch.object(harp, "api_chat", side_effect=chat), \
+             patch.object(harp, "whippet_query", wraps=harp.whippet_query) as query:
+            harp.delegate(self.root, "Analyze AD access", 1, quiet=True)
+        check.assert_not_called()
+        self.assertEqual(query.call_count, 2)
+        self.assertEqual(harp.load_session(self.root)["local_steps"], 0)
+        self.assertEqual(harp.load_session(self.root)["last_delegate_stop"], "whippet_query_rejected")
+        self.assertTrue(all("Whippet is disabled" in prompt for prompt in prompts))
+        self.assertTrue(all("Whippet tool card" not in prompt for prompt in prompts))
+        self.assertTrue(all(context["whippet_enabled"] is False and context["whippet"] is None
+                            for context in contexts))
 
     def test_proxy_can_correct_capture_path_without_resume_or_cli_fallback(self):
         cfg = json.loads(Path("harp.example.json").read_text())

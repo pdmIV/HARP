@@ -633,6 +633,7 @@
       objectiveInput: cfg.objective || ""
     };
     for (const [id, value] of Object.entries(values)) $(id).value = value;
+    $("whippetEnabled").checked = cfg.whippet_enabled !== false;
     let preferences = cfg.ui;
     try { preferences = JSON.parse(localStorage.getItem("harpUiSettings") || "null") || preferences; } catch {}
     if (preferences) applyInterfaceSettings(preferences);
@@ -700,6 +701,7 @@
       network_policy: $("networkPolicy").value, scan_ports: $("scanPorts").value.trim(),
       objective: $("configObjective").value.trim(), container_memory: $("containerMemory").value.trim(),
       container_cpus: Number($("containerCpus").value), max_steps: Number($("maxSteps").value),
+      whippet_enabled: $("whippetEnabled").checked,
       command_timeout_seconds: Number($("commandTimeout").value),
       oracle: {provider: $("oracleProvider").value, model: $("oracleModel").value.trim(),
                base_url: $("oracleOpenaiUrl").value.trim(), access_program: $("oracleAccess").value,

@@ -11,9 +11,15 @@ Use **Configuration → Configuration snapshots** to export saved settings from 
 | Oracle model | Planner provider, model, endpoint, access program, pricing, cache lifetime, and cycle/delegation limits |
 | Proxy model | Worker provider, model, prompt/reply limits, and local Unsloth launch settings |
 | API Keys | Encrypted imports for OpenAI, Z.AI, NVIDIA NIM, and Unsloth |
-| Configuration | Authorized target, Kali runtime, network, scan ports, and resource limits |
+| Configuration | Authorized target, Kali runtime, network, scan ports, Whippet, and resource limits |
 
 Save model changes with **Save oracle** or **Save proxy**. Save target/runtime changes with **Save configuration**. Settings apply to new sessions; existing sessions retain their recorded configuration. The sidebar shows selections for new sessions.
+
+## Whippet experiment toggle
+
+In **Configuration → Whippet**, clear **Enable Whippet for new sessions** and save to run an AD assessment without Whippet. It is enabled by default, including for configurations created before this toggle existed. Each session records the setting at startup; changing it does not alter a running or saved session.
+
+When disabled, HARP skips Whippet availability checks, omits its tool card and query history from oracle and proxy prompts, and rejects managed queries and recognized Whippet CLI commands before execution. The models are told to use other installed AD analysis tools. This does not disable BloodHound collection, SecLists, or other terminal tools. Re-enable it and save before the next session to restore the existing Whippet workflow. For an effectiveness comparison, use the same target starting state, model settings, budgets, and reconnaissance policy across repeated enabled and disabled runs; see [evaluation limits](evaluation.md#forest-repeated-hybrid-runs).
 
 ## API keys
 

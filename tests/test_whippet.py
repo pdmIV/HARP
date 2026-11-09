@@ -29,6 +29,23 @@ def observation(data=None, **kwargs):
 
 
 class WhippetTests(unittest.TestCase):
+    def test_disabled_session_omits_guidance_and_discovery(self):
+        state = {"config": {"whippet_enabled": False, "local": {}},
+                 "recon": [{"port": 88}, {"port": 389}], "observations": []}
+        self.assertFalse(whippet.relevant(state))
+        self.assertEqual(whippet.guidance(state), "")
+        prompt = harp.system_prompt(state)
+        self.assertIn("Whippet is disabled", prompt)
+        self.assertNotIn("Whippet tool card", prompt)
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            with patch.object(whippet, "check") as check:
+                harp.ensure_whippet(Path(temp), state, SimpleNamespace())
+            check.assert_not_called()
+            self.assertNotIn("whippet", state)
+        state["config"]["whippet_enabled"] = True
+        self.assertTrue(whippet.relevant(state))
+        self.assertIn("Whippet tool card", harp.system_prompt(state))
+
     def test_handoff_keeps_atomic_lead_and_unverified_assessment(self):
         report = {"schema_version": 1, "mode": "handoff", "warnings": ["partial capture"],
                   "result": {"lead": {"proof": [{"edge": "MemberOf", "details": "x" * 3500}],

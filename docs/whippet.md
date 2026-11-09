@@ -7,6 +7,8 @@ Phase 2 adds [managed Whippet 0.7+ batch queries](whippet-batch.md) through the
 selected Kali runtime, without importing Whippet into HARP's Python environment.
 Whippet 0.8 adds one-lead handoffs and explicit unverified access assessments.
 
+Whippet is enabled by default. To compare runs without it, turn off **Enable Whippet for new sessions** in Configuration and save before starting. HARP then omits Whippet instructions from both models and skips discovery and queries for that session; see the [experiment toggle](configuration.md#whippet-experiment-toggle).
+
 ## Installation and discovery
 
 Use HARP's [dependency installer](dependencies.md) for new installations. It

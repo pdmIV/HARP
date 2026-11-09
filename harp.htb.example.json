@@ -8,6 +8,7 @@
   "scan_ports": "21-23,25,53,80,88,135,139,389,443,445,1433,2049,3306,3389,5985,5986,8000,8080,8443",
   "objective": "Capture user.txt and root.txt flags on only the authorized Hack The Box machine, with terminal evidence for each.",
   "max_steps": 20,
+  "whippet_enabled": true,
   "max_model_calls": 30,
   "command_timeout_seconds": 60,
   "container_memory": "512m",
