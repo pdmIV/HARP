@@ -195,7 +195,7 @@ class ResearchTests(unittest.TestCase):
             path = Path(temp)
             self.setup_session(path)
             turns = []
-            def chat(cfg, body):
+            def chat(cfg, body, *, cancelled=None):
                 context = json.loads(body["messages"][1]["content"])
                 turns.append(context)
                 if len(turns) == 1:
@@ -231,7 +231,7 @@ class ResearchTests(unittest.TestCase):
                 for i in range(4):
                     self.search(path, f"ExampleProduct {i + 2}.0 documentation")
             calls = []
-            def chat(cfg, body):
+            def chat(cfg, body, *, cancelled=None):
                 context = json.loads(body["messages"][1]["content"])
                 calls.append(context)
                 if len(calls) == 1:

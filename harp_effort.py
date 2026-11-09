@@ -2,6 +2,11 @@
 import re
 
 
+def read_timeout_seconds(effort: str | None) -> int:
+    """Give expensive reasoning time to produce its first or next response byte."""
+    return {"medium": 360, "high": 600, "xhigh": 1200, "max": 1200}.get(effort, 240)
+
+
 def enabled(config: dict) -> bool:
     return (config.get("adaptive_reasoning") is True
             and config.get("provider") in ("zai", "openai"))

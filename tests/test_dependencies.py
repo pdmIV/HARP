@@ -31,7 +31,7 @@ class DependencyTests(unittest.TestCase):
         self.assertNotIn("root", stages[0][0])
 
     def test_native_dashboard_uses_system_auth_only_for_apt(self):
-        with patch.object(installer.sys, "platform", "linux"), patch.object(installer.os, "geteuid", return_value=1000):
+        with patch.object(installer.sys, "platform", "linux"), patch.object(installer.os, "geteuid", return_value=1000, create=True):
             apt, python = installer.plan(self.args("--runtime", "native", "--native-auth", "polkit"))
             self.assertEqual(apt, (["pkexec", "--disable-internal-agent", "/usr/bin/bash",
                                     str(installer.SCRIPT), "--apt-only"], False))
@@ -73,7 +73,7 @@ class DependencyTests(unittest.TestCase):
 
     def test_system_auth_failure_gives_terminal_fallback_without_running_pipx(self):
         with patch.object(installer.sys, "platform", "linux"), \
-             patch.object(installer.os, "geteuid", return_value=1000), \
+             patch.object(installer.os, "geteuid", return_value=1000, create=True), \
              patch.object(installer.subprocess, "run", side_effect=subprocess.CalledProcessError(126, "pkexec")) as run, \
              contextlib.redirect_stdout(io.StringIO()), \
              self.assertRaisesRegex(RuntimeError, "sudo -v"):

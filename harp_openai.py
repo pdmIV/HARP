@@ -12,6 +12,7 @@ import urllib.request
 from urllib.parse import urlparse
 
 import harp_secret
+import harp_effort
 
 BASE = "https://api.openai.com/v1"
 PRICE_FIELDS = ("input_usd_per_million", "cached_input_usd_per_million",
@@ -123,7 +124,8 @@ def request(config: dict, path: str, payload: dict | None = None) -> dict:
         data=data, headers={"Authorization": "Bearer " + key(),
                             "Content-Type": "application/json", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=240 if data else 30) as response:
+        effort = ((payload or {}).get("reasoning") or {}).get("effort", config.get("reasoning_effort"))
+        with urllib.request.urlopen(req, timeout=harp_effort.read_timeout_seconds(effort) if data else 30) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
         # Expose bounded diagnostic identifiers, never provider messages or raw bodies:

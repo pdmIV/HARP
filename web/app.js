@@ -779,6 +779,7 @@
     if (kind === "deterministic_recon_retry") return ["Version scan retry", `${(event.findings || []).length} open services identified`, event.result?.command || ""];
     if (kind === "recon_fallback") return ["Port sweep retained", "Version scan was filtered; using the open ports from the initial sweep", ""];
     if (kind === "oracle_nim_error") return ["Oracle run error", event.error || "The model request failed", ""];
+    if (kind === "oracle_transport_retry") return ["Oracle connection retry", `Retry ${event.attempt}/2 after ${(event.reason || "transport interruption").replaceAll("_", " ")}; continuing automatically`, "No action was accepted. Token usage for the interrupted request is unknown."];
     if (kind === "oracle_nim_stopped") return ["Oracle stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, event.detail || ""];
     if (kind === "oracle_nim_usage") return ["Oracle response", `${event.input_tokens ?? "?"} input / ${event.output_tokens ?? "?"} output tokens / ${event.cached_input_tokens ?? 0} cached / ${event.cache_write_tokens ?? 0} cache writes / ${event.seconds ?? "?"}s`, event.cost_basis ? (event.estimated_usd == null ? "Cost unknown: configure token prices" : `Estimated $${event.estimated_usd.toFixed(6)} before account allowances`) : ""];
     if (kind === "oracle_nim_request") return ["Oracle planning", `Request sent to ${event.model} · cycle ${event.cycle}`, ""];

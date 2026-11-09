@@ -13,6 +13,12 @@ import test_harp as fixtures
 
 
 class AdaptiveEffortTests(unittest.TestCase):
+    def test_read_timeout_scales_with_effective_reasoning_effort(self):
+        for effort, seconds in ((None, 240), ("none", 240), ("low", 240),
+                                ("medium", 360), ("high", 600), ("xhigh", 1200), ("max", 1200)):
+            with self.subTest(effort=effort):
+                self.assertEqual(harp_effort.read_timeout_seconds(effort), seconds)
+
     def test_floor_fallback_and_provider_mapping(self):
         cfg = {"provider": "zai", "adaptive_reasoning": True, "reasoning_effort": "low"}
         for value in (None, "low", "HIGH", {}, [], True):
@@ -63,8 +69,10 @@ class AdaptiveEffortTests(unittest.TestCase):
                 "adaptive_reasoning": True, "reasoning_effort": "low", "max_cycles": 3}
             harp.save_session(path, state)
             efforts = []
-            def chat(cfg, body):
+            timeouts = []
+            def chat(cfg, body, *, cancelled=None):
                 efforts.append(harp_zai.response_body(cfg, body)["reasoning_effort"])
+                timeouts.append(harp_effort.read_timeout_seconds(cfg["reasoning_effort"]))
                 return {"choices": [{"message": {"content": json.dumps({
                     "plan": "Inspect", "objective": "Inspect service " + str(len(efforts)),
                     "stop": len(efforts) == 3})}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
@@ -77,6 +85,7 @@ class AdaptiveEffortTests(unittest.TestCase):
             with patch.object(harp_zai, "chat", side_effect=chat), patch.object(harp, "delegate", side_effect=delegate):
                 harp_nim.run(path)
             self.assertEqual(efforts, ["high", "max", "high"])
+            self.assertEqual(timeouts, [600, 1200, 600])
             state = harp.load_session(path)
             self.assertNotIn("recommended_oracle_effort", state)
             self.assertEqual([c["reasoning_effort"] for c in state["oracle_calls"]], efforts)

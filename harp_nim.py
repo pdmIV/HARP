@@ -55,7 +55,9 @@ def request(path: str, payload: dict | None = None, *, timeout_seconds: int | No
         headers={"Authorization": "Bearer " + key(), "Accept": "application/json",
                  "Content-Type": "application/json"}, method="POST" if data else "GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout_seconds or (240 if path == "/chat/completions" else 30)) as response:
+        timeout = (harp_effort.read_timeout_seconds((payload or {}).get("reasoning_effort"))
+                   if path == "/chat/completions" else 30)
+        with urllib.request.urlopen(req, timeout=timeout_seconds or timeout) as response:
             return json.load(response)
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"NVIDIA NIM returned HTTP {error.code}") from error
@@ -186,13 +188,13 @@ def bound_objective(plan: str, objective: str) -> str:
 
 
 def assisted_objective(decision: dict, plan: str) -> str:
-    """Keep oracle-authored code intact; reject oversized handoffs, never truncate code."""
-    objective = decision.get("objective", "")
-    implementation = decision.get("implementation", "")
+    """Keep oracle-authored code intact without an arbitrary implementation cap."""
+    objective = decision.get("objective") if decision.get("objective") is not None else ""
+    implementation = decision.get("implementation") if decision.get("implementation") is not None else ""
     if not isinstance(objective, str) or len(objective) > 1000:
         raise ValueError("Oracle objective must be a string of at most 1000 characters")
-    if not isinstance(implementation, str) or len(implementation) > 16000:
-        raise ValueError("Oracle implementation must be a string of at most 16000 characters")
+    if not isinstance(implementation, str):
+        raise ValueError("Oracle implementation must be a string")
     objective = bound_objective(plan, objective.strip())
     if implementation:
         if not objective:
@@ -327,8 +329,9 @@ def oracle_history(run_dir: Path) -> dict:
 
 def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
                     send, body: dict) -> dict | None:
-    """Retry only invalid model decisions, before any action, with full usage accounting."""
+    """Recover transport/format failures before any action, retaining reported usage."""
     body = {**body, "messages": list(body["messages"])}
+    transport_retries = 0
     for attempt in range(3):
         if any((run_dir / name).exists() for name in (".stop_session", ".stop_local")):
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
@@ -336,7 +339,35 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
         if harp.load_session(run_dir).get("status") != "active":
             return None
         started = time.monotonic()
-        reply = send("/chat/completions", body)
+        while True:
+            if (any((run_dir / name).exists() for name in (".stop_session", ".stop_local"))
+                    or harp.load_session(run_dir).get("status") != "active"):
+                return None
+            try:
+                reply = send("/chat/completions", body)
+                break
+            except InterruptedError:
+                harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
+                return None
+            except (TimeoutError, ConnectionError, urllib.error.URLError) as error:
+                # Only retry transport failures, before accepting or executing any decision.
+                # HTTP failures retain their existing diagnostics and are not timeouts.
+                if isinstance(error, urllib.error.HTTPError):
+                    raise
+                if isinstance(error, urllib.error.URLError) and not isinstance(
+                        error.reason, (TimeoutError, ConnectionError)):
+                    raise
+                if transport_retries >= 2:
+                    raise
+                transport_retries += 1
+                harp.append_event(run_dir, {"type": "oracle_transport_retry",
+                    "attempt": transport_retries, "reason": "timeout" if isinstance(error, TimeoutError)
+                    or isinstance(getattr(error, "reason", None), TimeoutError) else "connection_interrupted",
+                    "seconds": round(time.monotonic() - started, 2), "usage_unknown": True})
+                if (any((run_dir / name).exists() for name in (".stop_session", ".stop_local"))
+                        or harp.load_session(run_dir).get("status") != "active"):
+                    return None
+                time.sleep(transport_retries)
         usage = reply.get("usage") or {}
         choice = (reply.get("choices") or [{}])[0]
         message = choice.get("message") or {}
@@ -366,10 +397,16 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
         if any((run_dir / name).exists() for name in (".stop_session", ".stop_local")):
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
             return None
+        decision = None
         try:
             if choice.get("finish_reason") == "length":
                 raise ValueError("Oracle completion was truncated; provide a shorter complete decision")
             decision = harp.json_object(content)
+            # Optional JSON fields commonly arrive as null. Treat null as omitted,
+            # while still rejecting non-string commands and malformed actions.
+            for field in ("objective", "implementation", "oracle_command"):
+                if decision.get(field, "") is None:
+                    decision.pop(field)
             if not isinstance(decision.get("stop"), bool) or not isinstance(decision.get("plan", ""), str):
                 raise ValueError("Oracle decision requires boolean stop and string plan")
             objective = assisted_objective(decision, decision.get("plan", ""))
@@ -380,14 +417,18 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
             return decision
         except (ValueError, TypeError) as error:
             harp.append_event(run_dir, {"type": "invalid_oracle_reply", "attempt": attempt + 1,
-                "validation_error": str(error)[:500], "finish_reason": choice.get("finish_reason")})
+                "validation_error": str(error)[:500], "finish_reason": choice.get("finish_reason"),
+                "field_types": {k: type(decision[k]).__name__ for k in
+                    ("plan", "objective", "implementation", "oracle_command", "stop")
+                    if isinstance(decision, dict) and k in decision}})
             if attempt < 2:
                 # Do not replay malformed output or reasoning as executable instructions.
                 body["messages"] = [*body["messages"][:2], {"role": "user", "content":
                     "FORMAT RETRY: Your last reply was rejected; no action was executed. "
                     "Return one complete JSON object only, without prose or markdown. "
                     "Keep all model-authored prose in English. "
-                    "Use boolean stop and a string plan. Encode quotes/backslashes/newlines inside strings. "
+                    "Use boolean stop and a string plan. Omit unused optional fields. "
+                    "Encode quotes/backslashes/newlines inside strings. "
                     "Use the retained evidence to choose a bounded action. Validation error: " + str(error)[:500]}]
                 harp.append_event(run_dir, {"type": "oracle_format_retry", "attempt": attempt + 2})
     harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "invalid_oracle_replies"})
@@ -478,7 +519,8 @@ def run(run_dir: Path) -> None:
                 return harp_openai.chat(request_cfg, {**body, "harp_role": "oracle"})
             if cfg.get("provider") == "zai":
                 import harp_zai
-                return harp_zai.chat(request_cfg, body)
+                return harp_zai.chat(request_cfg, body, cancelled=lambda:
+                    any((run_dir / name).exists() for name in (".stop_session", ".stop_local")))
             return request(path, body)
 
         decision = oracle_decision(run_dir, cfg, effort, effort_source, oracle_request,
@@ -492,6 +534,9 @@ def run(run_dir: Path) -> None:
                 "The flags_found fields are the authoritative capture status. If a flag appears in "
                 "terminal evidence but is not captured, delegate one isolated read of that exact flag "
                 "with its value alone in output; do not stop on a model claim of completion. "
+                + harp.FLAG_COLLECTION_GUIDANCE + " "
+                "When new verified user-level access makes user.txt potentially readable, delegate "
+                "that bounded check as the next objective before planning escalation or a pivot. "
                 "Keep collector output, captures, scripts and reports under workspace from the context. "
                 "Pass that exact workspace path in delegated instructions; do not assume /home/kali. "
                 "When a relevant image has been downloaded into the session Kali workspace and "
@@ -501,14 +546,16 @@ def run(run_dir: Path) -> None:
                 "are model interpretations. Validate them with a bounded follow-up before treating them as facts. "
                 "Return only JSON with keys plan (short operator-facing sentence), objective "
                 "(specific bounded task, at most 1000 characters), stop (boolean), optional "
-                "implementation (string, at most 16000 characters), and optional oracle_command. "
+                "implementation (string with complete code), and optional oracle_command (string). "
+                "Omit unused optional fields rather than filling them with null or placeholder objects. "
                 "Assess task complexity before delegating. For complex payload crafting, delicate "
                 "quoting, protocol-specific code, or debugging beyond the proxy's likely capability, "
                 "author the implementation yourself in implementation, with exact code or short "
                 "commands, prerequisites, and a verification step. Delegate only its bounded "
                 "execution and evidence collection; do not ask the proxy to invent the hard part. "
-                "Keep individual commands within the terminal's 1000-character single-line limit; "
-                "split larger files into small writes in the session Kali workspace. Instructions "
+                "Commands may contain complete multiline scripts and quoted heredocs; there is no "
+                "command-length or implementation-length cap. Write complete files in the session Kali "
+                "workspace instead of splitting code into partial writes. Instructions "
                 "remain subject to normal scope validation and root approval. If last_stop is "
                 "oracle_requested, review oracle_help_request as an unverified model report and "
                 "resolve the specific blocker using terminal evidence before delegating again. "

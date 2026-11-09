@@ -297,7 +297,7 @@ class HarpTests(unittest.TestCase):
             self.assertIsNone(state["human_intervention_at"])
 
     def test_unexecutable_proxy_format_is_repaired_without_approval_or_resume(self):
-        for bad in ("echo first\necho second", "echo " + "x" * 1000):
+        for bad in ("echo first\x00echo second", "echo first\x1becho second"):
             with self.subTest(length=len(bad)), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
                 path = Path(temp)
                 self.make_session(path)
@@ -318,7 +318,7 @@ class HarpTests(unittest.TestCase):
                 review.assert_not_called()
                 self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
                 self.assertEqual(harp.load_session(path)["local_steps"], 1)
-                self.assertIn("single line", contexts[1]["last_command_feedback"])
+                self.assertIn("control character", contexts[1]["last_command_feedback"])
                 self.assertFalse(any(c.args[0] == bad for c in execute.call_args_list))
 
     def test_repeated_unexecutable_formats_return_bounded_oracle_recovery(self):
@@ -329,7 +329,7 @@ class HarpTests(unittest.TestCase):
                  patch.object(harp, "model_context_tokens", return_value=8192), \
                  patch.object(harp, "count_chat_tokens", return_value=300), \
                  patch.object(harp, "review_proxy_command") as review, \
-                 patch.object(harp, "api_chat", return_value=json.dumps({"command": "echo a\necho b"})) as chat:
+                 patch.object(harp, "api_chat", return_value=json.dumps({"command": "echo a\x00echo b"})) as chat:
                 harp.delegate(path, "Inspect target", 2, quiet=True)
             review.assert_not_called()
             self.assertEqual(chat.call_count, 3)
@@ -414,8 +414,77 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(saved["local_steps"], 1)
             self.assertEqual(saved["observations"][0]["command"], "echo result")
             self.assertEqual(saved["last_delegate_stop"], "step_budget")
-            self.assertIn("control character", harp.local_command_issue(
+            self.assertIsNone(harp.local_command_issue(
                 "echo first\necho second", "target", "Inspect target"))
+
+    def test_complete_long_script_uses_one_execution_step_without_format_retries(self):
+        command = "cat > helper.py <<'PY'\n" + "print('synthetic evidence')\n" * 2000 + "PY\npython3 helper.py"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            terminal = DummyTerminal()
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(terminal, "run", wraps=terminal.run) as run, \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command") as review, \
+                 patch.object(harp, "api_chat", side_effect=[json.dumps({"command": command}), '{"done":true}']) as chat:
+                harp.delegate(path, "Write and verify one helper script", 2, quiet=True)
+            review.assert_not_called()
+            self.assertEqual(chat.call_count, 2)
+            state = harp.load_session(path)
+            self.assertEqual(state["local_steps"], 1)
+            self.assertEqual(state["last_delegate_stop"], "local_done")
+            self.assertEqual(state["observations"][0]["command"], command)
+            self.assertEqual(run.call_count, 2)  # Syntax check, then exact script.
+            self.assertEqual(run.call_args_list[-1].args[0], command)
+            self.assertIn(command, run.call_args_list[0].args[0])
+
+    def test_large_unicode_script_is_transported_over_stdin_intact(self):
+        import hashlib
+        command = "# synthetic script\n" + "print('café')\n" * 20000
+        terminal = harp.KaliTerminal({})
+        terminal.print_stdout = False
+        reader = "import sys,hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())"
+        with patch.object(terminal, "script_argv", return_value=[sys.executable, "-c", reader]) as argv, \
+             patch.object(terminal, "command_argv") as inline:
+            result = terminal.run(command, 5, live=False)
+        argv.assert_called_once_with(5, False)
+        inline.assert_not_called()
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["output"].strip(), hashlib.sha256(command.encode()).hexdigest())
+        self.assertEqual(result["command"], command)
+
+    def test_script_transport_preserves_runtime_workspace_and_root_selection(self):
+        docker = harp.KaliTerminal({})
+        self.assertEqual(docker.script_argv(5, False)[:3], ["docker", "exec", "-i"])
+        self.assertIn("0:0", docker.script_argv(5, True))
+        wsl = harp.WslTerminal({"wsl_user": "kali", "wsl_distro": "kali-linux"})
+        argv = wsl.script_argv(5, False)
+        self.assertEqual(argv[:6], ["wsl.exe", "--distribution", "kali-linux", "--user", "kali", "--exec"])
+        self.assertIn(wsl.workspace, argv[-1])
+        self.assertEqual(wsl.script_argv(5, True)[4], "root")
+
+    def test_multiline_script_still_checks_scope_and_root(self):
+        self.assertIn("scope", harp.local_command_issue("echo start\ncurl http://192.0.2.33", "target", "Inspect target").lower())
+        self.assertIn("sudo", harp.local_command_issue("echo start\nsudo id", "target", "Inspect target"))
+
+    def test_root_request_preserves_complete_script_for_exact_approval(self):
+        command = "cat > helper.py <<'PY'\n" + "print('synthetic')\n" * 2000 + "PY"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            terminal = DummyTerminal()
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(terminal, "run") as run, \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=json.dumps({"command": command, "needs_root": True})):
+                harp.delegate(path, "Prepare a helper requiring approval", 1, quiet=True)
+            run.assert_not_called()
+            state = harp.load_session(path)
+            self.assertEqual(state["last_delegate_stop"], "root_requested")
+            self.assertEqual(state["pending_root_command"], command)
 
     def test_unlimited_oracle_can_resume_past_cycle_cap_and_uses_verified_artifacts(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -1234,6 +1303,70 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(chat.call_count, 1)
             self.assertEqual(state["last_delegate_stop"], "flags_captured")
             self.assertEqual(state["status"], "finished")
+
+    def test_user_level_flag_capture_updates_next_request_and_keeps_session_active(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["observations"] = [{"command": "ssh lab@first-host id", "exit_code": 0,
+                                      "output": "uid=1000(lab) gid=1000(lab)"}]
+            harp.save_session(path, state)
+            contexts = []
+            def reply(model, system, user, ledger):
+                context = json.loads(user)
+                contexts.append(context)
+                if len(contexts) == 1:
+                    self.assertEqual(context["flags_found"], {"user.txt": False, "root.txt": False})
+                    return json.dumps({"command": "ssh lab@first-host 'cat /home/lab/user.txt'"})
+                self.assertEqual(context["flags_found"], {"user.txt": True, "root.txt": False})
+                self.assertEqual(harp.load_session(path)["status"], "active")
+                return '{"done":true,"finding":"User-level flag read verified; continue assessment"}'
+            terminal = DummyTerminal()
+            terminal.run = lambda command, *_args, **_kwargs: {
+                "command": command, "exit_code": 0, "seconds": 0.1,
+                "output": "" if command.startswith("sh -n") else "a" * 32}
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=reply):
+                harp.delegate(path, "Check the verified lab user profile for user.txt on first-host", 3, quiet=True)
+            state = harp.load_session(path)
+            self.assertEqual(len(contexts), 2)
+            self.assertEqual(state["status"], "active")
+            self.assertEqual(state["last_delegate_stop"], "local_done")
+            self.assertEqual(state["root_approvals"], 0)
+            self.assertEqual(state["local_steps"], 1)
+            self.assertIsNone(state.get("success_at"))
+
+    def test_flags_on_different_authorized_hosts_complete_same_session(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            state = harp.load_session(path)
+            state["target"] = "192.0.2.10"
+            state["config"]["authorized_scope"] = ["192.0.2.20"]
+            harp.save_session(path, state)
+            harp_artifacts.capture_flags_from_result(path,
+                {"command": "ssh lab@192.0.2.10 'cat /home/lab/user.txt'", "exit_code": 0, "output": "a" * 32})
+            root_command = "ssh admin@192.0.2.20 'cat /root/root.txt'"
+            terminal = DummyTerminal()
+            terminal.run = lambda command, *_args, **_kwargs: {
+                "command": command, "exit_code": 0, "seconds": 0.1,
+                "output": "" if command.startswith("sh -n") else "b" * 32}
+            def reply(model, system, user, ledger):
+                self.assertEqual(json.loads(user)["flags_found"], {"user.txt": True, "root.txt": False})
+                return json.dumps({"command": root_command})
+            with patch.object(harp, "terminal_for", return_value=terminal), patch.object(harp, "docker"), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=reply) as chat:
+                harp.delegate(path, "Read root.txt with verified access on authorized host 192.0.2.20", 3, quiet=True)
+            self.assertEqual(chat.call_count, 1)
+            self.assertEqual(harp.load_session(path)["status"], "finished")
+            sources = {a["title"]: a["source"] for a in harp_artifacts.list_artifacts(path)}
+            self.assertIn("192.0.2.10", sources["user.txt"])
+            self.assertIn("192.0.2.20", sources["root.txt"])
 
     def test_artifact_registered_before_next_model_request(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

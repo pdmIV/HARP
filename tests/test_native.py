@@ -113,6 +113,26 @@ class NativeTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "mode 600"):
                 harp_secret.load_key(path)
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux script transport integration")
+    def test_complete_script_beyond_shell_argument_limit_runs_and_validates(self):
+        if os.geteuid() == 0:
+            self.skipTest("Native runtime intentionally refuses root")
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(Path, "home", return_value=Path(temp)):
+            terminal = harp.NativeTerminal({})
+            Path(terminal.workspace).mkdir(parents=True)
+            terminal.print_stdout = False
+            source = "# synthetic café\n" * 20000 + "print('script-complete')\n"
+            command = "cat > helper.py <<'PY'\n" + source + "PY\npython3 helper.py"
+            # This goes through the same syntax check and runtime as proxy scripts.
+            syntax = terminal.run("sh -n <<'CHECK'\n" + command + "\nCHECK", 5, live=False)
+            self.assertEqual(syntax["exit_code"], 0, syntax["output"])
+            self.assertFalse((Path(terminal.workspace) / "helper.py").exists())
+            result = terminal.run(command, 5, live=False)
+            self.assertEqual(result["exit_code"], 0, result["output"])
+            self.assertEqual(result["output"], "script-complete\n")
+            self.assertEqual((Path(terminal.workspace) / "helper.py").read_bytes(), source.encode())
+            self.assertEqual(list(Path(terminal.workspace).iterdir()), [Path(terminal.workspace) / "helper.py"])
+
 
 if __name__ == "__main__":
     unittest.main()

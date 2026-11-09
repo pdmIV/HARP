@@ -34,6 +34,7 @@ class ZAITests(unittest.TestCase):
         self.assertEqual(req.full_url, harp_zai.BASE + "/chat/completions")
         body = json.loads(req.data)
         self.assertEqual(set(body), {"model", "messages", "stream", "max_tokens", "thinking", "reasoning_effort", "temperature", "top_p", "response_format"})
+        self.assertTrue(body["stream"])
         self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertEqual(body["thinking"], {"type": "enabled"})
         self.assertEqual(body["temperature"], 0.65)
@@ -51,6 +52,14 @@ class ZAITests(unittest.TestCase):
             self.assertEqual(harp.api_chat(self.config(), "s", "u", ledger), "")
         self.assertIsNone(ledger[0]["estimated_usd"])
         self.assertEqual(ledger[0]["finish_reason"], "length")
+
+    def test_transport_waits_longer_for_high_and_max_effort(self):
+        reply = {"choices": [{"message": {"content": '{"done":true}'}, "finish_reason": "stop"}]}
+        for effort, expected in (("low", 240), ("high", 600), ("max", 1200)):
+            with self.subTest(effort=effort), patch.object(harp_zai, "key", return_value="key"), \
+                 patch.object(harp_zai.urllib.request, "urlopen", return_value=io.StringIO(json.dumps(reply))) as send:
+                harp_zai.chat({**self.config(), "reasoning_effort": effort}, {"messages": []})
+                self.assertEqual(send.call_args.kwargs["timeout"], expected)
 
     def test_oracle_uses_zai(self):
         cfg = json.loads(Path("harp.example.json").read_text())
@@ -111,6 +120,128 @@ class ZAITests(unittest.TestCase):
                 log = (path / "events.jsonl").read_text()
                 self.assertNotIn("private reasoning", log)
                 self.assertEqual(json.loads(log.splitlines()[-1])["reason"], "invalid_oracle_replies")
+
+    def test_unused_null_fields_do_not_trigger_oracle_format_retry(self):
+        decisions = [
+            {"plan": "Verify evidence", "objective": "Check one result", "implementation": None,
+             "oracle_command": None, "stop": False},
+            {"plan": "Blocked", "objective": None, "implementation": None,
+             "oracle_command": None, "stop": True},
+        ]
+        for decision in decisions:
+            with self.subTest(decision=decision), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                harp.save_session(path, {"status": "active"})
+                reply = {"choices": [{"message": {"content": json.dumps(decision)}, "finish_reason": "stop"}]}
+                with patch.object(harp_zai, "chat", return_value=reply) as send:
+                    result = harp_nim.oracle_decision(path, self.config(), "high", "test", send,
+                                                      {"messages": []})
+                self.assertEqual(send.call_count, 1)
+                self.assertNotIn("oracle_command", result)
+                self.assertNotIn("implementation", result)
+                self.assertNotIn("invalid_oracle_reply", (path / "events.jsonl").read_text())
+
+    def test_invalid_optional_command_types_still_require_correction(self):
+        for value in (False, 1, {"command": "id"}, ["id"]):
+            with self.subTest(value=value), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                harp.save_session(path, {"status": "active"})
+                decision = {"plan": "Verify evidence", "objective": "Check one result",
+                            "oracle_command": value, "stop": False}
+                reply = {"choices": [{"message": {"content": json.dumps(decision)}}]}
+                with patch.object(harp_zai, "chat", return_value=reply) as send:
+                    result = harp_nim.oracle_decision(path, self.config(), "high", "test", send,
+                                                      {"messages": []})
+                self.assertIsNone(result)
+                self.assertEqual(send.call_count, 3)
+
+    def test_oracle_recovers_transport_timeout_in_same_execution_cycle(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["oracle"] = {**self.config(), "max_cycles": 1}
+        reply = {"choices": [{"message": {"content": '{"plan":"Blocked","stop":true}'},
+                               "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+        for failure in (TimeoutError("The read operation timed out"),
+                        urllib.error.URLError(TimeoutError("timed out")),
+                        ConnectionError("stream interrupted")):
+            with self.subTest(failure=type(failure)), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                harp.save_session(path, {"status": "active", "config": cfg, "target": "192.0.2.1", "observations": []})
+                harp.append_event(path, {"type": "test"})
+                with patch.object(harp_zai, "chat", side_effect=[failure, reply]) as chat, \
+                     patch.object(harp_nim.time, "sleep"), patch.object(harp, "delegate") as delegate:
+                    harp_nim.run(path)
+                delegate.assert_not_called()
+                self.assertEqual(chat.call_count, 2)
+                self.assertEqual(chat.call_args_list[0].args, chat.call_args_list[1].args)
+                self.assertEqual(harp_nim.oracle_history(path)["cycles"], 1)
+                self.assertEqual(len(harp.load_session(path)["oracle_calls"]), 1)
+                events = [json.loads(x) for x in (path / "events.jsonl").read_text().splitlines()]
+                self.assertEqual(sum(e["type"] == "oracle_transport_retry" for e in events), 1)
+                self.assertEqual(events[-1]["reason"], "model_stop")
+
+    def test_oracle_transport_retries_are_bounded_and_respect_stop(self):
+        for stop in (False, True):
+            with self.subTest(stop=stop), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                harp.save_session(path, {"status": "active"})
+                def timeout(*_args):
+                    if stop:
+                        (path / ".stop_session").touch()
+                    raise TimeoutError("timed out")
+                with patch.object(harp_zai, "chat", side_effect=timeout) as send, patch.object(harp_nim.time, "sleep"):
+                    if stop:
+                        self.assertIsNone(harp_nim.oracle_decision(path, self.config(), "high", "test", send,
+                                                                 {"messages": []}))
+                        self.assertEqual(send.call_count, 1)
+                    else:
+                        with self.assertRaises(TimeoutError):
+                            harp_nim.oracle_decision(path, self.config(), "high", "test", send, {"messages": []})
+                        self.assertEqual(send.call_count, 3)
+
+    def test_streamed_reasoning_and_final_json_keep_usage_and_finish_reason(self):
+        events = [
+            {"choices": [{"index": 0, "delta": {"reasoning_content": "private reasoning"}}]},
+            {"choices": [{"index": 0, "delta": {"content": '{"done":'}}]},
+            {"choices": [{"index": 0, "delta": {"content": 'true}'}, "finish_reason": "stop"}]},
+            {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20,
+                                      "prompt_tokens_details": {"cached_tokens": 60}}},
+        ]
+        wire = ": heartbeat\r\n\r\n" + "".join("data: " + json.dumps(e) + "\r\n\r\n" for e in events) + "data: [DONE]\r\n\r\n"
+        response = io.BytesIO(wire.encode())
+        response.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+        ledger = []
+        with patch.object(harp_zai, "key", return_value="key"), \
+             patch.object(harp_zai.urllib.request, "urlopen", return_value=response), \
+             patch.object(harp_zai.time, "monotonic", side_effect=[0, 0] + [300] * 100):
+            self.assertEqual(harp.api_chat(self.config(), "system", "evidence", ledger), '{"done":true}')
+        self.assertEqual(ledger[0]["completion_tokens"], 20)
+        self.assertEqual(ledger[0]["cached_input_tokens"], 60)
+        self.assertEqual(ledger[0]["finish_reason"], "stop")
+
+    def test_incomplete_or_cancelled_stream_never_returns_partial_action(self):
+        first = 'data: ' + json.dumps({"choices": [{"delta": {"content": '{"command":"id"}'}}]}) + '\n\n'
+        for ending in ("", "data: [DONE]\n\n"):
+            with self.subTest(ending=ending), self.assertRaises(ConnectionError):
+                harp_zai.streamed_completion(io.BytesIO((first + ending).encode()))
+        with self.assertRaises(InterruptedError):
+            harp_zai.streamed_completion(io.BytesIO(first.encode()), cancelled=lambda: True)
+        with patch.object(harp_zai.time, "monotonic", side_effect=[0, 1801]), self.assertRaises(TimeoutError):
+            harp_zai.streamed_completion(io.BytesIO(first.encode()))
+
+    def test_large_oracle_implementation_is_preserved_in_full(self):
+        implementation = "print('synthetic')\n" * 10000
+        objective = harp_nim.assisted_objective({"objective": "Write and verify the helper",
+                                                "implementation": implementation}, "Verify evidence")
+        self.assertTrue(objective.endswith(implementation))
+
+    def test_stream_failure_finish_reasons_never_accept_complete_looking_json(self):
+        for finish, error in (("network_error", ConnectionError),
+                              ("sensitive", RuntimeError), ("model_context_window_exceeded", RuntimeError)):
+            event = {"choices": [{"delta": {"content": '{"command":"id"}'}, "finish_reason": finish}]}
+            wire = "data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n"
+            with self.subTest(finish=finish), self.assertRaises(error):
+                harp_zai.streamed_completion(io.BytesIO(wire.encode()))
 
     def test_oracle_handoff_keeps_implementation_and_expands_evidence(self):
         cfg = json.loads(Path("harp.example.json").read_text())

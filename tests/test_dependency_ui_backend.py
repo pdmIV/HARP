@@ -70,13 +70,15 @@ class DependencyBackendTests(unittest.TestCase):
 
     def test_native_dashboard_requests_polkit_auth_and_shows_terminal_fallback(self):
         cfg = {"runtime": "native"}
-        base = self.manager.base(cfg)
-        self.assertIn("sudo -v && python3", base["command"])
-        with patch.object(dependencies.threading, "Thread"):
-            self.manager.install(cfg, base["key"])
-        process = type("Process", (), {"stdout": io.StringIO("Checks passed\n"), "wait": lambda self: 0})()
-        with patch.object(dependencies.subprocess, "Popen", return_value=process) as popen:
-            self.manager._install(cfg, base)
+        with patch.object(dependencies.installer.sys, "platform", "linux"), \
+             patch.object(dependencies.installer.os, "geteuid", return_value=1000, create=True):
+            base = self.manager.base(cfg)
+            self.assertIn("sudo -v && python3", base["command"])
+            with patch.object(dependencies.threading, "Thread"):
+                self.manager.install(cfg, base["key"])
+            process = type("Process", (), {"stdout": io.StringIO("Checks passed\n"), "wait": lambda self: 0})()
+            with patch.object(dependencies.subprocess, "Popen", return_value=process) as popen:
+                self.manager._install(cfg, base)
         self.assertEqual(popen.call_args.args[0][-2:], ["--native-auth", "polkit"])
 
     def test_failed_install_keeps_warning_with_output(self):
