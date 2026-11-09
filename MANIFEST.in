@@ -8,5 +8,6 @@ recursive-include tests *.py *.js
 prune runs
 prune .secrets
 prune .settings_backups
+prune .codex
 exclude harp.json .control_center.json .gui_heartbeat .kali_image_stamp
 global-exclude __pycache__ *.py[cod]

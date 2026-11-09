@@ -1187,19 +1187,24 @@ class HarpTests(unittest.TestCase):
         self.assertNotIn("sk-unsloth-test123", harp_web.redact_model_log("API Key: sk-unsloth-test123"))
 
     def test_web_captures_generated_key_without_logging_it(self):
-        state = object.__new__(harp_web.HARPWebState)
-        state.lock = threading.RLock()
-        state.model_logs = deque(maxlen=500)
-        state.model_log_id = 0
-        process = type("FakeProcess", (), {"stdout": io.StringIO("API Key: sk-unsloth-test123\n"),
-                                            "returncode": 0,
-                                            "wait": lambda self: 0})()
-        with patch.object(harp_web.harp_secret, "save_key") as save_key:
-            state._read_model_output(process)
-        save_key.assert_called_once()
-        logs = list(state.model_logs)
-        self.assertTrue(any("stored encrypted" in item["line"] for item in logs))
-        self.assertNotIn("sk-unsloth-test123", str(logs))
+        for platform, message in (("nt", "stored encrypted"),
+                                  ("posix", "saved with owner-only Linux permissions")):
+            with self.subTest(platform=platform), \
+                    patch.object(harp_web, "os", SimpleNamespace(name=platform)):
+                state = object.__new__(harp_web.HARPWebState)
+                state.lock = threading.RLock()
+                state.model_logs = deque(maxlen=500)
+                state.model_log_id = 0
+                process = type("FakeProcess", (), {"stdout": io.StringIO("API Key: sk-unsloth-test123\n"),
+                                                    "returncode": 0,
+                                                    "wait": lambda self: 0})()
+                with patch.object(harp_web.harp_secret, "save_key") as save_key:
+                    state._read_model_output(process)
+                save_key.assert_called_once_with(harp_web.ROOT / ".secrets" / "unsloth.key",
+                                                 "sk-unsloth-test123")
+                logs = list(state.model_logs)
+                self.assertTrue(any(message in item["line"] for item in logs))
+                self.assertNotIn("sk-unsloth-test123", str(logs))
 
     def test_evidence_backed_flag_capture_and_unseen_status(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

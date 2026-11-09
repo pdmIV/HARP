@@ -91,9 +91,24 @@ For an installed Codex MCP server, set `command` to the absolute path returned
 by `which harp-ai` on Kali or `(Get-Command harp-ai).Source` in PowerShell,
 and set `args = ["mcp"]`. It needs no repository working directory. If using a
 custom home, set the same `HARP_HOME` for the dashboard and MCP server.
-Preserve the existing `terminal_root` approval setting and tool timeout in
-[the source configuration](../.codex/config.toml). Do not replace root approvals
-with automatic approval.
+Use the following MCP settings, replacing the executable path. Keep your local
+Codex configuration under `.codex/` or in your user configuration; `.codex/` is
+ignored by Git and is not distributed with HARP.
+
+```toml
+[mcp_servers.harp]
+command = "/absolute/path/to/harp-ai"
+args = ["mcp"]
+tool_timeout_sec = 1500
+default_tools_approval_mode = "auto"
+
+[mcp_servers.harp.tools.terminal_root]
+approval_mode = "approve"
+```
+
+Do not replace root approvals with automatic approval. For a source checkout,
+you can instead set `command` to your Python executable, `args` to the absolute
+path to `harp_mcp.py`, and `cwd` to the checkout root.
 
 The wheel contains the web UI, fonts and font license, example configurations,
 Docker recipe, dependency installer, and research helper. Explicit build lists

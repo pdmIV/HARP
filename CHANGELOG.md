@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix Linux CI's generated API-key status test to cover both Windows encryption and Linux owner-only storage, retaining credential-redaction assertions.
+- Ignore operator-local `.codex/` settings and document portable MCP configuration.
+
 - Add the `harp-ai` installable Python distribution and terminal launcher, bundled dashboard/setup resources, persistent per-user installed data, and Kali dependency setup through `harp-ai deps`.
 - Add Linux/Windows package validation and a GitHub release workflow for PyPI Trusted Publishing after repository/PyPI setup.
 

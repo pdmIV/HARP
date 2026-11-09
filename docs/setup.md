@@ -71,7 +71,7 @@ The following Docker setup is optional when using WSL:
    python harp.py doctor
    ```
 
-5. Restart Codex in this workspace to load the project MCP configuration. `codex mcp get harp` shows whether the server is enabled. The MCP adapter uses only Python's standard library.
+5. Configure Codex using the [MCP settings example](packaging.md#terminal-commands-and-saved-data), then restart it to load your local configuration. `.codex/` is ignored by Git; each operator supplies their own executable and workspace paths. `codex mcp get harp` shows whether the server is enabled. The MCP adapter uses only Python's standard library.
 
 Codex can then call `launch_control_center`, `wait_for_session`, `inspect_session`, `terminal`, `delegate_local`, `mark_success`, and `finish_session`. `start_session` remains available for an explicitly requested headless run.
 
