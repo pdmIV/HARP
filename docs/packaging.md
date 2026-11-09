@@ -49,7 +49,7 @@ Never launch the whole application with sudo.
 Installing a wheel is also supported:
 
 ```bash
-pipx install ./harp_ai-0.5.0-py3-none-any.whl
+pipx install ./harp_ai-0.6.0-py3-none-any.whl
 ```
 
 After the project is published to PyPI, the registry install becomes:
@@ -143,7 +143,7 @@ Before the first registry release, configure these once:
    that tag. Pushing a tag alone does not publish with this workflow.
 
 No PyPI API token is required. Publishing a GitHub prerelease also triggers the
-workflow; use a corresponding PEP 440 prerelease version such as `0.6.0a1`.
+workflow; use a corresponding PEP 440 prerelease version such as `0.7.0a1`.
 PyPI versions cannot be overwritten, so bump the version for each upload.
 
 For a local package check:

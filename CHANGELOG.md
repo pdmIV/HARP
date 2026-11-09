@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-11-09
+
+- Recover command-center and MCP-owned sessions after a host interruption on the next launch, preserving evidence, stopping elapsed time at the last heartbeat, and reporting runtime cleanup failures.
+- Add a per-session Whippet toggle for controlled comparisons. Disabled sessions omit Whippet discovery and model guidance and reject Whippet queries.
+- Document three observed Forest Hybrid runs, including verified outcomes, usage, errors, and comparison limits.
 - Fix Linux CI's generated API-key status test to cover both Windows encryption and Linux owner-only storage, retaining credential-redaction assertions.
 - Ignore operator-local `.codex/` settings and document portable MCP configuration.
 

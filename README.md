@@ -4,7 +4,7 @@
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
-The current release is **v0.5.0** (research alpha). The Overview wordmark and `python harp.py --version` show the installed version. See [versioning](docs/versioning.md) for the release and session archive formats.
+The current version is **v0.6.0** (research alpha). The Overview wordmark and `python harp.py --version` show the installed version. See [versioning](docs/versioning.md) for the release and session archive formats.
 
 For complex work, a hosted oracle can provide an exact implementation for the proxy to execute, and the proxy can request oracle help when it encounters a blocker. Z.AI GLM-5.3 and GLM-5.3-Flash sessions can use configurable oracle evidence depth and larger token ceilings; see [GLM configuration](docs/configuration.md#zai-api--glm) for practical starting settings.
 
