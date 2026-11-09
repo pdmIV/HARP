@@ -474,6 +474,7 @@ def run(run_dir: Path) -> None:
                    "authorized_scope": session["config"].get("authorized_scope", []),
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
+                   "seclists": session.get("seclists"),
                    "observations": observations, "verified_artifacts": verified_artifacts,
                    "historical_evidence": compact_past_observations(
                        session["observations"], recent=recent_count),
@@ -574,6 +575,9 @@ def run(run_dir: Path) -> None:
                 "Prefer installed alternatives; request root approval only when essential. "
                 "If several delegations yield no new terminal evidence, stop instead of changing "
                 "the wording of the same plan. "
+                "If seclists is available in context, use its discovered Kali path for relevant "
+                "bounded wordlists; inspect an exact file before using it. Do not assume a host path "
+                "is available in the selected Kali runtime. "
                 "At every cycle, step back and compare the newest evidence with earlier findings "
                 "before committing to an account, service, or exploit path. A discovered password "
                 "is not proof that it belongs to any named user. If a credential lacks a verified "

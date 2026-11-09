@@ -51,8 +51,12 @@ def register_artifact(run_dir: Path, *, kind: str, title: str, value: str,
     if kind not in KINDS:
         raise ValueError("Artifact kind must be credential, document, image, flag, or other")
     title, value, source, evidence = (str(x).strip() for x in (title, value, source, evidence))
-    if not title or not value or len(title) > 160 or len(value) > 8000 or len(source) > 1000:
+    if not title or not value or not source or len(title) > 160 or len(value) > 8000:
         raise ValueError("Artifact title or value is empty or too long")
+    if len(source) > 1000:
+        marker = " … [source sha256 " + hashlib.sha256(source.encode("utf-8")).hexdigest() + "] … "
+        head = (1000 - len(marker)) // 2
+        source = source[:head] + marker + source[-(1000 - len(marker) - head):]
     if kind == "flag" and title not in FLAG_NAMES:
         raise ValueError("Flag title must be user.txt or root.txt")
     for item in list_artifacts(run_dir):
@@ -187,7 +191,7 @@ def flag_values_from_result(result: dict) -> list[tuple[str, str]]:
     """Recognize flag evidence without modifying a session."""
     command = str(result.get("command", ""))
     output = ANSI.sub("", str(result.get("output", "")))
-    if result.get("exit_code") != 0 or result.get("truncated"):
+    if result.get("truncated"):
         return []
     mentioned = [name for name in FLAG_NAMES if re.search(r"(?i)(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", command)]
     # Associate each WinRM response with its echoed read command, rather than
@@ -253,7 +257,7 @@ def capture_model_artifact(run_dir: Path, session: dict, proposal: dict) -> dict
     value = proposal.get("value")
     if kind not in KINDS or not isinstance(title, str) or not isinstance(value, str):
         return None
-    if not 2 <= len(value) <= 8000:
+    if not 1 <= len(title.strip()) <= 160 or not 2 <= len(value) <= 8000:
         return None
     if kind == "flag" and title not in FLAG_NAMES:
         # Recover a mistyped NTLM proposal only from an exact structured dump

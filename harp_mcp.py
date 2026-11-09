@@ -118,6 +118,7 @@ def inspect_session(session: str) -> str:
                        "http_probes": state.get("http_probes", []),
                        "smb_probes": state.get("smb_probes", []),
                        "whippet": state.get("whippet"),
+                       "seclists": state.get("seclists"),
                        "whippet_guidance": harp_whippet.guidance(state),
                        "proxy_image_input_available": harp.supports_image_input(state.get("config", {}).get("local", {})),
                        "unverified_local_conclusion": state.get("local_conclusion"),

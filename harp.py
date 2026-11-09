@@ -30,6 +30,7 @@ import harp_version
 import harp_effort
 import harp_research
 import harp_whippet
+import harp_resources
 import harp_whippet_batch
 
 
@@ -1251,6 +1252,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
     try:
         terminal.__enter__()
         print(f"Kali terminal: {terminal.name}")
+        ensure_seclists(run_dir, session, terminal)
         snapshot = None if fresh_recon else find_recon_snapshot(output_root, cfg)
         matched_hostname = ""
         if snapshot is None and not fresh_recon:
@@ -1456,6 +1458,28 @@ def ensure_whippet(run_dir: Path, session: dict, terminal=None) -> None:
     session["whippet"] = status
     session["tool_discovery_calls"] = session.get("tool_discovery_calls", 0) + 1
     append_event(run_dir, {"type": "whippet_availability", "status": status, "result": result})
+    save_session(run_dir, session)
+
+
+def ensure_seclists(run_dir: Path, session: dict, terminal=None) -> None:
+    """Record SecLists availability once in the session's selected Kali runtime."""
+    if "seclists" in session:
+        return
+    terminal = terminal or terminal_for(session)
+    terminal.event_dir = run_dir
+    recon_mode = getattr(terminal, "recon_mode", False)
+    try:
+        terminal.recon_mode = False
+        status, result = harp_resources.check(terminal)
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+        status = {"available": False, "roots": [], "categories": [], "error": str(error)[:200]}
+        result = {"command": harp_resources.CHECK_COMMAND, "exit_code": -1,
+                  "output": str(error)[:200], "truncated": False}
+    finally:
+        terminal.recon_mode = recon_mode
+    session["seclists"] = status
+    session["tool_discovery_calls"] = session.get("tool_discovery_calls", 0) + 1
+    append_event(run_dir, {"type": "seclists_availability", "status": status, "result": result})
     save_session(run_dir, session)
 
 
@@ -1676,6 +1700,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                                 for name in harp_artifacts.FLAG_NAMES},
                 "http_probes": session.get("http_probes", []),
                 "smb_probes": session.get("smb_probes", []),
+                "seclists": session.get("seclists"),
                 "whippet": session.get("whippet") if harp_whippet.relevant(session) else None,
                 "whippet_query_history": harp_whippet.query_history(session),
                 "last_command_feedback": validation_feedback,

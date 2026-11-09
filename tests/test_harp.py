@@ -109,12 +109,12 @@ class HarpTests(unittest.TestCase):
              patch.object(harp, "deterministic_smb_probes", return_value=[]):
             runs = Path(temp)
             first = harp.start_session(cfg, runs)
-            first_count = len(commands)
+            first_count = sum(command.startswith("nmap ") for command in commands)
             self.assertGreater(first_count, 0)
             cache = harp.recon_cache_path(runs, cfg)
             self.assertTrue(cache.is_file())
             second = harp.start_session(cfg, runs)
-            self.assertEqual(len(commands), first_count)
+            self.assertEqual(sum(command.startswith("nmap ") for command in commands), first_count)
             reused = harp.load_session(second)
             self.assertEqual(reused["recon_stage"], "Reused")
             self.assertEqual(reused["recon_source_session"], first.name)
@@ -123,11 +123,11 @@ class HarpTests(unittest.TestCase):
             self.assertTrue(any(json.loads(line)["type"] == "recon_reused"
                                 for line in (second / "events.jsonl").read_text().splitlines()))
             harp.start_session(cfg, runs, fresh_recon=True)
-            self.assertGreater(len(commands), first_count)
-            refreshed_count = len(commands)
+            self.assertGreater(sum(command.startswith("nmap ") for command in commands), first_count)
+            refreshed_count = sum(command.startswith("nmap ") for command in commands)
             different = {**cfg, "scan_ports": "1-1024"}
             harp.start_session(different, runs)
-            self.assertGreater(len(commands), refreshed_count)
+            self.assertGreater(sum(command.startswith("nmap ") for command in commands), refreshed_count)
 
     def test_existing_completed_session_seeds_recon_cache(self):
         cfg = json.loads(Path("harp.example.json").read_text())
@@ -184,10 +184,10 @@ class HarpTests(unittest.TestCase):
             runs = Path(temp)
             first = harp.start_session(cfg, runs)
             self.assertEqual(harp.load_session(first)["recon_hostnames"], ["box.htb"])
-            initial_count = len(commands)
+            initial_count = sum(command.startswith("nmap ") for _, command in commands)
             moved = {**cfg, "target": "10.10.10.6"}
             second = harp.start_session(moved, runs)
-            self.assertEqual(len(commands), initial_count + 1)
+            self.assertEqual(sum(command.startswith("nmap ") for _, command in commands), initial_count + 1)
             self.assertIn("-p 80", commands[-1][1])
             state = harp.load_session(second)
             self.assertEqual(state["recon_match_hostname"], "box.htb")
@@ -196,7 +196,7 @@ class HarpTests(unittest.TestCase):
             self.assertTrue(harp.recon_cache_path(runs, moved).is_file())
             third = harp.start_session({**cfg, "target": "10.10.10.7"}, runs)
             self.assertEqual(harp.load_session(third)["recon_stage"], "Complete")
-            self.assertGreater(len(commands), initial_count + 2)
+            self.assertGreater(sum(command.startswith("nmap ") for _, command in commands), initial_count + 2)
 
     def test_htb_hostname_parser_ignores_unrelated_names(self):
         xml = ('<nmaprun><host><hostnames><hostname name="BOX.HTB"/>'
@@ -1269,8 +1269,23 @@ class HarpTests(unittest.TestCase):
             with self.subTest(output=output):
                 self.assertEqual(harp_artifacts.flag_values_from_result({"command": command, "output": output, "exit_code": 0}), [])
         result = {"command": command, "output": prompt + "type user.txt\n" + "a" * 32, "exit_code": 0}
-        self.assertEqual(harp_artifacts.flag_values_from_result({**result, "exit_code": 1}), [])
+        self.assertEqual(harp_artifacts.flag_values_from_result({**result, "exit_code": 1}),
+                         [("user.txt", "a" * 32)])
         self.assertEqual(harp_artifacts.flag_values_from_result({**result, "truncated": True}), [])
+
+    def test_winrm_read_survives_later_shell_failure(self):
+        command = "printf '%s\\n' 'type C:\\Users\\Admin\\Desktop\\root.txt' 'bad-command' exit | evil-winrm -i target -u lab"
+        prompt = "*Evil-WinRM* PS C:\\Users\\Lab> "
+        result = {"command": command, "exit_code": 2,
+                  "output": prompt + "type C:\\Users\\Admin\\Desktop\\root.txt\n"
+                  + "\x1b[32m" + "b" * 32 + "\x1b[0m\n" + prompt + "bad-command\nError after the read\n"}
+        self.assertEqual(harp_artifacts.flag_values_from_result(result), [("root.txt", "b" * 32)])
+        self.assertEqual(harp_artifacts.flag_values_from_result({**result, "output":
+            prompt + "type C:\\Users\\Admin\\Desktop\\root.txt\nAccess denied\n" + "b" * 32}), [])
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            artifact = harp_artifacts.capture_flags_from_result(path, result)[0]
+            self.assertEqual(artifact["title"], "root.txt")
 
     def test_netexec_flags_require_unambiguous_file_read_evidence(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -1408,7 +1423,21 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(item["value"], "demo-pass-123")
             self.assertIsNone(harp_artifacts.capture_model_artifact(path, session,
                 {"kind": "credential", "title": "Hallucinated", "value": "not-in-output"}))
+            self.assertIsNone(harp_artifacts.capture_model_artifact(path, session,
+                {"kind": "credential", "title": "x" * 161, "value": "demo-pass-123"}))
             self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
+
+    def test_long_evidence_command_does_not_abort_artifact_capture(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            command = "printf '" + "x" * 1400 + "' | evil-winrm -i target"
+            session = {"observations": [{"command": command, "exit_code": 2,
+                                         "output": "account=demo-pass-123\n"}]}
+            proposal = {"kind": "credential", "title": "Service password", "value": "demo-pass-123"}
+            artifact = harp_artifacts.capture_model_artifact(path, session, proposal)
+            self.assertEqual(artifact["value"], "demo-pass-123")
+            self.assertLessEqual(len(artifact["source"]), 1000)
+            self.assertIn("source sha256", artifact["source"])
 
     def test_mislabeled_ntlm_hash_is_saved_as_credential(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
