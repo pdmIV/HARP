@@ -74,7 +74,7 @@ def benchmark_one(model: str) -> dict:
               "smb_probes": [{"option": "--shares", "summary": "Share LAB READ"}], "cycle": 1}
     body = {"model": model, "stream": False, "max_tokens": 1024,
             "messages": [{"role": "system", "content":
-                "You are the HARP oracle. Return only JSON with keys plan, objective, stop. "
+                harp.ENGLISH_ONLY + "\nYou are the HARP oracle. Return only JSON with keys plan, objective, stop. "
                 "Choose one bounded, non-destructive next step based on the synthetic evidence."},
                 {"role": "user", "content": json.dumps(prompt)}]}
     body.update(oracle_model_options(model))
@@ -386,6 +386,7 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
                 body["messages"] = [*body["messages"][:2], {"role": "user", "content":
                     "FORMAT RETRY: Your last reply was rejected; no action was executed. "
                     "Return one complete JSON object only, without prose or markdown. "
+                    "Keep all model-authored prose in English. "
                     "Use boolean stop and a string plan. Encode quotes/backslashes/newlines inside strings. "
                     "Use the retained evidence to choose a bounded action. Validation error: " + str(error)[:500]}]
                 harp.append_event(run_dir, {"type": "oracle_format_retry", "attempt": attempt + 2})
@@ -486,7 +487,7 @@ def run(run_dir: Path) -> None:
                           if model_options else int(cfg.get("max_tokens", 1024)),
             **model_options,
             "messages": [{"role": "system", "content":
-                "You are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
+                harp.ENGLISH_ONLY + "\nYou are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
                 "objective for the proxy model. Never claim a flag without terminal evidence. "
                 "The flags_found fields are the authoritative capture status. If a flag appears in "
                 "terminal evidence but is not captured, delegate one isolated read of that exact flag "

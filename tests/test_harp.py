@@ -1313,6 +1313,7 @@ class HarpTests(unittest.TestCase):
                 harp.delegate(path, "Inspect the service", 1, quiet=True)
             saved = harp.load_session(path)
             self.assertEqual(len(prompts), 3)
+            self.assertTrue(all(harp.ENGLISH_ONLY in prompt for prompt in prompts))
             self.assertIn("FORMAT RETRY", prompts[1])
             self.assertEqual(saved["last_delegate_stop"], "local_done")
             self.assertEqual(saved["local_steps"], 0)

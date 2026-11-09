@@ -69,6 +69,7 @@ class ZAITests(unittest.TestCase):
             self.assertEqual(chat.call_args.args[0]["temperature"], 1.1)
             self.assertEqual(chat.call_args.args[0]["top_p"], 0.93)
             self.assertEqual(chat.call_args.args[1]["max_tokens"], 8192)
+            self.assertIn(harp.ENGLISH_ONLY, chat.call_args.args[1]["messages"][0]["content"])
             self.assertIsNone(harp.load_session(path)["oracle_calls"][0]["estimated_usd"])
 
     def test_oracle_repairs_invalid_json_without_another_execution_cycle(self):
@@ -86,6 +87,8 @@ class ZAITests(unittest.TestCase):
                 harp_nim.run(path)
             delegate.assert_not_called()
             self.assertEqual(chat.call_count, 2)
+            for call in chat.call_args_list:
+                self.assertIn(harp.ENGLISH_ONLY, call.args[1]["messages"][0]["content"])
             self.assertIn("FORMAT RETRY", chat.call_args.args[1]["messages"][-1]["content"])
             self.assertEqual(len(harp.load_session(path)["oracle_calls"]), 2)
             self.assertEqual(harp_nim.oracle_history(path)["cycles"], 1)

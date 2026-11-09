@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require English model-authored prose in proxy and hosted-oracle prompts, including format retries, while preserving exact evidence and executable content.
 - Restored live dashboard orbits and success-dismissal confetti when Windows animations are disabled. Added a shared On / Follow system setting / Off interface preference for live motion, replay and confetti, including settings backups.
 - Recognize terminal control sequences and separately echoed flag reads in Evil-WinRM transcripts, including both flags from one session, and stop automatically on verified captures.
 - Request Z.AI JSON output for oracle and proxy calls. Retry invalid oracle decisions twice with validation feedback and full usage accounting before stopping.
