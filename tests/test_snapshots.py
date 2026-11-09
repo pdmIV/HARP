@@ -26,7 +26,7 @@ class SnapshotTests(unittest.TestCase):
             path = Path(temp) / "harp.json"
             original = self.config()
             path.write_text(json.dumps(original))
-            ui = {**snapshots.UI_DEFAULTS, "theme": "amoled", "mode": "frontier-only", "replay_speed": "8"}
+            ui = {**snapshots.UI_DEFAULTS, "theme": "amoled", "mode": "frontier-only", "replay_speed": "8", "animation_mode": "system"}
             backup = snapshots.export(path, original, ui)
             self.assertNotIn("keys", backup)
             self.assertEqual(backup["config"], original)
@@ -55,7 +55,7 @@ class SnapshotTests(unittest.TestCase):
             before = path.read_bytes()
             valid = snapshots.export(path, cfg, {})
             variants = [None, {}, {**valid, "version": 2}, {**valid, "version": True},
-                        {**valid, "ui": {"theme": "unknown"}}, {**valid, "keys": {"unknown": "key"}},
+                        {**valid, "ui": {"theme": "unknown"}}, {**valid, "ui": {"animation_mode": "unknown"}}, {**valid, "keys": {"unknown": "key"}},
                         {**valid, "keys": {"zai": "has whitespace"}}, {**valid, "created_at": "invalid"},
                         {**valid, "config": {**cfg, "max_steps": 0}},
                         {**valid, "config": {**cfg, "objective": "x" * 50000}},

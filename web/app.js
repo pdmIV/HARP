@@ -78,11 +78,25 @@
   const orbitAngles = [...orbitStartAngles];
   const orbitDirections = [1, -0.78, 1.18];
   const reducedOrbitMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  let animationMode = "on";
   let orbitRunning = false;
   let orbitStartedAt = 0;
   let orbitLastFrame = 0;
   let orbitFrame = 0;
   let replayOrbitFrame = 0;
+
+  function animationsEnabled() {
+    return animationMode === "on" || (animationMode === "system" && !reducedOrbitMotion.matches);
+  }
+
+  function syncAnimations() {
+    $("animationMode").value = animationMode;
+    if (!animationsEnabled()) $("successConfetti").replaceChildren();
+    if (replay) renderReplayOrbits(replay.seconds);
+    syncReplayOrbitMotion();
+    setOrbitRunning(!replay && (startPending || sessions.some(session =>
+      session.status === "active" || session.status === "recon")));
+  }
 
   function easeOrbit(value) {
     const t = Math.max(0, Math.min(1, value));
@@ -108,7 +122,7 @@
   }
 
   function renderReplayOrbits(seconds) {
-    const travel = orbitTravel(seconds);
+    const travel = animationsEnabled() ? orbitTravel(seconds) : 0;
     orbitRings.forEach((ring, index) => {
       orbitAngles[index] = (orbitStartAngles[index] + travel * orbitDirections[index]) % 360;
       ring.style.transform = `rotate(${orbitAngles[index]}deg)`;
@@ -116,7 +130,7 @@
   }
 
   function replayOrbitTick(now) {
-    if (!replay || replay.loading || !replay.playing) {
+    if (!replay || replay.loading || !replay.playing || !animationsEnabled()) {
       replayOrbitFrame = 0;
       return;
     }
@@ -130,12 +144,12 @@
   function syncReplayOrbitMotion() {
     if (replayOrbitFrame) cancelAnimationFrame(replayOrbitFrame);
     replayOrbitFrame = 0;
-    if (replay && !replay.loading && replay.playing)
+    if (replay && !replay.loading && replay.playing && animationsEnabled())
       replayOrbitFrame = requestAnimationFrame(replayOrbitTick);
   }
 
   function orbitTick(now) {
-    if (!orbitRunning || reducedOrbitMotion.matches) return;
+    if (!orbitRunning || !animationsEnabled()) return;
     const elapsed = (now - orbitStartedAt) / 1000;
     const delta = Math.min((now - orbitLastFrame) / 1000, 0.1);
     orbitLastFrame = now;
@@ -148,7 +162,7 @@
   }
 
   function setOrbitRunning(running) {
-    if (reducedOrbitMotion.matches) running = false;
+    if (!animationsEnabled()) running = false;
     if (running === orbitRunning) return;
     orbitRunning = running;
     if (orbitFrame) cancelAnimationFrame(orbitFrame);
@@ -159,12 +173,7 @@
     }
   }
 
-  reducedOrbitMotion.addEventListener("change", () => {
-    if (replay) renderReplayOrbits(replay.seconds);
-    syncReplayOrbitMotion();
-    setOrbitRunning(!replay && (startPending || sessions.some(session =>
-      session.status === "active" || session.status === "recon")));
-  });
+  reducedOrbitMotion.addEventListener("change", syncAnimations);
 
   function acknowledgeSuccess(session) {
     if (!token || replay || session.success_viewed || successAcknowledgments.has(session.id)) return;
@@ -237,6 +246,7 @@
 
   function interfaceSettings() {
     return {theme: document.documentElement.dataset.theme, mode: $("modeSelect").value || "hybrid",
+      animation_mode: animationMode,
       replay_speed: $("replaySpeed").value || "1", replay_skip_idle: !!$("replaySkipIdle").checked,
       fresh_recon: !!$("freshRecon").checked, api_key_provider: $("apiKeyProvider").value || "openai"};
   }
@@ -249,11 +259,13 @@
   function applyInterfaceSettings(value) {
     if (!value || typeof value !== "object") return;
     if (themes.includes(value.theme)) applyTheme(value.theme);
+    if (["on", "system", "off"].includes(value.animation_mode)) animationMode = value.animation_mode;
     if (["hybrid", "local-only", "frontier-only"].includes(value.mode)) $("modeSelect").value = value.mode;
     if (["1", "2", "4", "8", "16", "32"].includes(value.replay_speed)) $("replaySpeed").value = value.replay_speed;
     if (typeof value.replay_skip_idle === "boolean") $("replaySkipIdle").checked = value.replay_skip_idle;
     if (typeof value.fresh_recon === "boolean") $("freshRecon").checked = value.fresh_recon;
     if (["openai", "zai", "nvidia_nim", "unsloth"].includes(value.api_key_provider)) $("apiKeyProvider").value = value.api_key_provider;
+    syncAnimations();
     rememberInterfaceSettings();
   }
 
@@ -1348,6 +1360,11 @@
     localStorage.setItem("harpTheme", next);
     rememberInterfaceSettings();
   });
+  $("animationMode").addEventListener("change", () => {
+    animationMode = $("animationMode").value;
+    syncAnimations();
+    rememberInterfaceSettings();
+  });
   $("saveSession").addEventListener("click", saveSessionArchive);
   $("importSession").addEventListener("click", () => $("sessionArchiveFile").click());
   $("sessionArchiveFile").addEventListener("change", () => importSessionArchive($("sessionArchiveFile").files[0]));
@@ -1370,7 +1387,7 @@
   }));
   $("artifactSearch").addEventListener("input", () => renderArtifacts(true));
   function celebrateWithConfetti() {
-    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!animationsEnabled()) return;
     const layer = $("successConfetti");
     const sample = el("span", "confetti-piece");
     if (typeof sample.animate !== "function") return;

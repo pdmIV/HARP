@@ -126,7 +126,8 @@ def inspect_session(session: str) -> str:
                        "smb_tool_guidance": harp_whippet.SMB_TOOL_GUIDANCE,
                        "flags": harp_artifacts.flag_status(run_path(session)),
                        "artifacts": harp_artifacts.list_artifacts(run_path(session)),
-                       "recent_observations": [harp_whippet.observation(x, 3000)
+                       "recent_observations": [harp_whippet.observation(x, 8000 if
+                                               harp_whippet.is_handoff(x.get("command", "")) else 3000)
                                                if harp_whippet.is_query(x.get("command", "")) else x
                                                for x in state["observations"][-4:]],
                        "memory_notes": state["memory_notes"][-12:]}, indent=2)
@@ -178,13 +179,13 @@ def terminal(session: str, command: str) -> str:
         path = run_path(session)
         harp.direct_exec(path, command, quiet=True)
         result = harp.load_session(path)["observations"][-1]
-        return json.dumps(harp_whippet.observation(result, 3000))
+        return json.dumps(harp_whippet.observation(result, 8000 if harp_whippet.is_handoff(command) else 3000))
     return captured(lambda: harp.direct_exec(run_path(session), command))
 
 
 def whippet_query(session: str, inputs: list[str], request: dict, refresh: bool = False) -> str:
     result = harp.whippet_query(run_path(session), inputs, request, refresh=refresh)
-    return json.dumps(harp_whippet.observation(result, 3000))
+    return json.dumps(harp_whippet.observation(result, 8000 if request.get("mode") == "handoff" else 3000))
 
 
 def terminal_root(session: str, command: str) -> str:

@@ -51,6 +51,7 @@ When you recover a credential, document excerpt, or other useful artifact, you m
 to your JSON action. HARP records it only if that value appears in terminal evidence.
 Passwords and NTLM/LM:NTLM hashes are credential artifacts, never flag artifacts.
 Use kind=flag only for user.txt or root.txt read from the corresponding file.
+Read each flag with its own file-reading command and preserve the unmodified output.
 Report recovered artifacts on your next reply, even when ending the objective.
 Avoid repeating commands. No interactive programs. Do not run sudo; use needs_root
 to request approval if a root command is essential.
@@ -70,7 +71,9 @@ def system_prompt(session: dict) -> str:
     prompt = SYSTEM + "\n" + harp_whippet.SMB_TOOL_GUIDANCE
     prompt += ("\nPreserve relevant downloaded image evidence using a standalone JSON action "
                '{"capture_file":{"path":"absolute Kali workspace file","title":"evidence label"},"done":false}. '
-               "The file must be inside this session's workspace. Do not print binary or base64 to the terminal.")
+               "The file must be inside this session's workspace. Omit command, artifact and all other actions; "
+               "do not combine capture_file with a command or done=true. Capture first, finish on the next reply. "
+               "Do not print binary or base64 to the terminal.")
     if supports_image_input(session.get("config", {}).get("local", {})):
         prompt += ("\nWhen the oracle's objective asks you to read a relevant PNG/JPEG, return "
                    '{"read_image":{"path":"absolute Kali workspace file","title":"evidence label"},"done":false}. '
@@ -784,7 +787,8 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
     for attempt in range(7):
         reduced = copy.deepcopy(context)
         reduced["recent_terminal_results"] = [
-            harp_whippet.observation(item, output_chars)
+            harp_whippet.observation(item, max(output_chars, 8000) if attempt == 0 and
+                                       harp_whippet.is_handoff(item.get("command", "")) else output_chars)
             for item in reduced["recent_terminal_results"]
         ]
         reduced["unverified_memory_notes"] = [
@@ -897,6 +901,20 @@ def json_object(text: str, *, allow_preamble: bool = False) -> dict:
 
 def null_auth_objective(objective: str) -> bool:
     return bool(re.search(r"\b(?:null|anonymous|guest)\b", objective, re.I))
+
+
+def validate_file_action(action: dict) -> None:
+    """Reject mixed file actions before executing or recording any part of them."""
+    names = [name for name in ("read_image", "capture_file") if name in action]
+    if not names:
+        return
+    request = action[names[0]]
+    if (len(names) != 1 or not isinstance(request, dict) or set(request) != {"path", "title"}
+            or any(not isinstance(request[k], str) or not request[k].strip() for k in request)
+            or any(action.get(k) not in (None, "", False) for k in
+                   ("command", "whippet_query", "artifact", "memory_query", "needs_root", "needs_oracle"))
+            or action.get("done") is not False):
+        raise ValueError("Use one standalone read_image or capture_file action with path, title and done=false; omit command and all other actions")
 
 
 def local_command_issue(command: str, target: str, objective: str,
@@ -1566,6 +1584,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     previous_hash = None
     repeated_output = 0
     invalid = 0
+    whippet_rejections = 0
     structured_mode = False
     validation_feedback = ""
     format_rejections = 0
@@ -1589,9 +1608,11 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "target": session["target"], "target_os": "unknown until verified",
                 "authorized_scope": cfg.get("authorized_scope", []),
                 "delegated_objective": objective, "recon": session["recon"],
+                "workspace": session.get("workspace", "/workspace"),
                 "http_probes": session.get("http_probes", []),
                 "smb_probes": session.get("smb_probes", []),
                 "whippet": session.get("whippet") if harp_whippet.relevant(session) else None,
+                "whippet_query_history": harp_whippet.query_history(session),
                 "last_command_feedback": validation_feedback,
                 "step": step, "remaining": None if unbridled or unlimited_budget else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
@@ -1630,12 +1651,16 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 stop_reason = "proxy_api_error"
                 raise
             try:
+                if session["local_calls"] and session["local_calls"][-1].get("finish_reason") == "length":
+                    raise ValueError("Proxy completion was truncated; return a shorter complete action")
                 action = json_object(reply, allow_preamble=True)
-            except (json.JSONDecodeError, ValueError):
+                validate_file_action(action)
+            except (json.JSONDecodeError, ValueError) as error:
                 invalid += 1
                 call = session["local_calls"][-1]
                 excerpt = "[reasoning reply omitted]" if reply.lstrip().startswith("<think>") else reply[:2000]
                 append_event(run_dir, {"type": "invalid_local_reply", "text": excerpt,
+                                       "validation_error": str(error)[:500],
                                        "finish_reason": call.get("finish_reason"),
                                        "reasoning_chars": call.get("reasoning_chars", 0)})
                 validation_feedback = (
@@ -1643,6 +1668,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     "Return exactly one JSON object, starting with { and ending with }. "
                     "Do not add narration, markdown, examples, or multiple objects. "
                     "Use the existing terminal evidence to choose the next action; do not repeat completed commands. "
+                    "For capture_file/read_image omit command and all other actions and set done=false. "
                     'If finished, return {"done":true,"finding":"evidence-based conclusion"}.')
                 if invalid == 1 and not structured_mode:
                     structured_mode = True
@@ -1662,12 +1688,6 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 try:
                     name = "read_image" if "read_image" in action else "capture_file"
                     request = action[name]
-                    if (not isinstance(request, dict) or set(request) != {"path", "title"}
-                            or any(not isinstance(request[k], str) or not request[k].strip() for k in request)
-                            or any(k in action for k in ("command", "whippet_query", "artifact", "memory_query", "needs_root", "needs_oracle"))
-                            or action.get("done") is not False
-                            or ("read_image" in action and "capture_file" in action)):
-                        raise ValueError("Use one standalone read_image or capture_file action with path, title and done=false")
                     if name == "read_image" and not supports_image_input(action_model):
                         raise ValueError("Selected proxy does not support HARP image input; ask the oracle for help")
                     identity = name + ":" + request["path"]
@@ -1763,9 +1783,23 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                         break
                     result = whippet_query(run_dir, batch_action.get("inputs"), batch_action.get("request"),
                                            refresh=batch_action.get("refresh", False), session=session, origin="local")
+                    session.pop("oracle_help_request", None)
                     seen.add(normalized)
                     command = result["command"]
-                except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
+                except ValueError as error:
+                    whippet_rejections += 1
+                    validation_feedback = ("Whippet query was rejected before execution: " + str(error)[:1000]
+                        + ". Use captures under workspace=" + session.get("workspace", "/workspace")
+                        + "; correct inputs/request without refresh or a CLI fallback. Do not recollect existing data.")
+                    append_event(run_dir, {"type": "whippet_query_rejected", "step": step,
+                                           "reason": validation_feedback})
+                    session["oracle_help_request"] = validation_feedback
+                    save_session(run_dir, session)
+                    if whippet_rejections >= 2:
+                        stop_reason = "whippet_query_rejected"
+                        break
+                    continue
+                except (RuntimeError, OSError, subprocess.TimeoutExpired) as error:
                     append_event(run_dir, {"type": "whippet_batch_error", "error": str(error)[:1000]})
                     session["oracle_help_request"] = "Whippet query failed: " + str(error)[:1000]
                     stop_reason = "whippet_batch_error"

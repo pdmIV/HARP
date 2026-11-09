@@ -67,6 +67,18 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(len({x["request"]["id"] for x in self.events if x["type"] == "whippet_batch_request"}), 3)
         self.assertTrue(any(x["type"] == "whippet_batch_response" for x in self.events))
 
+    def test_handoff_mode_preserves_one_lead_and_rejects_model_verification(self):
+        client = self.client()
+        reply = client.request({"mode": "handoff", "node": "USER", "query": "acl-control", "lead_index": 0})
+        self.assertEqual(reply["result"]["lead"]["proof"], [{"edge": "GenericAll"}])
+        self.assertEqual(reply["result"]["assessment"]["live_access"]["status"], "unverified")
+        batch.validate(["capture.zip"], {"mode": "handoff", "node": "USER", "lead_index": 0})
+        for invalid in ({"mode": "handoff", "node": "USER", "lead_index": -1},
+                        {"mode": "handoff", "node": "USER", "lead_index": True},
+                        {"mode": "handoff", "node": "USER", "verified_access": True}):
+            with self.assertRaises(ValueError):
+                batch.validate(["capture.zip"], invalid)
+
     def test_transport_errors_invalidate_and_cleanup(self):
         for behavior in ("bad-id", "bad-index", "malformed", "eof", "oversize", "timeout"):
             with self.subTest(behavior=behavior):
@@ -103,6 +115,39 @@ class BatchTests(unittest.TestCase):
             query()
         fourth = query(refresh=True)
         self.assertNotEqual(third["batch"]["session_id"], fourth["batch"]["session_id"])
+
+    def test_identical_queries_reuse_evidence_until_capture_changes(self):
+        def query(**kwargs):
+            return batch.query(self.root, self.terminal, ["capture.zip"], {"mode": "triage", "node": "USER"},
+                               "normal", self.events.append, **kwargs)
+        first = query()
+        cached = query()
+        self.assertTrue(cached["harp_cache"]["reused"])
+        self.assertEqual(first["id"], cached["id"])
+        self.assertEqual(sum(e["type"] == "whippet_batch_request" for e in self.events), 1)
+        cached["result"]["items"].clear()
+        self.assertTrue(query()["result"]["items"])
+        (self.root / "capture.zip").write_text("changed capture")
+        fresh = query()
+        self.assertNotIn("harp_cache", fresh)
+        self.assertNotEqual(first["batch"]["session_id"], fresh["batch"]["session_id"])
+        refreshed = query(refresh=True)
+        self.assertNotIn("harp_cache", refreshed)
+
+    def test_wrapped_transport_failure_is_fatal_and_needs_refresh(self):
+        with self.assertRaisesRegex(RuntimeError, "transport failed"):
+            batch.query(self.root, self.terminal, ["capture.zip"], {"mode": "triage", "node": "USER"},
+                        "malformed", self.events.append)
+        with self.assertRaisesRegex(RuntimeError, "failed earlier"):
+            batch.query(self.root, self.terminal, ["capture.zip"], {"mode": "triage", "node": "USER"},
+                        "normal", self.events.append)
+
+    def test_startup_protocol_failure_is_not_a_correctable_query_rejection(self):
+        with self.assertRaisesRegex(RuntimeError, "startup failed"):
+            batch.query(self.root, self.terminal, ["capture.zip"], {"mode": "triage", "node": "USER"},
+                        "bad-ready", self.events.append)
+        self.assertTrue((self.root / "whippet_batch_failed.json").exists())
+        self.assertFalse((self.root / "whippet_batch.json").exists())
 
     def test_capture_cannot_escape_workspace_or_be_absent(self):
         for inputs in (["../README.md"], ["missing.zip"]):
@@ -178,6 +223,37 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(saved["last_delegate_stop"], "step_budget")
         self.assertEqual(saved["observations"][0]["output"], result["output"])
         self.assertEqual(query.call_args.kwargs["origin"], "local")
+
+    def test_proxy_can_correct_capture_path_without_resume_or_cli_fallback(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        state = {"status": "active", "mode": "hybrid", "container": "test", "config": cfg,
+                 "target": "target", "workspace": "/workspace", "recon": [{"port": 88}, {"port": 389}],
+                 "local_steps": 0, "local_calls": [], "observations": [], "memory_notes": [],
+                 "oracle_actions": 0, "whippet": {"batch_compatible": True}, "success": "unknown"}
+        harp.save_session(self.root, state)
+        contexts = []
+        def chat(_model, _system, user, ledger):
+            contexts.append(json.loads(user))
+            ledger.append({"finish_reason": "stop"})
+            return json.dumps({"whippet_query": {"inputs": ["/home/kali/capture.zip" if len(contexts) == 1 else "/workspace/capture.zip"],
+                               "request": {"mode": "triage", "node": "USER"}}, "done": False})
+        result = {"command": "whippet-query triage id=test", "output": json.dumps({
+            "schema_version": 1, "mode": "triage", "result": {"items": []}}),
+            "exit_code": 0, "truncated": False}
+        terminal = type("Terminal", (), {"stats": lambda self: None})()
+        with patch.object(harp, "terminal_for", return_value=terminal), \
+             patch.object(harp, "ensure_whippet"), patch.object(harp, "model_context_tokens", return_value=8192), \
+             patch.object(harp, "count_chat_tokens", return_value=300), \
+             patch.object(harp, "api_chat", side_effect=chat), \
+             patch.object(harp, "whippet_query", side_effect=[ValueError("Capture outside session workspace"), result]) as query:
+            harp.delegate(self.root, "Inspect one AD lead", 1, quiet=True)
+        self.assertIn("rejected before execution", contexts[1]["last_command_feedback"])
+        self.assertEqual(contexts[1]["workspace"], "/workspace")
+        self.assertEqual(query.call_args.args[1], ["/workspace/capture.zip"])
+        saved = harp.load_session(self.root)
+        self.assertEqual(saved["local_steps"], 1)
+        self.assertEqual(saved["last_delegate_stop"], "step_budget")
+        self.assertNotIn("oracle_help_request", saved)
 
 
 if __name__ == "__main__":

@@ -1166,6 +1166,43 @@ class HarpTests(unittest.TestCase):
             harp.finish_session(path, "yes")
             self.assertEqual(harp.load_session(path)["finished_at"], state["finished_at"])
 
+    def test_winrm_control_sequences_and_two_flag_reads_are_correlated(self):
+        command = "printf '%s\\n' 'type C:\\Users\\Admin\\Desktop\\root.txt' 'type C:\\Users\\Lab\\Desktop\\user.txt' exit | evil-winrm -i target -u lab"
+        prompt = "\x01\x1b[0;31m\x02*Evil-WinRM*\x01\x1b[0m\x02 PS C:\\Users\\Lab> "
+        output = (prompt + "\x1b[?25l\x1b[1G\x1b[K" + prompt + "type C:\\Users\\Admin\\Desktop\\root.txt\r\r\n"
+                  + "\x1b[1G" + "b" * 32 + "\n" + prompt + "type C:\\Users\\Lab\\Desktop\\user.txt\r\r\n"
+                  + "\x1b[1G" + "a" * 32 + "\n" + prompt + "exit\nInfo: Exiting with code 0")
+        result = {"command": command, "output": output, "exit_code": 0}
+        self.assertEqual(harp_artifacts.flag_values_from_result(result), [("root.txt", "b" * 32), ("user.txt", "a" * 32)])
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            terminal = DummyTerminal()
+            terminal.run = lambda c, *_a, **_k: {**result, "command": c, "seconds": 0.1}
+            with patch.object(harp, "terminal_for", return_value=terminal), patch.object(harp, "docker"), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", return_value=json.dumps({"command": command, "done": False})) as chat:
+                harp.delegate(path, "Read both flag files", 5, quiet=True)
+            self.assertEqual(chat.call_count, 1)
+            self.assertEqual(harp.load_session(path)["status"], "finished")
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "flags_captured")
+            self.assertTrue(all(f["found"] for f in harp_artifacts.flag_status(path).values()))
+
+    def test_winrm_does_not_guess_ambiguous_or_failed_flag_reads(self):
+        command = "printf '%s\\n' 'type user.txt' 'type root.txt' | evil-winrm -i target -u lab"
+        prompt = "*Evil-WinRM* PS C:\\Users\\Lab> "
+        for output in ("a" * 32 + "\n" + "b" * 32,
+                       prompt + "type user.txt; type root.txt\n" + "a" * 32,
+                       prompt + "echo user.txt\n" + "a" * 32,
+                       prompt + "type user.txt\nAccess denied\n" + "a" * 32,
+                       prompt + "type user.txt\n" + "a" * 32 + "\n" + "b" * 32):
+            with self.subTest(output=output):
+                self.assertEqual(harp_artifacts.flag_values_from_result({"command": command, "output": output, "exit_code": 0}), [])
+        result = {"command": command, "output": prompt + "type user.txt\n" + "a" * 32, "exit_code": 0}
+        self.assertEqual(harp_artifacts.flag_values_from_result({**result, "exit_code": 1}), [])
+        self.assertEqual(harp_artifacts.flag_values_from_result({**result, "truncated": True}), [])
+
     def test_netexec_flags_require_unambiguous_file_read_evidence(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)

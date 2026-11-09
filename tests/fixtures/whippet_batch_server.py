@@ -11,7 +11,7 @@ session = "test-" + token
 print("collector diagnostic", file=sys.stderr, flush=True)
 print(json.dumps({"schema_version": 1, "protocol_version": 2 if behavior == "bad-ready" else 1,
                   "event": "ready", "session_id": session,
-                  "modes": ["triage", "ping", "shutdown", "node", "objects"],
+                  "modes": ["triage", "handoff", "ping", "shutdown", "node", "objects"],
                   "max_request_characters": 65536}), flush=True)
 index = 0
 for line in sys.stdin:
@@ -29,6 +29,12 @@ for line in sys.stdin:
                 "warnings": [], "unresolved_nodes": 0,
                 "result": {"status": "ready", "items": [{"source": "USER", "target": "SVC", "type": "GenericAll"}],
                            "total": 1, "offset": 0, "next_offset": None, "truncated": False}}
+    if request["mode"] == "handoff":
+        response["result"] = {"lead": {"source": "USER", "target": "SVC", "proof": [{"edge": "GenericAll"}]},
+                              "assessment": {"live_access": {"status": "unverified"},
+                                             "unverified_prerequisites": ["Check effective right"]},
+                              "coverage": {"profile": "supported"}, "total_leads": 1,
+                              "next_lead_index": None}
     if request.get("node") == "MISSING":
         response.pop("result")
         response["error"] = "Unknown node"

@@ -42,7 +42,9 @@ The launcher opens a browser on `127.0.0.1:8765`. Codex can launch it through `l
 
 The **Stop session** button requests a stop after the current command, ends the active run, and removes its Kali container in Docker mode. WSL sessions leave their Kali workspace on disk. Finished sessions can be deleted from the Outcome card or session list; deletion permanently removes the HARP session record, logs, artifacts, and captured files. It does not remove a WSL workspace. The configured proxy step limit applies afresh to each delegation from an oracle plan unless unlimited budget is selected. Cumulative proxy steps and model calls remain session statistics.
 
-**Flags** shows the actual `user.txt` and `root.txt` values. An alert blinks in the side navigation while a newly captured flag is unseen, and opening Flags acknowledges it. A successful file-reading command that names exactly one flag file and returns a line containing only one 32-character hexadecimal value is captured automatically, including NetExec's service/host-prefixed stdout. When both flags have terminal evidence, HARP timestamps verified success, stops delegation, and finishes the session automatically. The timer stops and a green celebration dialog appears. Other flag formats can be recorded with the evidence-backed `record_artifact` MCP tool.
+**Flags** shows the actual `user.txt` and `root.txt` values. An alert blinks in the side navigation while a newly captured flag is unseen, and opening Flags acknowledges it. A successful file-reading command that names exactly one flag file and returns a line containing only one 32-character hexadecimal value is captured automatically, including NetExec's service/host-prefixed stdout. Evil-WinRM terminal control sequences are stripped before matching. A transcript can capture both flags when separate echoed file-reading commands each have one unambiguous value; HARP does not guess their order from two bare hashes. When both flags have terminal evidence, HARP timestamps verified success, stops delegation, and finishes the session automatically. The timer stops and a green celebration dialog appears. Other flag formats can be recorded with the evidence-backed `record_artifact` MCP tool.
+
+Z.AI oracle and proxy requests use [JSON output mode](https://docs.z.ai/guides/capabilities/struct-output), followed by local validation. Invalid oracle decisions receive up to two format retries before stopping, with each call included in usage and costs. These retries do not execute actions or consume additional execution cycles. Mixed proxy file/command actions are also rejected before execution and receive bounded format feedback. Truncated replies are rejected. Provider/API failures, root approvals and Whippet transport failures retain their existing stop controls.
 
 **Artifacts** shows credentials, document excerpts, flags, and other evidence with source commands. Values are visible in full. The proxy model may nominate an artifact, but HARP records it only when its exact value appears in terminal or deterministic HTTP probe output. Codex can use `record_artifact` for an evidence-backed item it identifies. For a regular file under the session's Kali workspace, `capture_document` preserves up to 8 MiB through the selected runtime, records a text preview and SHA-256, and adds a download button to the panel. Binary files are available as downloads and are not rendered inline. Artifact proposals are checked against existing evidence and again after their accompanying command completes, so matching evidence is registered before the next model request. The dashboard displays registered artifacts on its next live poll (normally within 1.3 seconds).
 
@@ -102,6 +104,14 @@ The success dialog is acknowledged when displayed. HARP saves this per session,
 so viewing that session in a later web UI instance or another browser does not
 show the same confirmation again. This UI acknowledgment does not modify the
 experiment outcome, flag visibility, timing, or human-intervention record.
+
+Closing the success dialog triggers one confetti burst. **Configuration → Dashboard
+animations** controls confetti and both live/replay orbits. **On** is the default,
+including when Windows animations are disabled. **Follow system setting** respects
+the browser's reduced-motion preference; **Off** disables these animations. Changes
+apply immediately, save in this browser and are included in configuration snapshots.
+Live orbits start while a new session is being prepared, continue through
+reconnaissance and active execution, and stop when the run finishes.
 
 The event-stream status uses a steady dot and one of three labels:
 

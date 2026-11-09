@@ -15,7 +15,7 @@ VERSION = 1
 MAX_BYTES = 48 * 1024
 KEY_FILES = {"openai": "openai.key", "zai": "zai.key", "nvidia_nim": "nvidia.key", "unsloth": "unsloth.key"}
 UI_DEFAULTS = {"theme": "light", "mode": "hybrid", "replay_speed": "1", "replay_skip_idle": True,
-               "fresh_recon": False, "api_key_provider": "openai"}
+               "fresh_recon": False, "api_key_provider": "openai", "animation_mode": "on"}
 
 
 def ui_settings(value):
@@ -23,7 +23,8 @@ def ui_settings(value):
         raise ValueError("Invalid interface settings")
     result = {**UI_DEFAULTS, **value}
     for name, choices in {"theme": ("light", "dark", "amoled"), "mode": ("hybrid", "local-only", "frontier-only"),
-                          "replay_speed": ("1", "2", "4", "8", "16", "32"), "api_key_provider": tuple(KEY_FILES)}.items():
+                          "replay_speed": ("1", "2", "4", "8", "16", "32"), "api_key_provider": tuple(KEY_FILES),
+                          "animation_mode": ("on", "system", "off")}.items():
         if result[name] not in choices:
             raise ValueError("Invalid interface setting: " + name)
     if any(type(result[k]) is not bool for k in ("replay_skip_idle", "fresh_recon")):

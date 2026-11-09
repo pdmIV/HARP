@@ -121,14 +121,33 @@ class ImageTests(unittest.TestCase):
             self.assertTrue(inspection["proxy_image_input_available"])
             self.assertIn("synthetic-example", inspection["unverified_local_conclusion"])
 
-    def test_unsupported_model_and_conflicting_actions_stop_without_commands(self):
-        for model, action in [("glm-5.3", {"read_image": {"path": "/workspace/clue.png", "title": "Clue"}, "done": False}),
-                              (None, {"read_image": {"path": "/workspace/clue.png", "title": "Clue"}, "command": "id", "done": False})]:
-            with self.subTest(model=model), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
-                path = Path(temp)
-                self.run_delegate(path, [action], model)
-                self.assertEqual(harp.load_session(path)["last_delegate_stop"], "image_action_error")
-                self.assertEqual(harp_artifacts.list_artifacts(path), [])
+    def test_unsupported_model_stops_without_commands(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.run_delegate(path, [{"read_image": {"path": "/workspace/clue.png", "title": "Clue"}, "done": False}], "glm-5.3")
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "image_action_error")
+            self.assertEqual(harp_artifacts.list_artifacts(path), [])
+
+    def test_mixed_capture_action_is_repaired_before_any_command_or_capture(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.run_delegate(path, [
+                {"capture_file": {"path": "/workspace/clue.png", "title": "Clue"}, "command": "true", "done": True},
+                {"capture_file": {"path": "/workspace/clue.png", "title": "Clue"}, "command": "", "done": False},
+                {"done": True, "finding": "Preserved"}])
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
+            self.assertEqual(len(harp_artifacts.list_artifacts(path)), 1)
+            events = [json.loads(x) for x in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(e["type"] == "invalid_local_reply" for e in events), 1)
+            self.assertEqual(sum(e["type"] == "local_file_capture" for e in events), 1)
+
+    def test_conflicting_actions_exhaust_format_retries_without_commands(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            action = {"read_image": {"path": "/workspace/clue.png", "title": "Clue"}, "command": "id", "done": False}
+            self.run_delegate(path, [action] * 3)
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "invalid_replies")
+            self.assertEqual(harp_artifacts.list_artifacts(path), [])
 
     def test_capture_only_reports_success_without_sending_pixels(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:

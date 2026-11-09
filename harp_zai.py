@@ -56,6 +56,7 @@ def models() -> list[str]:
 def response_body(config: dict, body: dict) -> dict:
     validate(config)
     payload = {"model": config["model"], "messages": body["messages"], "stream": False,
+            "response_format": {"type": "json_object"},
             "max_tokens": int(body.get("max_tokens", config.get("max_tokens", 8192))),
             "thinking": {"type": "enabled"},
             "reasoning_effort": config.get("reasoning_effort", "low")}

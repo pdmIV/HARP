@@ -29,7 +29,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, renderStartStop, switchSession, cacheCompletedSession, poll, renderDependencies, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setStartPending(value) { startPending = value; }, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -407,12 +407,82 @@ finishedAnimations.forEach(finish => finish());
 assert.equal(confettiLayer.children.length, 0);
 const originalMedia = context.matchMedia;
 context.matchMedia = query => ({matches: query === "(prefers-reduced-motion: reduce)"});
+context.ui.applyInterfaceSettings({animation_mode: "off"});
 nodes.get("successDialog").showModal();
 nodes.get("closeSuccess").handlers.click();
-assert.equal(confettiLayer.children.length, 0, "Reduced motion must disable confetti");
+assert.equal(confettiLayer.children.length, 0, "Off must disable confetti");
+context.ui.applyInterfaceSettings({animation_mode: "on"});
 context.matchMedia = originalMedia;
 document.createElement = originalCreate;
-console.log("Confetti checks passed: explicit dismissal, single burst, particle cleanup, reduced motion.");
+console.log("Confetti checks passed: explicit dismissal, single burst, particle cleanup, animation preference.");
+
+// Exercise actual animation frames, including Windows' reduced-motion setting.
+{
+  const motionNodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(x => [x[1], element()]));
+  const rings = Array.from({length: 3}, () => ({style: {}}));
+  const frames = new Map(), mediaHandlers = {}, stored = new Map();
+  let clock = 1000, nextFrame = 0;
+  const systemMotion = {matches: true, addEventListener(name, handler) { mediaHandlers[name] = handler; }};
+  const motionContext = {...context,
+    document: {...document, documentElement: element(), getElementById: id => motionNodes.get(id),
+      querySelectorAll: selector => selector === ".hero-graphic .orbit" ? rings : [],
+      createElement: () => {
+        const piece = element();
+        piece.remove = () => motionNodes.get("successConfetti").removeChild(piece);
+        piece.animate = () => ({finished: new Promise(() => {})});
+        return piece;
+      }},
+    localStorage: {getItem: key => stored.get(key) || null, setItem: (key, value) => stored.set(key, value)},
+    performance: {now: () => clock},
+    requestAnimationFrame: callback => { frames.set(++nextFrame, callback); return nextFrame; },
+    cancelAnimationFrame: id => frames.delete(id),
+    matchMedia: query => query === "(prefers-reduced-motion: reduce)" ? systemMotion : {matches: false}};
+  delete motionContext.ui;
+  vm.createContext(motionContext); vm.runInContext(source, motionContext);
+  const tick = () => { clock += 100; const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn(clock)); };
+  motionContext.ui.setStartPending(true);
+  motionContext.ui.renderStartStop();
+  assert.equal(frames.size, 1, "Live startup schedules animation even when OS animations are off");
+  tick();
+  const initial = rings.map(ring => ring.style.transform);
+  tick();
+  assert(rings.every((ring, i) => ring.style.transform !== initial[i]), "Every live orbit moves");
+  motionContext.ui.setStartPending(false);
+  for (const status of ["recon", "active"]) {
+    motionContext.ui.setSessions([{id: "live", status}]);
+    motionContext.ui.renderStartStop();
+    assert.equal(frames.size, 1, "Polling retains one animation loop during " + status);
+    tick();
+  }
+  motionNodes.get("successDialog").showModal();
+  motionNodes.get("closeSuccess").handlers.click();
+  assert.equal(motionNodes.get("successConfetti").children.length, 90, "Default On restores confetti with OS reduced motion");
+  motionContext.ui.applyInterfaceSettings({animation_mode: "system"});
+  assert.equal(frames.size, 0, "Follow system stops live motion when reduced motion is requested");
+  assert.equal(motionNodes.get("successConfetti").children.length, 0);
+  motionNodes.get("successDialog").showModal(); motionNodes.get("closeSuccess").handlers.click();
+  assert.equal(motionNodes.get("successConfetti").children.length, 0, "Follow system also disables confetti");
+  systemMotion.matches = false; mediaHandlers.change();
+  assert.equal(frames.size, 1, "Follow system responds to preference changes");
+  motionContext.ui.setSessions([{id: "live", status: "finished"}]); motionContext.ui.renderStartStop();
+  assert.equal(frames.size, 0, "Completion stops live orbits");
+  const playback = {loading: false, playing: true, seconds: 5, lastTick: clock, duration_seconds: 100};
+  motionContext.ui.setReplay(playback);
+  motionContext.ui.applyInterfaceSettings({animation_mode: "on"});
+  assert.equal(frames.size, 1, "Replay schedules only its own animation loop");
+  tick();
+  const playing = rings[0].style.transform;
+  playback.seconds += 2; tick();
+  assert.notEqual(rings[0].style.transform, playing, "Replay orbits move");
+  playback.playing = false; motionContext.ui.applyInterfaceSettings({animation_mode: "on"});
+  assert.equal(frames.size, 0, "Paused replay has no animation loop");
+  playback.playing = true; motionContext.ui.applyInterfaceSettings({animation_mode: "off"});
+  assert.equal(frames.size, 0, "Off disables replay as well as live motion");
+  assert.equal(JSON.parse(stored.get("harpUiSettings")).animation_mode, "off", "Preference persists");
+  assert.equal(motionContext.ui.interfaceSettings().animation_mode, "off", "Snapshots include animation preference");
+  assert(!fs.readFileSync("web/app.css", "utf8").includes(".confetti-layer{display:none}"), "CSS must not silently override explicit On");
+  console.log("Animation checks passed: live startup/recon/active frames, OS override, confetti, replay, pause, system preference, persistence.");
+}
 
 (async () => {
   let inFlight = 0, maximum = 0;

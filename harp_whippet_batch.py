@@ -2,6 +2,7 @@
 
 import atexit
 import collections
+import copy
 import json
 from pathlib import Path
 import queue
@@ -75,7 +76,7 @@ cancel.unlink(missing_ok=True)
 print("verified-exited")
 '''
 
-MODES = {"summary", "triage", "objects", "findings", "node", "search", "memberships",
+MODES = {"handoff", "summary", "triage", "objects", "findings", "node", "search", "memberships",
          "members", "users", "reachable", "path", "routes", "ranked-paths", "explain",
          "gpo-scope", "trust-path", "catalog", "ping"}
 _clients = {}
@@ -88,6 +89,14 @@ def validate(inputs, request):
         raise ValueError("Supply 1 through 32 capture file paths in the Kali workspace")
     if not isinstance(request, dict) or request.get("mode") not in MODES or "id" in request:
         raise ValueError("Supply one supported query object without id; HARP owns correlation IDs")
+    if set(request) & {"verified_access", "overlay", "overlay-update", "auth_context", "live_access"}:
+        raise ValueError("Model requests cannot supply live-access verification or overlay updates")
+    if request.get("mode") == "handoff":
+        if (not isinstance(request.get("node"), str) or not request["node"]
+                or ("query" in request and not isinstance(request["query"], str))
+                or ("lead_index" in request and (type(request["lead_index"]) is not int
+                                               or request["lead_index"] < 0))):
+            raise ValueError("Handoff requires a principal node, optional query and nonnegative lead_index")
     if len(json.dumps(request, ensure_ascii=True)) > 64000:
         raise ValueError("Whippet query is too large")
 
@@ -105,6 +114,7 @@ class Batch:
         self.closed = threading.Event()
         self.request_lock = threading.Lock()
         self.index = 0
+        self.cache = {}
         self.executable = executable
 
     def event(self, kind, **fields):
@@ -204,6 +214,13 @@ class Batch:
                 raise RuntimeError("Whippet cancelled by operator")
             if request["mode"] not in self.ready["modes"]:
                 raise ValueError("Query mode not advertised by Whippet")
+            cache_key = json.dumps(request, sort_keys=True, separators=(",", ":"))
+            if cache_key in self.cache and self.process.poll() is None:
+                response = copy.deepcopy(self.cache[cache_key])
+                self.event("cache_hit", request=request, response_id=response["id"],
+                           session_id=self.ready["session_id"])
+                response["harp_cache"] = {"reused": True, "response_id": response["id"]}
+                return response
             request = {**request, "id": uuid.uuid4().hex}
             line = json.dumps(request, ensure_ascii=True, separators=(",", ":")) + "\n"
             if len(line) > min(65536, self.ready.get("max_request_characters", 65536)):
@@ -234,6 +251,10 @@ class Batch:
                 self.index += 1
                 self.event("response", response=response, bytes=size,
                            wall_seconds=round(time.monotonic() - started, 4), stderr=list(self.stderr))
+                if "error" not in response and request["mode"] != "ping":
+                    if len(self.cache) >= 32:
+                        self.cache.pop(next(iter(self.cache)))
+                    self.cache[cache_key] = copy.deepcopy(response)
                 return response
             except Exception as error:
                 try:
@@ -339,13 +360,14 @@ def query(run_dir, terminal, inputs, request, executable, event_sink, *, refresh
             except Exception as error:
                 failed.write_text(json.dumps({"error": str(error)}), encoding="utf-8")
                 event_sink({"type": "whippet_batch_error", "error": str(error), "phase": "startup"})
-                raise
+                raise RuntimeError("Whippet startup failed; review error before explicit refresh: " + str(error)) from error
             _clients[key] = client
     try:
         return client.request(request)
     except Exception as error:
         if client.closed.is_set():
             failed.write_text(json.dumps({"error": str(error)}), encoding="utf-8")
+            raise RuntimeError("Whippet transport failed; review error before explicit refresh: " + str(error)) from error
         raise
 
 

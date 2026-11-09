@@ -1,8 +1,9 @@
 # Managed Whippet batch queries
 
-HARP implements Whippet 0.7's NDJSON protocol directly, using its independently
+HARP implements Whippet 0.7+'s NDJSON protocol directly, using its independently
 installed pipx executable. No Whippet Python dependency is added to HARP.
 Readiness protocol 1 and report schema 1 are required.
+Whippet 0.8's `handoff` mode is available when the readiness mode list advertises it.
 
 ## Model entry points
 
@@ -19,6 +20,13 @@ action instead of a shell command:
 {"thought":"Inspect the current account's collected ACL leads","whippet_query":{"inputs":["bloodhound.zip"],"request":{"mode":"findings","query":"acl-control","principal":"USER@LAB.HTB","limit":3}},"done":false}
 ```
 
+After triage, request one complete Whippet 0.8 lead with
+`{"mode":"handoff","node":"USER@LAB.HTB","query":"acl-control","lead_index":0}`.
+The `assessment.live_access` state is unverified offline; retain its proof,
+coverage, prerequisites and next verification question. An empty route's
+`route_diagnostic` does not invalidate earlier findings. HARP does not expose
+Whippet's trusted-host live overlay to models.
+
 The shared instruction card teaches both routes. Queries count against proxy
 step/model budgets and use the normal observation/context-compaction paths.
 Oracle queries are disabled in proxy-only mode. No batch process starts during
@@ -27,10 +35,27 @@ recon, on unrelated targets, or before capture files are supplied.
 Supply 1 through 32 explicit regular files, including optional Certipy JSON.
 Paths are resolved inside the selected Kali runtime and must remain under its
 session workspace after resolving symlinks. Directories are not accepted.
+Both models receive the exact `workspace` in their context. Put collector output
+there and reuse the captures. A path or query validation rejection executes no
+graph query: the proxy receives feedback and one correction opportunity before
+handing the problem back to the oracle. It does not require `refresh` or a switch
+to CLI. Runtime/transport failures still stop and require explicit review.
 HARP hashes the files inside Kali before each query. Unchanged inputs reuse one
 process/graph; changed content or input paths close the old process and start a
 fresh graph before executing the new query. Requests run as the session user,
 with argument arrays rather than interpolated shell commands.
+
+Identical successful requests reuse a bounded in-process response cache for that
+capture snapshot. Cache hits retain the original response ID, proof and paging,
+add `harp_cache.reused`, and log `whippet_batch_cache_hit`; they do not send another
+query to Whippet. Errors and liveness pings are not cached. Changed capture content,
+new inputs or explicit refresh retire the cache along with the graph. Recent query
+arguments and report references are included in `whippet_query_history` so models
+can reuse evidence or ask for one handoff/page instead of repeating broad queries.
+
+One-shot Whippet commands preceded by shell setup such as `cd ... && whippet ...`
+also use structured report storage and whole-item compaction when their output
+contains a complete report. Host-side report references are not Kali paths.
 
 Modes: `summary`, `triage`, `objects`, `findings`, `node`, `search`, `memberships`,
 `members`, `users`, `reachable`, `path`, `routes`, `ranked-paths`, `explain`,

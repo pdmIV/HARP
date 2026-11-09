@@ -15,7 +15,7 @@ objective, and do not repeat completed startup probes merely to use another tool
 """
 
 
-CARD = """Whippet tool card v1.1 (CLI 0.6; managed batch 0.7, JSON schema 1).
+CARD = """Whippet tool card v1.2 (CLI/batch 0.8 handoff; JSON schema 1).
 Whippet analyzes existing BloodHound/SharpHound captures offline; it does not collect
 data or execute attacks. Use only captures in the session Kali workspace. Check
 tool availability first; if missing, use installed alternatives, do not repeatedly
@@ -25,6 +25,7 @@ is the legacy collector, not the CE collector; inspect its own help for collecti
 flags. certipy-ad and certipy are alternative executable names. enum4linux is a
 different legacy tool from enum4linux-ng; do not reuse their flags interchangeably.
 Start: whippet capture.zip --triage 'USER@DOMAIN' --limit 3
+Whippet 0.8 one lead: whippet capture.zip --handoff 'USER@DOMAIN' --lead-query acl-control --lead-index 0
 Focus: whippet capture.zip --findings acl-control --principal 'USER@DOMAIN' --limit 3
 Lookup: whippet capture.zip --search 'svc' --limit 3
 Inspect: whippet capture.zip --node 'EXACT-NAME-OR-SID' --limit 3
@@ -46,17 +47,33 @@ or proven access/credentials. Full ACL deny/inheritance, RSoP and trust authoriz
 are not established. Select one lead, inspect its explanation, then verify one
 prerequisite live. Give the proxy only that lead and supporting facts. Refresh
 captures after relevant directory changes.
+Whippet 0.8 findings carry graph-derived or collector-reported assessment states;
+CLI/batch live_access remains unverified. After triage, if handoff is available,
+request a focused handoff
+for one lead: {"mode":"handoff","node":"USER@DOMAIN","query":"acl-control","lead_index":0}.
+Keep its complete proof, coverage, conditional status, unverified prerequisites,
+next verification question and follow-up request. A missing goal-specific route
+does not invalidate earlier leads; inspect route_diagnostic and prior_triage.
+The trusted-host live overlay is not wired to HARP. Verify target access through
+HARP terminal evidence; never send model claims as verified overlay updates.
 When whippet.batch_compatible is true, prefer HARP-managed queries over CLI reloads.
 Codex uses whippet_query(session, inputs, request, refresh=false). Proxy replies:
 {"thought":"brief reason","whippet_query":{"inputs":["capture.zip"],"request":{"mode":"triage","node":"USER@DOMAIN","limit":3}},"done":false}
 The hosted oracle delegates these queries to the proxy. Batch request field map:
-triage/node/memberships/gpo-scope use node; findings uses query and optional principal;
+triage/node/memberships/gpo-scope use node; handoff uses node, optional query and
+lead_index; findings uses query and optional principal;
 objects uses object_type, where object and select array; search uses query;
 path/trust-path/explain use source and target (explain also edge); routes uses sources
 array and optional target/avoid. Use limit/offset/hops/profile as applicable.
 HARP assigns IDs and reuses one graph per capture snapshot. Do not start --batch in
 the ordinary terminal. On transport failure stop and request oracle help. Explicit
 refresh=true starts a new process after a failure; do not repeatedly retry it.
+Use workspace from the session context for collector output, captures and reports;
+do not assume /home/kali is the workspace. A rejected capture path is a query
+validation error: locate or copy the existing capture into workspace, then correct
+the request without refresh or a CLI fallback. Check whippet_query_history before
+querying again. Reuse prior reports, request one handoff or page, and verify its
+next prerequisite instead of rerunning broad triage or reading entire JSON files.
 HARP context_omissions indicates additional local omissions; request a narrower
 query rather than treating missing results as empty. report_ref is a host-side
 session report reference, not a path to open through the Kali terminal.
@@ -88,16 +105,50 @@ def guidance(session):
     return CARD if relevant(session) else ""
 
 
+def query_words(command):
+    """Find an actual invocation, including after shell setup; never quoted data."""
+    try:
+        # Preserve quotes so a literal '&&' passed to echo is not a shell operator.
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return []
+    starts = [0] + [i + 1 for i, word in enumerate(words) if word in (";", "&&", "||", "|")]
+    for start in starts:
+        if start < len(words) and words[start].strip("\"'").rsplit("/", 1)[-1] == "whippet":
+            end = next((i for i in range(start + 1, len(words))
+                        if words[i] in (";", "&&", "||", "|", ">", ">>")), len(words))
+            return words[start:end]
+    return []
+
+
 def is_query(command):
     if command.startswith("whippet-query "):
         return True
-    try:
-        words = shlex.split(command)
-    except ValueError:
-        return False
-    # Deliberately recognize direct invocations only, never echo/cat/arbitrary JSON.
-    return bool(words and words[0].rsplit("/", 1)[-1] == "whippet"
+    words = query_words(command)
+    return bool(words
                 and not any(x in words for x in ("--help", "--version", "--batch", "--serve")))
+
+
+def is_handoff(command):
+    if command.startswith("whippet-query handoff "):
+        return True
+    return "--handoff" in query_words(command)
+
+
+def query_history(session, limit=8):
+    history = []
+    for item in session.get("observations", []):
+        if not is_query(item.get("command", "")):
+            continue
+        entry = {"command": item["command"], "exit_code": item.get("exit_code"),
+                 "report_ref": item.get("whippet_report")}
+        if item.get("whippet_request_key"):
+            data = json.loads(item["whippet_request_key"])
+            entry.update(inputs=data.get("inputs"), request=data.get("request"))
+        history.append(entry)
+    return history[-limit:]
 
 
 def check(terminal):

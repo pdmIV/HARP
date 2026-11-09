@@ -33,7 +33,8 @@ class ZAITests(unittest.TestCase):
         req = send.call_args.args[0]
         self.assertEqual(req.full_url, harp_zai.BASE + "/chat/completions")
         body = json.loads(req.data)
-        self.assertEqual(set(body), {"model", "messages", "stream", "max_tokens", "thinking", "reasoning_effort", "temperature", "top_p"})
+        self.assertEqual(set(body), {"model", "messages", "stream", "max_tokens", "thinking", "reasoning_effort", "temperature", "top_p", "response_format"})
+        self.assertEqual(body["response_format"], {"type": "json_object"})
         self.assertEqual(body["thinking"], {"type": "enabled"})
         self.assertEqual(body["temperature"], 0.65)
         self.assertEqual(body["top_p"], 0.82)
@@ -69,6 +70,44 @@ class ZAITests(unittest.TestCase):
             self.assertEqual(chat.call_args.args[0]["top_p"], 0.93)
             self.assertEqual(chat.call_args.args[1]["max_tokens"], 8192)
             self.assertIsNone(harp.load_session(path)["oracle_calls"][0]["estimated_usd"])
+
+    def test_oracle_repairs_invalid_json_without_another_execution_cycle(self):
+        cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["oracle"] = {**self.config(), "max_cycles": 1}
+        session = {"config": cfg, "target": "192.0.2.1", "status": "active", "observations": []}
+        replies = [{"choices": [{"message": {"content": content}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+                   for content in ('{"plan":"broken",}', '{"plan":"Blocked","stop":true}')]
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            harp.save_session(path, session)
+            harp.append_event(path, {"type": "test"})
+            with patch.object(harp_zai, "chat", side_effect=replies) as chat, patch.object(harp, "delegate") as delegate:
+                harp_nim.run(path)
+            delegate.assert_not_called()
+            self.assertEqual(chat.call_count, 2)
+            self.assertIn("FORMAT RETRY", chat.call_args.args[1]["messages"][-1]["content"])
+            self.assertEqual(len(harp.load_session(path)["oracle_calls"]), 2)
+            self.assertEqual(harp_nim.oracle_history(path)["cycles"], 1)
+            events = [json.loads(x) for x in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(events[-1]["reason"], "model_stop")
+
+    def test_oracle_invalid_retries_are_bounded_and_never_delegate(self):
+        for content in ('narration without JSON', '{"plan":"bad boolean","stop":"false","objective":"id"}'):
+            with self.subTest(content=content), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                cfg = json.loads(Path("harp.example.json").read_text())
+                cfg["oracle"] = {**self.config(), "max_cycles": 1}
+                harp.save_session(path, {"config": cfg, "target": "192.0.2.1", "status": "active", "observations": []})
+                harp.append_event(path, {"type": "test"})
+                reply = {"choices": [{"message": {"content": content, "reasoning_content": "private reasoning"}}]}
+                with patch.object(harp_zai, "chat", return_value=reply) as chat, patch.object(harp, "delegate") as delegate:
+                    harp_nim.run(path)
+                self.assertEqual(chat.call_count, 3)
+                delegate.assert_not_called()
+                log = (path / "events.jsonl").read_text()
+                self.assertNotIn("private reasoning", log)
+                self.assertEqual(json.loads(log.splitlines()[-1])["reason"], "invalid_oracle_replies")
 
     def test_oracle_handoff_keeps_implementation_and_expands_evidence(self):
         cfg = json.loads(Path("harp.example.json").read_text())

@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 
 KINDS = {"credential", "document", "image", "other", "flag"}
 FLAG_NAMES = ("user.txt", "root.txt")
-ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|[\x01\x02]")
 FILE_READ = re.compile(r"(?i)(?<![A-Za-z0-9_-])(?:cat|type|get-content|more|head|tail|sed|awk)(?![A-Za-z0-9_-])")
 # NetExec wraps remote stdout in service, address, port and hostname columns.
 NETEXEC_OUTPUT = re.compile(r"^(?:WINRM|SMB|SSH|MSSQL)\s+\S+\s+\d+\s+\S+\s+([0-9a-fA-F]{32})\s*$", re.I)
@@ -187,7 +187,40 @@ def flag_values_from_result(result: dict) -> list[tuple[str, str]]:
     """Recognize flag evidence without modifying a session."""
     command = str(result.get("command", ""))
     output = ANSI.sub("", str(result.get("output", "")))
+    if result.get("exit_code") != 0 or result.get("truncated"):
+        return []
     mentioned = [name for name in FLAG_NAMES if re.search(r"(?i)(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", command)]
+    # Associate each WinRM response with its echoed read command, rather than
+    # guessing which of two bare values belongs to which file. Redraw sequences
+    # can repeat the prompt on the same line; the last prompt owns the command.
+    if re.search(r"\bevil-winrm\b", command, re.I) and "*Evil-WinRM*" in output:
+        flags = []
+        pending = None
+        candidates = []
+
+        def flush():
+            if pending and len(candidates) == 1:
+                flags.append((pending, candidates[0]))
+
+        for line in output.splitlines():
+            prompts = list(re.finditer(r"\*Evil-WinRM\* PS [^\r\n>]*>\s*", line))
+            if prompts:
+                flush()
+                pending, candidates = None, []
+                read = line[prompts[-1].end():].strip()
+                names = [name for name in mentioned if re.search(
+                    r"(?i)(?<![A-Za-z0-9_.-])" + re.escape(name) + r"(?![A-Za-z0-9_.-])", read)]
+                if (len(names) == 1 and re.match(r"(?i)^(?:type|get-content|cat|more)\s+", read)
+                        and not re.search(r"[;&|<>`$]", read)):
+                    pending = names[0]
+            elif line.strip() and pending:
+                if re.fullmatch(r"[0-9a-fA-F]{32}", line.strip()):
+                    candidates.append(line.strip().lower())
+                else:
+                    # Errors or unrelated text invalidate this individual read.
+                    pending = None
+        flush()
+        return list(dict.fromkeys(flags))
     values = []
     for line in output.splitlines():
         line = line.strip()
@@ -206,12 +239,10 @@ def capture_flags_from_result(run_dir: Path, result: dict) -> list[dict]:
     flags = flag_values_from_result(result)
     if not flags:
         return []
-    name, value = flags[0]
     command = str(result.get("command", ""))
-    record = register_artifact(run_dir, kind="flag", title=name, value=value,
+    return [register_artifact(run_dir, kind="flag", title=name, value=value,
                                source=command, evidence="Flag-shaped value captured from terminal output",
-                               evidence_backed=True)
-    return [record]
+                               evidence_backed=True) for name, value in flags]
 
 
 def capture_model_artifact(run_dir: Path, session: dict, proposal: dict) -> dict | None:

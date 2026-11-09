@@ -29,6 +29,24 @@ def observation(data=None, **kwargs):
 
 
 class WhippetTests(unittest.TestCase):
+    def test_handoff_keeps_atomic_lead_and_unverified_assessment(self):
+        report = {"schema_version": 1, "mode": "handoff", "warnings": ["partial capture"],
+                  "result": {"lead": {"proof": [{"edge": "MemberOf", "details": "x" * 3500}],
+                                      "membership_path": ["USER", "GROUP"]},
+                             "assessment": {"live_access": {"status": "unverified"},
+                                            "unverified_prerequisites": ["Reauthenticate"]},
+                             "coverage": {"profile": "supported"}, "total_leads": 2,
+                             "next_lead_index": 1}}
+        result = {"command": "whippet-query handoff id=1", "output": json.dumps(report),
+                  "exit_code": 0, "truncated": False}
+        self.assertTrue(whippet.is_handoff(result["command"]))
+        self.assertTrue(whippet.is_handoff("whippet capture.zip --handoff USER"))
+        full = json.loads(whippet.observation(result, 8000)["output"])
+        self.assertEqual(full["result"], report["result"])
+        reduced = json.loads(whippet.observation(result, 1200)["output"])
+        self.assertNotIn("result", reduced)
+        self.assertIn("result", reduced["harp_context"]["context_omissions"])
+
     def test_ad_gating_and_reset_guidance(self):
         self.assertFalse(whippet.guidance({"recon": [{"port": 80}]}))
         session = {"recon": [{"port": 88}, {"port": 389}]}
@@ -125,6 +143,19 @@ class WhippetTests(unittest.TestCase):
         self.assertFalse(whippet.is_query("echo whippet --triage"))
         self.assertFalse(whippet.is_query("whippet --help"))
         self.assertTrue(whippet.is_query("/home/kali/.local/bin/whippet capture.zip --summary"))
+        self.assertFalse(whippet.is_query("echo '&&' whippet capture.zip --triage USER"))
+
+    def test_shell_setup_does_not_hide_structured_whippet_results(self):
+        for command in ("cd /workspace && /home/kali/.local/bin/whippet capture.zip --triage USER --limit 3; echo EXIT:$?",
+                        "whippet capture.zip --triage USER > triage.json; cat triage.json"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                result = observation(command=command, output="loaded capture\n" + json.dumps(report()) + "\nEXIT:0")
+                self.assertTrue(whippet.is_query(command))
+                whippet.capture(result, Path(temp))
+                self.assertTrue((Path(temp) / result["whippet_report"]).is_file())
+                compact = json.loads(whippet.observation(result, 1800)["output"])
+                self.assertIn("harp_context", compact)
+                self.assertIn("warnings", compact)
 
     def test_codex_inspection_and_direct_query_use_structured_results(self):
         state = {"recon": [{"port": 88}, {"port": 389}], "observations": [observation()],

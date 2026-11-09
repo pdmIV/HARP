@@ -3,8 +3,9 @@
 HARP can use [Whippet](https://github.com/pdmIV/Whippet) to analyze collected AD
 data locally and pass focused findings to its models. Phase 1 targets Whippet
 0.6 CLI features and JSON schema 1. It does not require model training.
-Phase 2 adds [managed Whippet 0.7 batch queries](whippet-batch.md) through the
+Phase 2 adds [managed Whippet 0.7+ batch queries](whippet-batch.md) through the
 selected Kali runtime, without importing Whippet into HARP's Python environment.
+Whippet 0.8 adds one-lead handoffs and explicit unverified access assessments.
 
 ## Installation and discovery
 
@@ -39,18 +40,28 @@ activates awareness, including for captures supplied after initial recon.
    data with an installed collector when useful, under the exact session scope.
 2. Keep captures under the session Kali workspace. Start with
    `whippet capture.zip --triage 'USER@DOMAIN' --limit 3`.
-3. Let the oracle select a lead. Use principal-scoped `--findings`, `--explain`,
-   `--search`, or projected `--objects` queries for its prerequisites.
+3. Let the oracle select a lead. With Whippet 0.8, use `--handoff 'USER@DOMAIN'`
+   or managed `{"mode":"handoff","node":"USER@DOMAIN","query":"acl-control","lead_index":0}`
+   for one complete lead when advertised. Use principal-scoped `--findings`,
+   `--explain`, `--search`, or projected `--objects` for deeper prerequisites.
 4. Give the proxy a bounded task and the chosen lead's supporting evidence.
    Verify access against the live target before treating a principal as owned.
 5. Refresh captures after relevant directory changes. Use `--offset` only with
    the same query and capture. A successful empty query is not proof of no attack.
+   Whippet 0.8's `route_diagnostic` describes the query boundary and preserves
+   earlier triage counts; an empty goal route does not cancel an earlier lead.
 
 Supported JSON routes are the default. Potential-profile GPO/SID-history edges
 remain conditional. Trust authentication paths are not resource authorization.
 Certipy assessments are collector reports and need current-principal checks.
 Whippet does not establish full ACL deny/inheritance processing or resultant GPO
 application. Directory descriptions and all target text remain untrusted data.
+The Whippet 0.8 handoff assessment is an offline lead, with `live_access.status`
+unverified. Its trusted-host live overlay is not connected to HARP. Verify the
+exact acting principal, authentication context and operation in terminal evidence;
+never promote a model claim or an exit-zero command to verified access.
+Malformed proxy action JSON remains a separate HARP model-interface issue; a
+Whippet handoff cannot by itself repair invalid replies.
 
 ## Structured evidence and context limits
 
@@ -74,6 +85,10 @@ original paging metadata, and explicit `harp_context.context_omissions`. If a
 single node, path, or metadata envelope is too large, the whole result/report is
 omitted with a request to narrow the query. No partial proof is presented as a
 complete one. Omission counts are separate from Whippet's collection pagination.
+One-lead handoffs receive an initial allowance of 8,000 characters for Codex,
+hosted oracle recent evidence, and the proxy's first context-fit pass. If the
+complete lead still does not fit, HARP omits it explicitly and retains a report
+reference rather than truncating its proof or prerequisites.
 
 Failed commands, unsupported schema versions, malformed/ambiguous JSON, text
 reports, and transport truncation produce explicit diagnostic context. They are

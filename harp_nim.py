@@ -23,7 +23,7 @@ BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
                      "repeated_output", "missing_command", "invalid_replies",
                      "command_validation_failed", "repeated_or_excessive_memory_query",
-                     "oracle_requested"}
+                     "oracle_requested", "whippet_query_rejected"}
 FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "model_call_budget", "whippet_batch_error"}
 
 
@@ -152,7 +152,8 @@ def oracle_observations(session: dict, config: dict) -> tuple[list[dict], int]:
         depth = "detailed"
     count, output_chars = {"compact": (4, 1200), "detailed": (12, 6000),
                            "extended": (32, 12000)}[depth]
-    return ([harp_whippet.observation(item, max(3000, output_chars))
+    return ([harp_whippet.observation(item, max(8000 if harp_whippet.is_handoff(item.get("command", ""))
+                                                  else 3000, output_chars))
              if harp_whippet.is_query(item.get("command", "")) else
              {"command": item.get("command"), "exit_code": item.get("exit_code"),
               "output": str(item.get("output", ""))[-output_chars:]}
@@ -324,6 +325,74 @@ def oracle_history(run_dir: Path) -> dict:
     return history
 
 
+def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
+                    send, body: dict) -> dict | None:
+    """Retry only invalid model decisions, before any action, with full usage accounting."""
+    body = {**body, "messages": list(body["messages"])}
+    for attempt in range(3):
+        if any((run_dir / name).exists() for name in (".stop_session", ".stop_local")):
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
+            return None
+        if harp.load_session(run_dir).get("status") != "active":
+            return None
+        started = time.monotonic()
+        reply = send("/chat/completions", body)
+        usage = reply.get("usage") or {}
+        choice = (reply.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        content = message.get("content") or ""
+        cache_metrics = {}
+        if cfg.get("provider") == "openai":
+            import harp_openai
+            cache_metrics = harp_openai.usage_metrics(cfg, usage)
+        elif cfg.get("provider") == "zai":
+            import harp_zai
+            cache_metrics = harp_zai.usage_metrics(cfg, usage)
+        seconds = round(time.monotonic() - started, 2)
+        call = {"model": cfg["model"], "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0), **cache_metrics,
+                "reasoning_effort": effort, "effort_source": effort_source,
+                "adaptive_reasoning": harp_effort.enabled(cfg), "seconds": seconds,
+                "format_attempt": attempt + 1}
+        current = harp.load_session(run_dir)
+        current.setdefault("oracle_calls", []).append(call)
+        harp.save_session(run_dir, current)
+        harp.append_event(run_dir, {"type": "oracle_nim_usage", "model": cfg["model"],
+            "reasoning_effort": effort, "effort_source": effort_source, **cache_metrics,
+            "input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
+            "seconds": seconds, "finish_reason": choice.get("finish_reason"),
+            "content_chars": len(content), "reasoning_chars": len(message.get("reasoning_content") or ""),
+            "format_attempt": attempt + 1})
+        if any((run_dir / name).exists() for name in (".stop_session", ".stop_local")):
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
+            return None
+        try:
+            if choice.get("finish_reason") == "length":
+                raise ValueError("Oracle completion was truncated; provide a shorter complete decision")
+            decision = harp.json_object(content)
+            if not isinstance(decision.get("stop"), bool) or not isinstance(decision.get("plan", ""), str):
+                raise ValueError("Oracle decision requires boolean stop and string plan")
+            objective = assisted_objective(decision, decision.get("plan", ""))
+            if "oracle_command" in decision and not isinstance(decision["oracle_command"], str):
+                raise ValueError("oracle_command must be a string")
+            if not decision["stop"] and not (objective or decision.get("oracle_command") or "research" in decision):
+                raise ValueError("A continuing decision requires an objective, oracle_command or research")
+            return decision
+        except (ValueError, TypeError) as error:
+            harp.append_event(run_dir, {"type": "invalid_oracle_reply", "attempt": attempt + 1,
+                "validation_error": str(error)[:500], "finish_reason": choice.get("finish_reason")})
+            if attempt < 2:
+                # Do not replay malformed output or reasoning as executable instructions.
+                body["messages"] = [*body["messages"][:2], {"role": "user", "content":
+                    "FORMAT RETRY: Your last reply was rejected; no action was executed. "
+                    "Return one complete JSON object only, without prose or markdown. "
+                    "Use boolean stop and a string plan. Encode quotes/backslashes/newlines inside strings. "
+                    "Use the retained evidence to choose a bounded action. Validation error: " + str(error)[:500]}]
+                harp.append_event(run_dir, {"type": "oracle_format_retry", "attempt": attempt + 2})
+    harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "invalid_oracle_replies"})
+    return None
+
+
 def run(run_dir: Path) -> None:
     session = harp.load_session(run_dir)
     cfg = session["config"].get("oracle", {})
@@ -346,11 +415,11 @@ def run(run_dir: Path) -> None:
         session = harp.load_session(run_dir)
         if session["status"] != "active" or (run_dir / ".stop_session").exists() or (run_dir / ".stop_local").exists():
             return
-        harp.ensure_whippet(run_dir, session)
         flags = harp_artifacts.flag_status(run_dir)
         if all(flags.get(name, {}).get("found") for name in ("user.txt", "root.txt")):
             harp.finish_session(run_dir, "yes")
             return
+        harp.ensure_whippet(run_dir, session)
         observations, recent_count = oracle_observations(session, cfg)
         verified_artifacts = [
             {"kind": item.get("kind"), "title": item.get("title", "")[:120],
@@ -359,6 +428,7 @@ def run(run_dir: Path) -> None:
             if item.get("kind") in {"credential", "document", "image", "other"} and item.get("evidence_backed")
         ][-8:]
         context = {"target": session["target"], "objective": session["config"]["objective"],
+                   "workspace": session.get("workspace", "/workspace"),
                    "authorized_scope": session["config"].get("authorized_scope", []),
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
@@ -380,6 +450,7 @@ def run(run_dir: Path) -> None:
             context["research_turns_remaining"] = max(0, harp_research.MAX_ORACLE_TURNS - research_turns)
         if harp_whippet.relevant(session):
             context["whippet"] = session.get("whippet")
+            context["whippet_query_history"] = harp_whippet.query_history(session)
         whippet_chars = sum(len(x.get("output", "")) for x in observations
                             if harp_whippet.is_query(x.get("command", "")))
         if whippet_chars:
@@ -398,7 +469,6 @@ def run(run_dir: Path) -> None:
         harp.append_event(run_dir, {"type": "oracle_nim_request", "model": model,
                                     "cycle": used_cycles + 1, "turn": cycle + 1})
         used_cycles += 1
-        request_started = time.monotonic()
         def oracle_request(path, body):
             if cfg.get("provider") == "openai":
                 import harp_openai
@@ -410,13 +480,19 @@ def run(run_dir: Path) -> None:
                 return harp_zai.chat(request_cfg, body)
             return request(path, body)
 
-        reply = oracle_request("/chat/completions", {"model": model, "stream": False,
+        decision = oracle_decision(run_dir, cfg, effort, effort_source, oracle_request,
+            {"model": model, "stream": False,
             "max_tokens": min(int(cfg.get("max_tokens", 1024)), 1024)
                           if model_options else int(cfg.get("max_tokens", 1024)),
             **model_options,
             "messages": [{"role": "system", "content":
                 "You are the HARP oracle for an authorized lab. Review evidence and choose one bounded "
                 "objective for the proxy model. Never claim a flag without terminal evidence. "
+                "The flags_found fields are the authoritative capture status. If a flag appears in "
+                "terminal evidence but is not captured, delegate one isolated read of that exact flag "
+                "with its value alone in output; do not stop on a model claim of completion. "
+                "Keep collector output, captures, scripts and reports under workspace from the context. "
+                "Pass that exact workspace path in delegated instructions; do not assume /home/kali. "
                 "When a relevant image has been downloaded into the session Kali workspace and "
                 "proxy_image_input_available is true, delegate reading that exact file using read_image. "
                 "The proxy can also preserve relevant evidence using capture_file. Preserved image bytes "
@@ -462,41 +538,8 @@ def run(run_dir: Path) -> None:
                 + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_whippet.guidance(session)
                 + (harp_research.INSTRUCTION if harp_research.enabled(session) else "")},
                 {"role": "user", "content": json.dumps(context)}]})
-        usage = reply.get("usage") or {}
-        choice = reply["choices"][0]
-        message = choice.get("message") or {}
-        content = message.get("content") or ""
-        cache_metrics = {}
-        if cfg.get("provider") == "openai":
-            import harp_openai
-            cache_metrics = harp_openai.usage_metrics(cfg, usage)
-        if cfg.get("provider") == "zai":
-            import harp_zai
-            cache_metrics = harp_zai.usage_metrics(cfg, usage)
-        call = {"model": model, "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                "completion_tokens": int(usage.get("completion_tokens") or 0), **cache_metrics}
-        call.update(reasoning_effort=effort, effort_source=effort_source,
-                    adaptive_reasoning=harp_effort.enabled(cfg),
-                    seconds=round(time.monotonic() - request_started, 2))
-        current = harp.load_session(run_dir)
-        current.setdefault("oracle_calls", []).append(call)
-        harp.save_session(run_dir, current)
-        harp.append_event(run_dir, {"type": "oracle_nim_usage", "model": model,
-            "reasoning_effort": effort, "effort_source": effort_source,
-            **cache_metrics,
-            "input_tokens": usage.get("prompt_tokens"), "output_tokens": usage.get("completion_tokens"),
-            "seconds": round(time.monotonic() - request_started, 2),
-            "finish_reason": choice.get("finish_reason"), "content_chars": len(content),
-            "reasoning_chars": len(message.get("reasoning_content") or "")})
-        if (run_dir / ".stop_session").exists():
-            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "operator_stop"})
+        if decision is None:
             return
-        if not content.strip():
-            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "empty_model_reply",
-                                        "model": model, "finish_reason": choice.get("finish_reason"),
-                                        "output_tokens": usage.get("completion_tokens")})
-            return
-        decision = harp.json_object(content)
         plan = str(decision.get("plan", "")).strip()[:1000]
         if "research" in decision:
             if plan:
@@ -575,6 +618,10 @@ def run(run_dir: Path) -> None:
                     unlimited_budget=unlimited_budget)
         session = harp.load_session(run_dir)
         stop_reason = session.get("last_delegate_stop")
+        if session.get("status") == "finished":
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped",
+                                       "reason": "flags_captured" if stop_reason == "flags_captured" else "session_finished"})
+            return
         latest_result = session["observations"][-1] if int(session.get("local_steps", 0)) > before_steps else None
         attempt = {"plan": plan[:240], "objective": objective[:300], "stop_reason": stop_reason,
                    "terminal_results": int(session.get("local_steps", 0)) - before_steps}

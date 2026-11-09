@@ -199,6 +199,10 @@
 
       <section class="page" data-panel="settings">
         <div class="page-intro"><div class="eyebrow"><span class="eyebrow-line"></span> WORKSPACE / CONFIGURATION</div><h1>Target & limits</h1><p>These settings apply to new sessions. Existing sessions retain the configuration captured when they started.</p></div>
+        <div class="card settings-card"><div class="card-head"><div><span class="kicker">INTERFACE</span><h3>Dashboard animations</h3></div></div>
+          <label class="field">Animations<select id="animationMode"><option value="on">On</option><option value="system">Follow system setting</option><option value="off">Off</option></select></label>
+          <p class="muted-text">Controls live and replay orbits and confetti when closing the success message. Applies immediately and saves automatically in this browser.</p>
+        </div>
         <div class="card settings-card snapshot-card"><div class="card-head"><div><span class="kicker">SETTINGS / BACKUP</span><h3>Configuration snapshots</h3></div></div>
           <p class="muted-text">Export saved settings from every tab, including advanced configuration and interface preferences. Save tab changes before exporting. Restore replaces saved settings for future sessions and creates a recovery copy. It does not start a model or session.</p>
           <label class="field checkbox-field"><input id="snapshotIncludeKeys" type="checkbox"> Include saved API keys in the backup</label>
