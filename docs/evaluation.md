@@ -50,6 +50,30 @@ Cumulative oracle request time measures recorded request latency, not provider c
 
 For a controlled follow-up, compare repeated fixed-high, fixed-max, and adaptive runs using the same HARP version, target starting snapshot, reconnaissance policy, model settings, and budgets. Keep calibration targets separate from evaluation targets. Report verified success rate, total tokens across both models, oracle request latency, wall time, and errors/resumes. See [adaptive configuration](configuration.md#adaptive-oracle-reasoning-experimental) to enable the experiment.
 
+## Forest: repeated Hybrid runs
+
+Three recorded Hybrid assessments of the authorized Hack The Box Forest lab recovered both `user.txt` and `root.txt` from terminal-backed evidence without a recorded tactical human intervention or root-command approval. All used Kali WSL, Z.AI `glm-5.3` as oracle, and `glm-5.3-flash` as proxy. The oracle actually ran at high effort on every call in the latest two sessions; the first run used high on 12 calls and max on its final call. These are three successful observations, not an estimate of solve rate across fresh attempts or other targets.
+
+| Recorded measure | Initial run, Nov 8 | Follow-up, Nov 9 | Latest run, Nov 9 |
+| --- | ---: | ---: | ---: |
+| Session ID | `20261108-192928-c126aa` | `20261109-111634-4ae2bb` | `20261109-115318-a5e3b1` |
+| Reconnaissance | Fresh; 65.2 s | Cached; 0.2 s | Fresh; 69.6 s |
+| Wall time to both verified flags | 15m 34.6s | 12m 14.9s | 13m 41.8s |
+| Proxy steps / model calls | 34 / 53 | 24 / 31 | 17 / 23 |
+| Oracle model calls | 13 | 8 | 10 |
+| Oracle input + output tokens | 161,721 | 135,770 | 190,211 |
+| Proxy input + output tokens | 374,484 | 336,427 | 273,491 |
+| Combined recorded tokens | 536,205 | 472,197 | 463,702 |
+| Recorded artifact rejections | 3 | 1 | 0 |
+| Oracle run errors / resumes | 0 / 0 | 1 / 1 | 0 / 0 |
+| Verified flags | 2 / 2 | 2 / 2 | 2 / 2 |
+
+The latest run recorded two evidence-backed credential artifacts and both flags. It captured `user.txt` about 5m 18s after session start, then `root.txt` at 13m 42s. Its seven delegations ended six times with `local_done` and once with `flags_captured`; none ended with invalid replies, repetition, or a delegation error. The log has no artifact rejection or oracle run error. This is encouraging evidence for the artifact-handling fixes, but one run cannot establish that those failures are eliminated.
+
+The latest run still recorded three rejected oracle probe requests because probes were requested without a preceding worker failure. Those requests did not halt the session. Its startup version scan was filtered, so deterministic reconnaissance used its fallback before the first oracle request. SecLists availability was detected, and two managed Whippet queries (`triage` and `handoff`) returned without warnings. Those observations show that the resources were available and used; they do not isolate Whippet's contribution to the outcome.
+
+Compared with the initial run, the latest run used 50.0% fewer proxy steps, 56.6% fewer proxy model calls, and 13.5% fewer combined tokens; wall time to both flags was 12.1% lower. The cached-recon follow-up finished faster than the latest run, despite recording more proxy steps. The target instance address, reconnaissance path, command sequence, and implementation state differed across runs. The first two sessions also contain artifact records added after their finish times during subsequent repair. The table counts their original session outcomes and recorded usage, not those later additions. These comparisons support a narrower conclusion: HARP repeatedly completed Forest under the recorded settings, and the latest run avoided the specific artifact and oracle errors seen in the preceding logs. They do not prove a causal speedup from any single fix.
+
 ## Current limits
 
 - The demo target is a harmless HTTP service, not a penetration testing benchmark. The Windows lab workflow uses the general terminal and included protocol tools; one target run does not establish broad reliability across Windows environments.

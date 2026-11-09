@@ -12,6 +12,8 @@ An optional [adaptive reasoning experiment](docs/configuration.md#adaptive-oracl
 
 In an initial Cicada comparison, the adaptive run recovered both flags while using **40.1% fewer oracle tokens** and **13.8% fewer combined oracle + proxy tokens** than the earlier fixed-max run. Recorded oracle request time was **70.9% lower**. These are preliminary observations from two runs with different execution paths and reconnaissance reuse, not controlled benchmark results. See [measurements and limitations](docs/evaluation.md#adaptive-reasoning-preliminary-cicada-results).
 
+Three recorded Hybrid runs on the Forest lab each recovered both flags. The latest finished in **13m 42s** with **17 proxy steps** and no recorded artifact rejection or oracle run error; it still encountered three rejected oracle probe requests. See the [Forest measurements and limits](docs/evaluation.md#forest-repeated-hybrid-runs).
+
 ## How Whippet helps HARP
 
 For Active Directory labs, HARP integrates [Whippet](https://github.com/pdmIV/Whippet), a companion CLI for analyzing BloodHound-compatible collector output. Whippet answers focused questions about group membership, account permissions, and candidate privilege paths, then returns compact JSON. The large capture stays in Kali while HARP supplies the models with selected findings. This aims to reduce repeated input tokens, context pressure, and API cost during AD investigations.
