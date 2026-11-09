@@ -720,11 +720,9 @@
 
   function eventCategory(event) {
     const kind = event.type || "";
-    if (kind.startsWith("research_") || kind === "oracle_research_turn") return "oracle";
-    if (kind === "oracle_effort_selected" || kind === "proxy_effort_recommendation" || kind === "oracle_plan" || kind === "delegation" || kind === "oracle_terminal" ||
-        kind === "oracle_nim_recovery" || kind === "oracle_nim_probe" ||
-        kind === "oracle_nim_probe_rejected" || kind === "oracle_nim_resumed") return "oracle";
-    if (kind === "local_action" || kind === "local_terminal" || kind === "memory_query") return "local";
+    if (kind.startsWith("research_") || kind.startsWith("oracle_") || kind === "invalid_oracle_reply") return "oracle";
+    if (kind === "delegation") return "oracle";
+    if (kind.startsWith("local_") || kind.startsWith("proxy_") || kind === "invalid_local_reply" || kind === "memory_query") return "local";
     if (kind === "terminal_output" || kind === "approved_root_terminal") return "terminal";
     if (kind.startsWith("root_approval") || kind.startsWith("command_review")) return "approval";
     return "system";
@@ -801,7 +799,7 @@
 
   function verboseRow(event) {
     const [title, description] = eventInfo(event);
-    const row = el("details", "verbose-entry");
+    const row = el("details", `verbose-entry ${verboseCategory(event)}`);
     const summary = el("summary", "verbose-entry-summary");
     summary.append(el("time", "", event.at ? new Date(event.at).toLocaleTimeString() : ""),
                    el("strong", "", title), el("span", "", description || ""));
