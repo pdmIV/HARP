@@ -1,10 +1,8 @@
 # HARP
 
-<div align="center"><img src=".gitbook/assets/harp-banner-green.png" alt="Harp wordmark and green harp emblem on a dark command-center banner" width="100%"></div>
+<div align="center"><img src=".gitbook/assets/harp-banner-green.png" alt="" width="100%"></div>
 
-<p align="center">
-  <a href="https://peter-mora-iv.gitbook.io/harp-docs">https://peter-mora-iv.gitbook.io/harp-docs</a>
-</p>
+<p align="center"><a href="https://peter-mora-iv.gitbook.io/harp-docs">https://peter-mora-iv.gitbook.io/harp-docs</a></p>
 
 HARP is a hierarchical AI-agent penetration-testing prototype for authorized labs. An oracle reviews deterministic reconnaissance and delegates objectives to a proxy model. HARP validates proposed commands, executes them through a logged Kali runtime, and records terminal evidence, artifacts, and outcomes. Hosted oracles can plan and delegate automatically; Codex operates through the HARP MCP tools.
 
@@ -26,12 +24,12 @@ HARP's managed batch connection reuses one loaded graph across queries and start
 
 ## Supported configurations
 
-| Component       | Options                                            |
-| --------------- | -------------------------------------------------- |
-| Oracle          | OpenAI API, Z.AI API, NVIDIA NIM, or Codex via MCP |
-| Proxy model     | OpenAI API, Z.AI API, NVIDIA NIM, or local Unsloth |
+| Component       | Options                                                              |
+| --------------- | -------------------------------------------------------------------- |
+| Oracle          | OpenAI API, Z.AI API, NVIDIA NIM, or Codex via MCP                   |
+| Proxy model     | OpenAI API, Z.AI API, NVIDIA NIM, or local Unsloth                   |
 | Kali runtime    | Kali WSL (primary on Windows), native Kali Linux, or optional Docker |
-| Experiment mode | Hybrid, proxy only, or frontier only               |
+| Experiment mode | Hybrid, proxy only, or frontier only                                 |
 
 ## Getting started
 
@@ -44,21 +42,21 @@ OpenAI and NVIDIA NIM pairings do not require a local GPU. Daybreak Blue require
 
 ## Documentation
 
-| Guide                                            | Contents                                                                                              |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| [Setup](docs/setup.md)                           | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup                                               |
-| [Install dependencies](docs/dependencies.md)     | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection                   |
-| [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors              |
+| Guide                                            | Contents                                                                                                  |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| [Setup](docs/setup.md)                           | Prerequisites, WSL, Docker demo, Unsloth, and MCP setup                                                   |
+| [Install dependencies](docs/dependencies.md)     | WSL/Docker installers, Whippet and AD tools, offline checks, and revision selection                       |
+| [Configuration](docs/configuration.md)           | Providers, model selection, API keys, limits, context, caching, costs, and access errors                  |
 | [Settings snapshots](docs/settings-snapshots.md) | Export and restore complete saved settings, interface preferences, optional API keys, and recovery copies |
-| [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing |
-| [Versioning](docs/versioning.md)                  | Release numbering, archive compatibility, and version updates                                        |
-| [Image evidence](docs/image-evidence.md)         | PNG/JPEG previews, oracle-directed GLM 5.3 Flash image input, and transcription verification          |
-| [Web research](docs/web-research.md)             | Experimental oracle-directed Z.AI search, bounded source reads, caching, and research budgets          |
-| [Whippet AD analysis](docs/whippet.md)           | Optional Kali CLI, model awareness, focused graph queries, and structured context limits              |
-| [Whippet batch queries](docs/whippet-batch.md)   | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup                     |
-| [Host protection](docs/host-protection.md)       | Runtime boundaries, command validation, and root approvals                                            |
-| [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits                        |
-| [Operator guide](AGENTS.md)                      | Instructions for Codex operators                                                                      |
+| [Running sessions](docs/running-sessions.md)     | Hosted and Codex workflows, dashboard, CLI, reconnaissance, flags, artifacts, replay, and VPN routing     |
+| [Versioning](docs/versioning.md)                 | Release numbering, archive compatibility, and version updates                                             |
+| [Image evidence](docs/image-evidence.md)         | PNG/JPEG previews, oracle-directed GLM 5.3 Flash image input, and transcription verification              |
+| [Web research](docs/web-research.md)             | Experimental oracle-directed Z.AI search, bounded source reads, caching, and research budgets             |
+| [Whippet AD analysis](docs/whippet.md)           | Optional Kali CLI, model awareness, focused graph queries, and structured context limits                  |
+| [Whippet batch queries](docs/whippet-batch.md)   | Whippet 0.7 process reuse, protocol logging, capture refresh, and runtime cleanup                         |
+| [Host protection](docs/host-protection.md)       | Runtime boundaries, command validation, and root approvals                                                |
+| [Evaluation and limitations](docs/evaluation.md) | Experiment modes, recorded metrics, success verification, and prototype limits                            |
+| [Operator guide](AGENTS.md)                      | Instructions for Codex operators                                                                          |
 
 Finished sessions can be replayed from the dashboard with play/pause, speed controls, a seek timeline, and progressive evidence display. Replay uses saved logs without contacting the target or calling models. See [session replay](docs/running-sessions.md#replay-a-saved-session).
 
