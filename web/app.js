@@ -203,6 +203,10 @@
       : state === "checking" || value?.checking ? "Checking installed tools. No target is contacted."
       : (value?.issues || []).join("\n");
     $("dependencyBlocked").textContent = value?.blocked ? "Stop active sessions before installing dependencies." : "";
+    $("dependencyAuth").classList.toggle("hidden", value?.runtime !== "native" || ready);
+    $("dependencyAuth").textContent = value?.runtime === "native" && !ready
+      ? "Native Kali: Install opens a system authentication dialog for apt packages. Enter your administrator password there. If no dialog appears, run the command below in a Kali terminal."
+      : "";
     $("dependencyCommand").textContent = value?.command || "Choose and save a runtime in Configuration first.";
     $("dependencyLog").textContent = (value?.installation?.logs || []).join("\n");
     $("dependencyOutput").classList.toggle("hidden", !(value?.installation?.logs || []).length);

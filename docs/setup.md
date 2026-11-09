@@ -29,7 +29,7 @@ python3 scripts/install_dependencies.py --runtime native --check
 python3 harp_web.py
 ```
 
-The installer elevates only the apt stage with `sudo -n`; Python tools are installed with pipx as your current user. If sudo authentication is unavailable, the installer fails rather than requesting a password through the web UI. Run setup from your Kali terminal. Open a new login shell after installation so pipx tools are on PATH.
+The terminal installer elevates only the apt stage with `sudo -n`; Python tools are installed with pipx as your current user. The dashboard's **Install dependencies** button uses Kali's system authentication dialog for apt instead. Enter your administrator password in that system dialog; HARP never asks for it in the web page. If a system dialog is unavailable, run setup from your Kali terminal as shown above. Open a new login shell after installation so pipx tools are on PATH.
 
 Select **Native Kali Linux**, the **VPN / direct Kali network** policy, and the exact authorized target IP. A fresh Linux dashboard already selects this runtime. For headless configuration, copy `harp.native.example.json` to `harp.json`, replace the target placeholder, and configure your models. The original `harp.example.json` is still the optional Docker demo configuration.
 

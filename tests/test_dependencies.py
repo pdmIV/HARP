@@ -30,11 +30,25 @@ class DependencyTests(unittest.TestCase):
         self.assertIn("--check", stages[0][0])
         self.assertNotIn("root", stages[0][0])
 
+    def test_native_dashboard_uses_system_auth_only_for_apt(self):
+        with patch.object(installer.sys, "platform", "linux"), patch.object(installer.os, "geteuid", return_value=1000):
+            apt, python = installer.plan(self.args("--runtime", "native", "--native-auth", "polkit"))
+            self.assertEqual(apt, (["pkexec", "--disable-internal-agent", "/usr/bin/bash",
+                                    str(installer.SCRIPT), "--apt-only"], False))
+            self.assertEqual(python[0][:2], ["bash", "-s"])
+            self.assertIn("--python-only", python[0])
+            self.assertTrue(python[1])
+            terminal = installer.plan(self.args("--runtime", "native"))
+            self.assertEqual(terminal[0][0][:3], ["sudo", "-n", "--"])
+            self.assertEqual(installer.plan(self.args("--runtime", "native", "--native-auth", "polkit", "--check")),
+                             [(["bash", "-s", "--", "--check"], True)])
+
     def test_refuses_implicit_users_invalid_refs_and_cross_runtime_options(self):
         for args in [("--runtime", "wsl"),
                      ("--runtime", "wsl", "--distro", "kali", "--user", "root"),
                      ("--runtime", "docker", "--whippet-ref", "main;echo bad"),
-                     ("--runtime", "docker", "--distro", "kali")]:
+                     ("--runtime", "docker", "--distro", "kali"),
+                     ("--runtime", "wsl", "--distro", "kali", "--user", "peter", "--native-auth", "polkit")]:
             with self.subTest(args=args), self.assertRaises(ValueError):
                 installer.plan(self.args(*args))
 
@@ -56,6 +70,16 @@ class DependencyTests(unittest.TestCase):
         self.assertIsInstance(run.call_args.kwargs["input"], bytes)
         self.assertNotIn(b"\r\n", run.call_args.kwargs["input"])
         self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_system_auth_failure_gives_terminal_fallback_without_running_pipx(self):
+        with patch.object(installer.sys, "platform", "linux"), \
+             patch.object(installer.os, "geteuid", return_value=1000), \
+             patch.object(installer.subprocess, "run", side_effect=subprocess.CalledProcessError(126, "pkexec")) as run, \
+             contextlib.redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(RuntimeError, "sudo -v"):
+            installer.main(["--runtime", "native", "--native-auth", "polkit"])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][0], "pkexec")
 
     def smoke_code(self):
         source = installer.SCRIPT.read_text()

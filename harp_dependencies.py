@@ -76,10 +76,12 @@ class DependencyManager:
 
     def base(self, cfg):
         args = options(cfg)
+        native = cfg.get("runtime") == "native"
         return {"key": identity(cfg), "runtime": cfg.get("runtime", "docker"),
                 "target": (f"WSL {cfg.get('wsl_distro', 'kali-linux')} / {cfg.get('wsl_user', 'kali')}"
                            if cfg.get("runtime") == "wsl" else "Native Kali / current user" if cfg.get("runtime") == "native" else "Docker harp-kali:latest"),
-                "command": "python scripts/install_dependencies.py " + " ".join(args)}
+                "command": ("sudo -v && " if native else "") +
+                           ("python3" if native else "python") + " scripts/install_dependencies.py " + " ".join(args)}
 
     def status(self, cfg, force=False):
         try:
@@ -138,6 +140,8 @@ class DependencyManager:
         logs = collections.deque(maxlen=150)
         try:
             argv = [sys.executable, str(self.root / "scripts" / "install_dependencies.py"), *options(cfg)]
+            if cfg.get("runtime") == "native":
+                argv += ["--native-auth", "polkit"]
             process = subprocess.Popen(argv, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        text=True, encoding="utf-8", errors="replace", bufsize=1,
                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)

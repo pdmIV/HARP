@@ -8,7 +8,7 @@ python3 scripts/install_dependencies.py --runtime native
 python3 scripts/install_dependencies.py --runtime native --check
 ```
 
-Native setup elevates only apt with noninteractive sudo, then installs pipx tools as the current user. Open a new login shell afterward. The dashboard can run offline checks; use the terminal installer when sudo authentication is needed. No hypervisor-specific configuration is required. See [native Kali setup](setup.md#native-kali-linux).
+Native terminal setup elevates only apt with noninteractive sudo after `sudo -v`, then installs pipx tools as the current user. The dashboard instead uses Kali's system authentication dialog (polkit) for the apt stage, so the password never passes through HARP's web page. If no system dialog is available, use the terminal commands above. Open a new login shell afterward. No hypervisor-specific configuration is required. See [native Kali setup](setup.md#native-kali-linux).
 
 The web command center checks the saved Kali runtime in the background. If tools
 are missing, incompatible, or the runtime cannot be reached, click the dependency

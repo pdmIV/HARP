@@ -20,6 +20,8 @@ def parser():
     cli.add_argument("--image", default="harp-kali:latest", help="Docker tool image tag")
     cli.add_argument("--whippet-ref", default="main", help="Whippet Git branch, tag or commit (default main)")
     cli.add_argument("--check", action="store_true", help="Verify installed tools offline without installing")
+    cli.add_argument("--native-auth", choices=("sudo", "polkit"), default="sudo",
+                     help="Native apt authentication: sudo in a terminal, or a system dialog for the dashboard")
     return cli
 
 
@@ -34,8 +36,12 @@ def plan(args):
             raise ValueError("Native setup requires Linux and a nonroot user; run sudo -v first for installation")
         if args.check:
             return [(["bash", "-s", "--", "--check"], True)]
-        return [(["sudo", "-n", "--", "bash", "-s", "--", "--apt-only"], True),
+        apt = (["pkexec", "--disable-internal-agent", "/usr/bin/bash", str(SCRIPT), "--apt-only"], False) \
+            if args.native_auth == "polkit" else (["sudo", "-n", "--", "bash", "-s", "--", "--apt-only"], True)
+        return [apt,
                 (["bash", "-s", "--", "--python-only", "--whippet-ref", args.whippet_ref], True)]
+    if args.native_auth != "sudo":
+        raise ValueError("--native-auth applies only to native Kali")
     if args.runtime == "wsl":
         for value, label in ((args.distro, "--distro"), (args.user, "--user")):
             if not value or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}", value):
@@ -75,13 +81,22 @@ def main(argv=None):
     print("Checking" if args.check else "Installing", "dependencies for", args.runtime, flush=True)
     for command, stream_script in commands:
         # No target/session commands run here: this is explicit pre-session setup.
-        subprocess.run(command, input=script if stream_script else None, cwd=ROOT, check=True,
-                       creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        if command[0] == "pkexec":
+            print("Approve the Kali system authentication dialog to install apt packages.", flush=True)
+        try:
+            subprocess.run(command, input=script if stream_script else None, cwd=ROOT, check=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+        except (OSError, subprocess.CalledProcessError) as error:
+            if command[0] == "pkexec":
+                raise RuntimeError("System authentication was canceled or unavailable. "
+                                   "From a Kali terminal, run sudo -v and then "
+                                   "python3 scripts/install_dependencies.py --runtime native.") from error
+            raise
     print("Dependency setup complete. Select this same runtime/user in HARP.")
 
 
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, subprocess.CalledProcessError) as error:
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as error:
         raise SystemExit("Dependency setup failed. Correct the error above and rerun: " + str(error)) from error

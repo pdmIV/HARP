@@ -277,6 +277,10 @@ context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL 
 assert.match(nodes.get("dependencyDetected").textContent, /bloodhound-python \(legacy collector\)/);
 assert.match(nodes.get("dependencyDetected").textContent, /certipy-ad/);
 assert.match(nodes.get("dependencyResult").textContent, /Missing tools: whippet/);
+context.ui.renderDependencies({status: "warning", runtime: "native", key: "native", target: "Native Kali / current user", issues: ["Missing tools: whippet"], command: "sudo -v && python3 scripts/install_dependencies.py --runtime native"});
+assert.match(nodes.get("dependencyAuth").textContent, /system authentication dialog/);
+assert.match(nodes.get("dependencyCommand").textContent, /sudo -v/);
+context.ui.renderDependencies({status: "warning", key: "wsl-kali", target: "WSL lab / peter", issues: ["Missing tools: whippet"], command: "python scripts/install_dependencies.py --runtime wsl --distro lab --user peter", tools: {bloodhound_collector: "bloodhound-python", certipy: "certipy-ad"}});
 nodes.get("dependencyWarning").handlers.click();
 assert.equal(nodes.get("dependencyDialog").open, true);
 assert.match(nodes.get("dependencyTarget").textContent, /WSL lab \/ peter/);
