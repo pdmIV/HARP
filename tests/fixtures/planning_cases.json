@@ -1,0 +1,296 @@
+[
+  {
+    "id": "reachable_operation_hidden_version",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient //192.0.2.10/QUEUE -N -c 'print sample.txt'",
+          "output": "putting file sample.txt as sample.txt",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "research",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": []
+  },
+  {
+    "id": "http_feature_hidden_version",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "curl -i -X POST http://192.0.2.10/uploads",
+          "output": "HTTP/1.1 201 Created",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "research",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "http.request",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": []
+  },
+  {
+    "id": "resource_denied_not_authentication",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "curl -I http://192.0.2.10/private",
+          "output": "HTTP/1.1 403 Forbidden",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "enumerate",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "http.request",
+        "status": "denied"
+      }
+    ],
+    "forbidden_observations": [
+      {
+        "operation": "session.authenticate",
+        "status": "denied"
+      }
+    ]
+  },
+  {
+    "id": "transport_failure_keeps_other_capability",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient //192.0.2.10/QUEUE -N -c 'print sample.txt'",
+          "output": "putting file sample.txt as sample.txt",
+          "exit_code": 0
+        },
+        {
+          "command": "rpcclient -N 192.0.2.10 -c 'enumprinters'",
+          "exit_code": 1,
+          "output": "Bad SMB2 (sign_algo_id=2) signature for message\nCannot connect: NT_STATUS_ACCESS_DENIED"
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "research",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      },
+      {
+        "operation": "rpc.query",
+        "status": "inconclusive"
+      }
+    ],
+    "forbidden_observations": []
+  },
+  {
+    "id": "client_banner_is_not_remote_release",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient -L //192.0.2.10 -N -d 4",
+          "output": "Client started (version 8.9.10)",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "enumerate",
+      "fingerprint"
+    ],
+    "required_observations": [],
+    "forbidden_observations": [
+      {
+        "operation": "server.version",
+        "status": "confirmed"
+      }
+    ]
+  },
+  {
+    "id": "research_disabled",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": false
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient //192.0.2.10/QUEUE -N -c 'print sample.txt'",
+          "output": "putting file sample.txt as sample.txt",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "enumerate",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": []
+  },
+  {
+    "id": "fingerprint_budget_exhausted",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient //192.0.2.10/QUEUE -N -c 'print sample.txt'",
+          "output": "putting file sample.txt as sample.txt",
+          "exit_code": 0
+        }
+      ],
+      "assessment_history": [
+        {
+          "action": "fingerprint",
+          "fact": "server.version",
+          "resource": "service",
+          "principal": "anonymous",
+          "before_observation": 1
+        },
+        {
+          "action": "fingerprint",
+          "fact": "server.version",
+          "resource": "service",
+          "principal": "anonymous",
+          "before_observation": 1
+        }
+      ],
+      "prerequisite_ledger": [
+        {
+          "host": "192.0.2.10",
+          "fact": "server.version",
+          "resource": "service",
+          "principal": "anonymous",
+          "state": "not_observable"
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "research",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": []
+  },
+  {
+    "id": "negated_guessing_does_not_block_feature_check",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient //192.0.2.10/QUEUE -N -c 'print sample.txt'",
+          "output": "putting file sample.txt as sample.txt",
+          "exit_code": 0
+        }
+      ]
+    },
+    "acceptable_actions": [
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": []
+  }
+]

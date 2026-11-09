@@ -18,14 +18,16 @@ import harp_secret
 import harp_paths
 import harp_effort
 import harp_research
+import harp_strategy
+import harp_evidence
 import harp_whippet
 
 BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
                      "repeated_output", "missing_command", "invalid_replies",
                      "command_validation_failed", "repeated_or_excessive_memory_query",
-                     "oracle_requested", "whippet_query_rejected"}
-FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "model_call_budget", "whippet_batch_error"}
+                     "oracle_requested", "whippet_query_rejected", "monitoring_stalled", "model_call_budget"}
+FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "whippet_batch_error"}
 
 
 def oracle_model_options(model: str) -> dict:
@@ -127,7 +129,8 @@ def compact_past_observations(observations: list[dict], *, recent: int = 4) -> l
     """Keep distinct, successful older results without replaying the full log."""
     seen: set[str] = set()
     compact = []
-    for item in reversed(observations[:-recent]):
+    for index in reversed(range(max(0, len(observations) - recent))):
+        item = observations[index]
         output = str(item.get("output", "")).strip()
         if item.get("exit_code") != 0 or not output:
             continue
@@ -141,7 +144,7 @@ def compact_past_observations(observations: list[dict], *, recent: int = 4) -> l
                 break
             continue
         excerpt = output[:260] + (" … " + output[-260:] if len(output) > 520 else output[260:])
-        compact.append({"command": str(item.get("command", ""))[:180],
+        compact.append({"observation": index + 1, "command": str(item.get("command", ""))[:180],
                         "output_excerpt": excerpt})
         if len(compact) == 8:
             break
@@ -158,9 +161,10 @@ def oracle_observations(session: dict, config: dict) -> tuple[list[dict], int]:
     return ([harp_whippet.observation(item, max(8000 if harp_whippet.is_handoff(item.get("command", ""))
                                                   else 3000, output_chars))
              if harp_whippet.is_query(item.get("command", "")) else
-             {"command": item.get("command"), "exit_code": item.get("exit_code"),
+             {"observation": len(session["observations"]) - len(session["observations"][-count:]) + index + 1,
+              "command": item.get("command"), "exit_code": item.get("exit_code"),
               "output": str(item.get("output", ""))[-output_chars:]}
-            for item in session["observations"][-count:]], count)
+            for index, item in enumerate(session["observations"][-count:])], count)
 
 
 def last_command_rejection(run_dir: Path, offset: int) -> dict | None:
@@ -200,6 +204,10 @@ def assisted_objective(decision: dict, plan: str) -> str:
     if implementation:
         if not objective:
             raise ValueError("Oracle implementation requires a bounded objective")
+        implementation = harp_strategy.prepare_command(implementation, decision.get("shell", "sh"))
+        issue = harp_strategy.shell_issue(implementation)
+        if issue:
+            raise ValueError(issue)
         objective += "\n\nOracle-authored implementation instructions:\n" + implementation
     return objective
 
@@ -303,7 +311,8 @@ def oracle_history(run_dir: Path) -> dict:
                 "reason": str(event.get("reason", ""))[:200]}
         elif kind == "oracle_nim_probe" and isinstance(event.get("command"), str):
             history["probes"].add(event["command"])
-            history["stall_cycles"] = 0
+        elif kind == "oracle_probe_progress":
+            history["stall_cycles"] = 0 if event.get("new_evidence", 0) else history["stall_cycles"] + 1
         elif kind == "oracle_nim_probe_rejected":
             history["rejections"] += 1
             history["probe_feedback"] = {"reason": event.get("reason", "Probe rejected")}
@@ -319,7 +328,8 @@ def oracle_history(run_dir: Path) -> dict:
                 pending_attempt = None
             steps = event["local_steps"]
             previous = history["last_local_steps"]
-            history["stall_cycles"] = history["stall_cycles"] + 1 if previous == steps else 0
+            no_evidence = event.get("new_evidence") == 0 if "new_evidence" in event else previous == steps
+            history["stall_cycles"] = history["stall_cycles"] + 1 if no_evidence else 0
             history["last_local_steps"] = steps
         elif kind == "oracle_nim_stopped":
             last_stop = event
@@ -405,7 +415,7 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
             decision = harp.json_object(content)
             # Optional JSON fields commonly arrive as null. Treat null as omitted,
             # while still rejecting non-string commands and malformed actions.
-            for field in ("objective", "implementation", "oracle_command"):
+            for field in ("objective", "implementation", "oracle_command", "shell"):
                 if decision.get(field, "") is None:
                     decision.pop(field)
             if not isinstance(decision.get("stop"), bool) or not isinstance(decision.get("plan", ""), str):
@@ -485,6 +495,10 @@ def run(run_dir: Path) -> None:
                    "oracle_help_request": session.get("oracle_help_request"),
                    "proxy_image_input_available": harp.supports_image_input(session["config"]["local"]),
                    "unverified_local_conclusion": session.get("local_conclusion"),
+                   "strategy_feedback": session.get("strategy_feedback"),
+                   "capability_evidence": harp_evidence.context(session),
+                   "planning_protocol": session.get("planning_protocol", 1),
+                   "allowed_check_actions": harp_evidence.allowed_actions(session),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                    for name in ("user.txt", "root.txt")}, "cycle": used_cycles + 1}
         if probe_feedback:
@@ -493,6 +507,7 @@ def run(run_dir: Path) -> None:
             context["unverified_research"] = harp_research.context(run_dir, session)
             context["research_feedback"] = session.get("oracle_research_feedback")
             context["research_turns_remaining"] = max(0, harp_research.MAX_ORACLE_TURNS - research_turns)
+            context["research_opportunity"] = harp_research.opportunity(session)
         if harp_whippet.relevant(session):
             context["whippet"] = session.get("whippet")
             context["whippet_query_history"] = harp_whippet.query_history(session)
@@ -537,7 +552,7 @@ def run(run_dir: Path) -> None:
                 "The flags_found fields are the authoritative capture status. If a flag appears in "
                 "terminal evidence but is not captured, delegate one isolated read of that exact flag "
                 "with its value alone in output; do not stop on a model claim of completion. "
-                + harp.FLAG_COLLECTION_GUIDANCE + " "
+                + harp.FLAG_COLLECTION_GUIDANCE + " " + harp_strategy.GUIDANCE + " "
                 "When new verified user-level access makes user.txt potentially readable, delegate "
                 "that bounded check as the next objective before planning escalation or a pivot. "
                 "Keep collector output, captures, scripts and reports under workspace from the context. "
@@ -549,7 +564,11 @@ def run(run_dir: Path) -> None:
                 "are model interpretations. Validate them with a bounded follow-up before treating them as facts. "
                 "Return only JSON with keys plan (short operator-facing sentence), objective "
                 "(specific bounded task, at most 1000 characters), stop (boolean), optional "
-                "implementation (string with complete code), and optional oracle_command (string). "
+                "implementation (string with complete code), optional oracle_command (string), "
+                "and credential_test for observed online password candidates. "
+                "Include check describing the hypothesis, scoped fact, exact evidence references and "
+                "expected_positive/expected_negative observations that would change the next decision. "
+                "For Bash implementation code add shell:bash; default shell is sh. "
                 "Omit unused optional fields rather than filling them with null or placeholder objects. "
                 "Assess task complexity before delegating. For complex payload crafting, delicate "
                 "quoting, protocol-specific code, or debugging beyond the proxy's likely capability, "
@@ -597,6 +616,29 @@ def run(run_dir: Path) -> None:
         if decision is None:
             return
         plan = str(decision.get("plan", "")).strip()[:1000]
+        if not decision.get("stop"):
+            issue = harp_evidence.check_issue(decision, session)
+            if not issue:
+                issue = harp_research.review_issue(decision, session)
+            if not issue and "research" not in decision:
+                issue = harp_strategy.credential_test_issue(decision, session["observations"])
+            if issue:
+                current = harp.load_session(run_dir)
+                current["strategy_feedback"] = {"error": issue, "next": "Use scoped observations and unknown prerequisites to choose a discriminating check."}
+                current["strategy_rejections"] = current.get("strategy_rejections", 0) + 1
+                harp.save_session(run_dir, current)
+                public_decision = {key: decision[key] for key in
+                    ("plan", "objective", "check", "credential_test", "implementation", "oracle_command", "shell") if key in decision}
+                harp.append_event(run_dir, {"type": "oracle_strategy_rejected", "reason": issue, "decision": public_decision})
+                if current["strategy_rejections"] >= 3:
+                    harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "strategy_no_progress"})
+                    return
+                continue
+            current = harp.load_session(run_dir)
+            current.pop("strategy_feedback", None)
+            current["strategy_rejections"] = 0
+            harp.save_session(run_dir, current)
+            session = current
         if "research" in decision:
             if plan:
                 harp.append_event(run_dir, {"type": "oracle_plan", "plan": plan})
@@ -617,6 +659,11 @@ def run(run_dir: Path) -> None:
                 if identity in research_seen:
                     raise ValueError("Repeated oracle research action; use the preserved results")
                 research_seen.add(identity)
+                current = harp.load_session(run_dir)
+                harp_evidence.record_check(current, decision.get("check"))
+                harp.save_session(run_dir, current)
+                if decision.get("check"):
+                    harp.append_event(run_dir, {"type": "oracle_check", "check": decision["check"]})
                 result = harp_research.request(run_dir, decision["research"])
                 if result.get("error"):
                     feedback = {"error": result["error"], "next": "Do not retry this failed source/search; continue with evidence or report a specific blocker"}
@@ -658,22 +705,60 @@ def run(run_dir: Path) -> None:
                 continue
             probe_feedback = None
             oracle_probes.add(oracle_command)
+            current = harp.load_session(run_dir)
+            for row in current["observations"]:
+                harp_evidence.progress(current, row)
+            before_probe_evidence = set(harp_evidence.sync(current)["seen"])
+            harp_evidence.record_check(current, decision.get("check"))
+            harp.save_session(run_dir, current)
+            if decision.get("check"):
+                harp.append_event(run_dir, {"type": "oracle_check", "check": decision["check"]})
             harp.append_event(run_dir, {"type": "oracle_nim_probe", "command": oracle_command})
             harp.direct_exec(run_dir, oracle_command, quiet=True)
-            stall_cycles = 0
+            current = harp.load_session(run_dir)
+            harp_evidence.finish_check(current, decision.get("check"))
+            if current["observations"]:
+                harp_evidence.progress(current, current["observations"][-1])
+            new_probe_evidence = len(set(harp_evidence.sync(current)["seen"]) - before_probe_evidence)
+            harp.save_session(run_dir, current)
+            harp.append_event(run_dir, {"type": "oracle_probe_progress", "new_evidence": new_probe_evidence})
+            stall_cycles = 0 if new_probe_evidence else stall_cycles + 1
+            if stall_cycles >= 3:
+                harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "no_progress"})
+                return
             continue
         if not objective or objective in prior:
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "missing_or_repeated_objective"})
             return
+        if decision.get("credential_test"):
+            test = decision["credential_test"]
+            task, marker, implementation = objective.partition(harp_strategy.IMPLEMENTATION_MARKER)
+            objective = task + ("\nCredential validation limit: at most " + str(test["max_attempts"]) +
+                          " total authentication attempts across accounts/services. Use only these observed candidates: " +
+                          json.dumps([row["value"] for row in test["candidates"]]) +
+                          ". Do not load or expand generic password lists.") + marker + implementation
+        if objective in prior:
+            harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "missing_or_repeated_objective"})
+            return
         probe_feedback = None
         prior.add(objective)
+        harp_evidence.record_check(session, decision.get("check"))
+        if decision.get("check"):
+            harp.append_event(run_dir, {"type": "oracle_check", "check": decision["check"]})
         before_steps = int(session.get("local_steps", 0))
+        before_observations = len(session["observations"])
+        for item in session["observations"]:
+            harp_evidence.progress(session, item)
+        before_evidence = set(harp_evidence.sync(session)["seen"])
+        harp.save_session(run_dir, session)
         event_offset = (run_dir / "events.jsonl").stat().st_size
         harp.delegate(run_dir, objective, min(int(cfg.get("steps_per_cycle", 6)),
                     int(session["config"]["max_steps"])), quiet=True,
                     unlimited_budget=unlimited_budget)
         session = harp.load_session(run_dir)
         stop_reason = session.get("last_delegate_stop")
+        harp_evidence.finish_check(session, decision.get("check"))
+        harp.save_session(run_dir, session)
         if session.get("status") == "finished":
             harp.append_event(run_dir, {"type": "oracle_nim_stopped",
                                        "reason": "flags_captured" if stop_reason == "flags_captured" else "session_finished"})
@@ -692,10 +777,15 @@ def run(run_dir: Path) -> None:
             attempt["last_rejection"] = rejection
         attempts.append(attempt)
         del attempts[:-8]
-        stall_cycles = 0 if int(session.get("local_steps", 0)) > before_steps else stall_cycles + 1
+        new_results = session["observations"][before_observations:]
+        for row in new_results:
+            harp_evidence.progress(session, row)
+        progressed = bool(set(harp_evidence.sync(session)["seen"]) - before_evidence)
+        harp.save_session(run_dir, session)
+        stall_cycles = 0 if progressed else stall_cycles + 1
         if stall_cycles >= 3:
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "no_progress",
-                                        "detail": "Three delegations produced no new terminal result"})
+                                        "detail": "Three delegations produced no distinct target evidence; polling and errors are not progress"})
             return
         if session.get("pending_root_command") or stop_reason in FATAL_STOPS:
             harp.append_event(run_dir, {"type": "oracle_nim_stopped",

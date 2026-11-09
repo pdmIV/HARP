@@ -68,7 +68,7 @@ Research is stored separately from target observations in `research.json` and `r
 
 Query checks reject IP addresses, common key/flag patterns, HTB identifiers, discovered lab hostnames, and exact recorded credential/flag values. Known HTB walkthrough results are filtered by title and URL. These checks are heuristics, not a guarantee against secret disclosure or walkthrough contamination. The oracle must use public product/version/CVE details, not recovered secrets or box names.
 
-The live event stream and saved replay display research starts, results, failures, and cache reuse. `research.json` records operation counts, latency, and returned characters. Session views also expose separate research usage counts. Search charges remain **unknown**, not zero, and are not added to model-token cost estimates. This version does not fetch an account balance or infer billed search rates. Search and source reads do not count as target terminal steps or human tactical intervention.
+The dashboard also reports whether research is disabled, enabled but unused, in progress, completed, failed, or interrupted. Saved replay reconstructs that state at each point in time. The live event stream and saved replay display research starts, results, failures, and cache reuse. `research.json` records operation counts, latency, and returned characters. Session views also expose separate research usage counts. Search charges remain **unknown**, not zero, and are not added to model-token cost estimates. This version does not fetch an account balance or infer billed search rates. Search and source reads do not count as target terminal steps or human tactical intervention.
 
 ## Verification and evaluation
 
@@ -82,3 +82,9 @@ node tests/test_web_ui.js
 Tests use synthetic documents and mocked provider/transport responses. They cover the opt-in gate, request format, hosted continuation, configuration persistence, caching, durable budgets, failure handling, public-source checks, excerpt limits, and UI placement. They make no paid Z.AI calls. Live account access, real-site extraction quality, and solve-rate effects require a separate experiment.
 
 Compare enabled and disabled runs on matching target snapshots, model settings, and budgets. Record verified success, total oracle/proxy tokens, research requests, source reads, cache hits, time, failures, and known search charges separately. Search may add inference turns and cost even when it helps solve a box; do not assume it saves tokens until measured.
+
+## Evidence-based planning
+
+Research-specific prompting and context are supplied only when the saved session toggle is enabled. When enabled, the oracle is encouraged to investigate a focused public vulnerability or configuration question raised by observed service capabilities before falling back to generic credential guessing. Research remains optional and subject to the existing budgets; no box names, intended solutions, CVE identifiers, or walkthrough queries are embedded in planning guidance. Disabled sessions continue to use target evidence and local tool documentation without research context or provider calls.
+
+New hosted sessions expose a capability-derived research opportunity when research is enabled. The oracle chooses a focused research action or records `check.research_decision` explaining a better retained-source or local check. Unknown versions do not prevent advisory research about the reachable operation. See [capability planning](capability-planning.md).

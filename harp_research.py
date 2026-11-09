@@ -19,6 +19,16 @@ INSTRUCTION = """
 Experimental public research is enabled. Search only when a specific missing fact could
 change your next action. Prefer existing evidence and cached research. Do not search
 routine commands, target IPs, credentials, box names, HTB walkthroughs or flags.
+When enumeration reveals an exposed capability but access to another resource fails,
+consider whether a missing public vulnerability or configuration fact could open a
+different path before guessing credentials. Use observed products, versions and
+capabilities to ask a focused question about advisories and prerequisites. If a precise
+version is unavailable, research reachable functionality and behavioral prerequisites
+instead of requiring a package banner. The research_opportunity card identifies
+observed capabilities worth investigating. When it is present, choose research or
+provide check.research_decision, a short reason why a cached source or local check is
+more useful now. Research is available, not mandatory for every turn. Verify source
+applicability against target evidence and distinguish unsupported hypotheses from facts.
 To research, return your normal plan plus research:{"query":"focused product/version,
 CVE or documentation question","reason":"missing fact and how it changes the next step"},
 stop:false and objective:"". To read one returned source, use research:{"source_id":"ID",
@@ -41,6 +51,30 @@ Search errors are returned once; do not retry or rephrase a failed request blind
 
 def enabled(session):
     return session.get("config", {}).get("oracle", {}).get("web_search_enabled") is True
+
+
+def opportunity(session):
+    if not enabled(session):
+        return None
+    import harp_evidence
+    card = harp_evidence.context(session)
+    capabilities = [row for row in card["facts"] if row["status"] == "confirmed" and
+                    row["operation"] in {"printer.submit", "file.write", "http.request", "share.map"}]
+    if not capabilities:
+        return None
+    return {"capabilities": capabilities[:6], "unknown_prerequisites": card["prerequisites"],
+            "next": "Consider a focused product + exposed capability + access-level advisory question. Unknown versions do not block this step; verify prerequisites behaviorally.",
+            "constraints": "No target IPs, box names, credentials, flags or walkthrough terms in queries."}
+
+
+def review_issue(decision, session):
+    if not enabled(session) or session.get("planning_protocol", 1) < 2 or "research" in decision or not opportunity(session):
+        return None
+    check = decision.get("check") or {}
+    reason = check.get("research_decision")
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
+        return "An exposed capability warrants research review: choose research or give check.research_decision explaining why a local check or retained source is better."
+    return None
 
 
 def load(run_dir):
@@ -192,6 +226,17 @@ def metrics(run_dir):
             "failed_requests": sum(x["status"] == "failed" for x in state["calls"]),
             "cache_hits": state["cache_hits"], "estimated_usd": None,
             "seconds": round(sum(x.get("seconds", 0) for x in state["calls"]), 2)}
+
+
+def activity_status(session, calls):
+    """Works with durable calls or a replay's event-derived calls."""
+    if not enabled(session):
+        return "disabled"
+    if not calls:
+        return "enabled_unused"
+    if calls[-1].get("status") == "started":
+        return "requested" if session.get("status") in ("active", "recon") else "interrupted"
+    return "failed" if calls[-1].get("status") == "failed" else "completed"
 
 
 def tool_result(output):

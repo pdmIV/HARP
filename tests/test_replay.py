@@ -66,6 +66,23 @@ class ReplayTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "finished"):
                 harp_replay.build_replay(path, {})
 
+    def test_research_status_is_reconstructed_without_revealing_future_requests(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_run(path)
+            state = harp.load_session(path)
+            state["config"]["oracle"]["web_search_enabled"] = True
+            harp.save_session(path, state)
+            events = [
+                {"type": "recon_finished", "at": "1970-01-01T00:00:05+00:00"},
+                {"type": "research_started", "id": "one", "operation": "search", "at": "1970-01-01T00:00:10+00:00"},
+                {"type": "research_completed", "id": "one", "operation": "search", "status": "failed", "at": "1970-01-01T00:00:15+00:00"},
+                {"type": "finish", "at": "1970-01-01T00:00:20+00:00"}]
+            (path / "events.jsonl").write_text("\n".join(json.dumps(event) for event in events))
+            replay = harp_replay.build_replay(path, {})
+            self.assertEqual([frame["summary"]["research_status"] for frame in replay["frames"]],
+                             ["enabled_unused", "enabled_unused", "requested", "failed", "failed"])
+
     def test_authenticated_replay_endpoint(self):
         handler = harp_web.HARPRequestHandler.__new__(harp_web.HARPRequestHandler)
         handler.path = "/api/sessions/20261107-183134-ba6eec/replay"

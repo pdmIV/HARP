@@ -20,6 +20,8 @@ import harp
 import harp_artifacts
 import harp_whippet
 import harp_research
+import harp_evidence
+import harp_strategy
 import harp_paths
 import harp_version
 
@@ -137,6 +139,9 @@ def start_session(mode: str = "hybrid", fresh_recon: bool = False) -> str:
 def inspect_session(session: str) -> str:
     state = harp.load_session(run_path(session))
     return json.dumps({"summary": harp.summarize(state), "recon": state["recon"],
+                       "capability_evidence": harp_evidence.context(state),
+                       "planning_guidance": harp_strategy.GUIDANCE,
+                       "allowed_check_actions": harp_evidence.allowed_actions(state),
                        "http_probes": state.get("http_probes", []),
                        "smb_probes": state.get("smb_probes", []),
                        "whippet": state.get("whippet") if harp_whippet.enabled(state) else None,

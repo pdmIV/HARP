@@ -729,7 +729,7 @@
     if (kind.startsWith("research_") || kind.startsWith("oracle_") || kind === "invalid_oracle_reply") return "oracle";
     if (kind === "delegation") return "oracle";
     if (kind.startsWith("local_") || kind.startsWith("proxy_") || kind === "invalid_local_reply" || kind === "memory_query") return "local";
-    if (kind === "terminal_output" || kind === "approved_root_terminal") return "terminal";
+    if (kind === "terminal_output" || kind === "approved_root_terminal" || kind === "probe_outcomes") return "terminal";
     if (kind.startsWith("root_approval") || kind.startsWith("command_review")) return "approval";
     return "system";
   }
@@ -758,8 +758,12 @@
     if (kind === "oracle_effort_selected") return ["Oracle reasoning effort", `${event.effort} / ${event.source} / cycle ${event.cycle}`, ""];
     if (kind === "proxy_effort_recommendation") return ["Proxy effort recommendation", event.effort, ""];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];
-    if (kind === "delegation") return ["Task delegated", `${event.objective} · ${event.unbridled ? "unbridled" : event.unlimited_budget ? "no step budget" : `up to ${event.budget} steps`}`, ""];
-    if (kind === "oracle_budget_changed") return ["Oracle budget changed", event.unlimited_budget ? "Cycle and proxy step/model-call budgets removed" : "Configured budgets restored", ""];
+    if (kind === "oracle_strategy_rejected") return ["Strategy returned to oracle", event.reason, ""];
+    if (kind === "oracle_check") return ["Next discriminating check", `${event.check?.hypothesis || ""} · ${event.check?.fact || ""}`, `Positive: ${event.check?.expected_positive || ""}\nNegative: ${event.check?.expected_negative || ""}`];
+    if (kind === "probe_outcomes") return ["Scoped probe results", "Each result applies only to its identity, resource and operation",
+      (event.outcomes || []).map(row => `${row.principal} · ${row.host}/${row.resource} · ${row.operation}: ${row.status}\n${row.quote}`).join("\n\n")];
+    if (kind === "delegation") return ["Task delegated", `${event.objective} · ${event.unbridled ? "unbridled" : event.budget == null ? "no step budget" : `up to ${event.budget} steps`}`, ""];
+    if (kind === "oracle_budget_changed") return ["Oracle budget changed", event.unlimited_budget ? "Oracle cycle budget removed; delegation review limits remain" : "Configured budgets restored", ""];
     if (kind === "local_action") {
       const action = event.action || {};
       const command = action.command || action.finding || action.memory_query || "";
@@ -794,7 +798,9 @@
     if (kind === "command_review_decided") return [event.approved ? "Command accepted" : event.approved === false ? "Command denied" : "Review stopped", `Review wait ${event.wait_seconds ?? 0}s · ${event.reason || ""}`, event.command || ""];
     if (kind === "local_command_check") return ["Shell syntax checked", `Exit ${event.result?.exit_code ?? "?"}`, event.result?.exit_code ? event.result?.output || "" : ""];
     if (kind === "local_response_mode_changed") return ["Proxy reply retry", "Retrying a malformed reply with stricter settings", ""];
-    if (kind === "delegation_stopped") return ["Delegation stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, ""];
+    if (kind === "delegation_stopped") return event.reason === "null_auth_denied"
+      ? ["Legacy anonymous-access stop", "The older rule did not distinguish authentication, resource permissions and tool errors. Review the scoped evidence.", ""]
+      : ["Delegation stopped", `Reason: ${(event.reason || "unknown").replaceAll("_", " ")}`, ""];
     if (kind === "artifact_recorded") return [kind === "artifact_recorded" && event.kind === "flag" ? "Flag captured" : "Artifact recorded", `${event.title} · ${event.kind}`, ""];
     if (kind === "verified_success") return ["Success verified", event.evidence || "", ""];
     if (kind === "finish") return ["Session finished", `Outcome: ${event.success}`, ""];
@@ -891,6 +897,8 @@
       for (const id of ["delegateButton", "stopLocal", "runManual", "markSuccess", "finishSession", "resumeOracle"]) $(id).disabled = true;
       $("resumeOracle").classList.add("hidden");
       $("unlimitedBudgetRow").classList.add("hidden");
+      $("researchStatus").textContent = "Research: no session selected.";
+      $("capabilityFacts").replaceChildren();
       renderElapsed();
       return;
     }
@@ -903,7 +911,26 @@
     $("metricModel").textContent = sum.local_model_calls ?? "0";
     $("metricTokens").textContent = ((sum.local_input_tokens || 0) + (sum.local_output_tokens || 0)).toLocaleString();
     renderCostSummary(sum);
+    const researchLabels = {disabled: "Disabled for this session", enabled_unused: "Enabled · no requests yet",
+      requested: "Request in progress", completed: "Last request completed", failed: "Last request failed",
+      interrupted: "Request interrupted"};
+    const researchUsage = sum.research_usage;
+    $("researchStatus").textContent = `Research: ${researchLabels[sum.research_status] || "Status unavailable"}${researchUsage ? ` · ${researchUsage.search_requests} searches · ${researchUsage.source_requests} source reads · ${researchUsage.failed_requests} failures` : ""}`;
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
+    const evidence = sum.capability_evidence || {};
+    const facts = $("capabilityFacts");
+    facts.replaceChildren();
+    for (const row of (evidence.facts || [])) {
+      const item = el("p", "capability-fact");
+      item.textContent = `${row.principal} · ${row.host}/${row.resource} · ${row.operation}: ${row.status} (${row.source === "recon" ? `recon ${row.recon}` : `observation ${row.observation}`})`;
+      facts.append(item);
+    }
+    for (const row of (evidence.prerequisites || [])) {
+      const item = el("p", "capability-fact");
+      item.textContent = `${row.fact} · ${row.resource}: ${row.state.replaceAll("_", " ")}`;
+      facts.append(item);
+    }
+    if (!facts.children.length) facts.textContent = "No scoped observations yet.";
     $("metricFlags").textContent = `${flagCount} / 2`;
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.termination_reason === "host_interrupted" ? "Interrupted" : sum.success === "no" ? "No" : "Pending";
     $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.termination_reason === "host_interrupted" && sum.success !== "yes" ? (sum.cleanup_error ? "Recovery needs runtime cleanup" : "Recovered after host interruption") : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";

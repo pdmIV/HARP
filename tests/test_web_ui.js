@@ -226,6 +226,26 @@ for (const provider of ["codex", "zai", "openai", "nvidia_nim"]) {
 nodes.get("oracleSearch").checked = false;
 assert.equal(context.ui.configPayload().oracle.web_search_enabled, false);
 console.log("Research UI checks passed: toggle beneath adaptive reasoning, defaults off, provider-independent persistence.");
+context.ui.setSelected(state);
+for (const [status, label] of [["disabled", "Disabled"], ["enabled_unused", "no requests yet"],
+  ["requested", "in progress"], ["completed", "completed"], ["failed", "failed"], ["interrupted", "interrupted"]]) {
+  state.summary.research_status = status;
+  context.ui.renderSummary();
+  assert(nodes.get("researchStatus").textContent.includes(label), `Research status missing: ${status}`);
+}
+state.summary.research_usage = {search_requests: 1, source_requests: 2, failed_requests: 0};
+context.ui.renderSummary();
+assert(nodes.get("researchStatus").textContent.includes("1 searches · 2 source reads · 0 failures"));
+delete state.summary.research_usage;
+console.log("Research activity checks passed: unused, active, completed, failed and interrupted sessions.");
+state.summary.capability_evidence = {facts: [{host: "lab", principal: "anonymous", resource: "QUEUE",
+  operation: "printer.submit", status: "confirmed", source: "terminal", observation: 3}],
+  prerequisites: [{fact: "server.version", resource: "service", state: "not_observable"}]};
+context.ui.renderSummary();
+assert(nodes.get("capabilityFacts").children[0].textContent.includes("printer.submit: confirmed"));
+assert(nodes.get("capabilityFacts").children[1].textContent.includes("not observable"));
+delete state.summary.capability_evidence;
+console.log("Capability UI checks passed: scoped outcomes and unavailable prerequisites.");
 
 const whippetConfig = JSON.parse(fs.readFileSync("harp.example.json", "utf8"));
 assert(/id="whippetEnabled"[^>]*\bchecked/.test(html), "Whippet should appear enabled before configuration loads");

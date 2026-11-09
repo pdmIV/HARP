@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Retain source-linked scoped capabilities and prerequisites in oracle/proxy context, the dashboard and replay. Resource denials no longer become global anonymous-authentication stops.
+- Require evidence-cited discriminating checks for new hosted sessions; bound repeated fingerprinting and retain unknown/not-observable facts without blocking other hypotheses. Capability-directed research review remains conditional on the saved search toggle.
+- Fix negative credential wording and empty metadata false positives; retain rejected public decisions for auditing. Add explicit Bash wrappers with matching syntax checks.
+- Add synthetic planning evaluations covering hidden versions, mixed results, misleading client banners, negative controls and disabled research.
+- Fix null-authentication classification so appended scripts and `/dev/null` do not impose anonymous-only constraints.
+- Retain proxy step/model-call review boundaries under unlimited oracle execution; hand back after repeated monitoring and count distinct evidence rather than command volume as progress.
+- Require terminal-cited candidates and a small total attempt cap for hosted online password-list plans, with feedback for unsupported strategies. Add general hypothesis-driven planning guidance; research guidance remains gated by the saved search toggle.
+- Show per-session research activity state in the dashboard and reconstruct it during saved replay.
+
 ## 0.6.0 - 2026-11-09
 
 - Recover command-center and MCP-owned sessions after a host interruption on the next launch, preserving evidence, stopping elapsed time at the last heartbeat, and reporting runtime cleanup failures.

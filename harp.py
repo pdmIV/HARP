@@ -30,6 +30,8 @@ import harp_artifacts
 import harp_version
 import harp_effort
 import harp_research
+import harp_strategy
+import harp_evidence
 import harp_whippet
 import harp_resources
 import harp_whippet_batch
@@ -94,7 +96,7 @@ Encode newlines, quotes and backslashes correctly inside the JSON command string
 
 
 def system_prompt(session: dict) -> str:
-    prompt = SYSTEM + "\n" + harp_whippet.SMB_TOOL_GUIDANCE
+    prompt = SYSTEM + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_strategy.WORKER_GUIDANCE
     prompt += ("\nPreserve relevant downloaded image evidence using a standalone JSON action "
                '{"capture_file":{"path":"absolute Kali workspace file","title":"evidence label"},"done":false}. '
                "The file must be inside this session's workspace. Omit command, artifact and all other actions; "
@@ -394,7 +396,7 @@ class KaliTerminal:
         return terminal
 
     def run(self, command: str, timeout: int, *, live: bool = True, as_root: bool = False) -> dict:
-        issue = command_format_issue(command)
+        issue = command_format_issue(command) or harp_strategy.shell_issue(command)
         if issue:
             raise ValueError(issue)
         if self.recon_mode and self.event_dir and (self.event_dir / ".stop_session").exists():
@@ -466,6 +468,7 @@ class KaliTerminal:
             "output": b"".join(chunks).decode("utf-8", errors="replace"),
             "truncated": size >= MAX_OUTPUT,
             "as_root": as_root,
+            "shell": "bash" if command.startswith("/bin/bash <<'HARP_BASH_") else "sh",
         }
         if self.event_dir:
             harp_whippet.capture(result, self.event_dir)
@@ -856,6 +859,11 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
         reduced["prior_commands"] = reduced["prior_commands"][-command_count:]
         if attempt > 1 and reduced.get("unverified_research"):
             reduced["unverified_research"] = {"context_omissions": True, "note": "Research omitted to fit context; use the oracle handoff or request help"}
+        if attempt and reduced.get("capability_evidence"):
+            card = reduced["capability_evidence"]
+            kept = max(4, 16 // (attempt + 1))
+            card["omitted"] = card.get("omitted", 0) + max(0, len(card["facts"]) - kept)
+            card["facts"] = [{**row, "quote": row.get("quote", "")[:160]} for row in card["facts"][:kept]]
         user = json.dumps(reduced)
         tokens = count_chat_tokens(model, system, user)
         if tokens <= budget:
@@ -960,7 +968,9 @@ def json_object(text: str, *, allow_preamble: bool = False) -> dict:
 
 
 def null_auth_objective(objective: str) -> bool:
-    return bool(re.search(r"\b(?:null|anonymous|guest)\b", objective, re.I))
+    # Appended scripts and shell paths are not authentication constraints.
+    text = harp_strategy.task_text(objective)
+    return bool(re.search(r"(?<![/\w])(?:null|anonymous|guest)(?![/\w])", text, re.I))
 
 
 def validate_file_action(action: dict) -> None:
@@ -1097,6 +1107,16 @@ def save_session(run_dir: Path, session: dict) -> None:
 
 def load_session(run_dir: Path) -> dict:
     return json.loads((run_dir / "session.json").read_text(encoding="utf-8"))
+
+
+def record_terminal_evidence(run_dir: Path, session: dict, result: dict) -> int:
+    harp_evidence.sync(session)
+    result["outcomes"] = session["observations"][-1].get("outcomes", [])
+    count = harp_evidence.progress(session, result)
+    if result["outcomes"]:
+        append_event(run_dir, {"type": "probe_outcomes", "observation": len(session["observations"]),
+                               "outcomes": result["outcomes"]})
+    return count
 
 
 def recon_profile(cfg: dict) -> dict:
@@ -1239,6 +1259,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
         "status": "recon", "mode": mode, "container": terminal.name, "config": cfg,
         "owner_id": owner_id,
         "harp_version": harp_version.VERSION,
+        "planning_protocol": 2,
         "runtime": cfg.get("runtime", "docker"),
         "workspace": terminal.workspace if isinstance(terminal, WslTerminal) else "/workspace",
         "kali_image_id": None, "target": cfg["target"],
@@ -1604,6 +1625,7 @@ def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     session["oracle_actions"] += 1
     session.pop("oracle_help_request", None)
     session["observations"].append({"origin": "oracle", **result})
+    record_terminal_evidence(run_dir, session, result)
     append_event(run_dir, {"type": "oracle_terminal", "result": result})
     harp_artifacts.capture_flags_from_result(run_dir, result)
     append_note(run_dir, "Codex terminal: " + command[:80], result["output"][:8000])
@@ -1634,6 +1656,7 @@ def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
         session["pending_root_command"] = None
     session["oracle_actions"] += 1
     session["observations"].append({"origin": "approved_root", **result})
+    record_terminal_evidence(run_dir, session, result)
     append_event(run_dir, {"type": "approved_root_terminal", "result": result})
     harp_artifacts.capture_flags_from_result(run_dir, result)
     append_note(run_dir, "Approved root terminal: " + command[:80], result["output"][:8000])
@@ -1655,7 +1678,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     ensure_whippet(run_dir, session, terminal)
     limit = int(cfg["max_steps"])
     budget = limit if budget is None else budget
-    if budget < 1 or (not (unbridled or unlimited_budget) and budget > limit):
+    if budget < 1 or (not unbridled and budget > limit):
         raise ValueError(f"Delegation budget must be 1 through {limit} steps")
     context_window = model_context_tokens(cfg["local"])
     prompt_budget = min(int(cfg["local"].get("max_input_tokens", 6000)),
@@ -1670,7 +1693,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     session.pop("local_conclusion", None)
     session.pop("recommended_oracle_effort", None)
     append_event(run_dir, {"type": "delegation", "objective": objective,
-                           "budget": None if unbridled or unlimited_budget else budget,
+                           "budget": None if unbridled else budget,
                            "unbridled": unbridled, "unlimited_budget": unlimited_budget})
     stop_file = run_dir / ".stop_local"
     session_stop_file = run_dir / ".stop_session"
@@ -1688,6 +1711,10 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     validation_feedback = ""
     format_rejections = 0
     failures = 0
+    monitoring_steps = 0
+    new_evidence = 0
+    for item in session["observations"]:
+        harp_evidence.progress(session, item)
     memory_results: list[dict] = []
     pending_image = None
     image_reserve = 0
@@ -1695,11 +1722,11 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
     stop_reason = "step_budget"
     try:
         index = 0
-        while unbridled or unlimited_budget or index < budget:
+        while unbridled or index < budget:
             if stop_file.is_file() or session_stop_file.is_file():
                 stop_reason = "operator_stop"
                 break
-            if not (unbridled or unlimited_budget) and len(session["local_calls"]) - starting_model_calls >= int(cfg.get("max_model_calls", 30)):
+            if not unbridled and len(session["local_calls"]) - starting_model_calls >= int(cfg.get("max_model_calls", 30)):
                 stop_reason = "model_call_budget"
                 break
             step = session["local_steps"] + 1
@@ -1719,12 +1746,15 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "whippet_query_history": (harp_whippet.query_history(session)
                                           if harp_whippet.enabled(session) else []),
                 "last_command_feedback": validation_feedback,
-                "step": step, "remaining": None if unbridled or unlimited_budget else budget - index,
+                "step": step, "remaining": None if unbridled else budget - index,
                 "unverified_memory_notes": session["memory_notes"][-12:],
                 "memory_search_results": memory_results,
                 "recent_terminal_results": session["observations"][-4:],
                 "prior_commands": [x["command"] for x in session["observations"]][-30:],
                 "image_input": image_evidence,
+                "capability_evidence": harp_evidence.context(session, limit=16),
+                "execution_shell": "sh; use shell:bash explicitly for Bash syntax",
+                "command_timeout_seconds": cfg["command_timeout_seconds"],
             }
             if harp_research.enabled(session):
                 context["unverified_research"] = harp_research.context(run_dir, session, limit=3000)
@@ -1870,8 +1900,16 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             if action.get("needs_root") is True:
                 command = action.get("command")
                 if isinstance(command, str) and command.strip():
-                    stop_reason = "root_requested"
-                    session["pending_root_command"] = command
+                    try:
+                        command = harp_strategy.prepare_command(command, action.get("shell", "sh"))
+                        issue = harp_strategy.shell_issue(command)
+                        if issue:
+                            raise ValueError(issue)
+                        stop_reason = "root_requested"
+                        session["pending_root_command"] = command
+                    except ValueError as error:
+                        stop_reason = "invalid_root_request"
+                        session["oracle_help_request"] = str(error)
                 else:
                     stop_reason = "invalid_root_request"
                 break
@@ -1921,7 +1959,15 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                         stop_reason = "missing_command"
                         break
                     continue
-                command = command.strip()
+                try:
+                    command = harp_strategy.prepare_command(command.strip(), action.get("shell", "sh"))
+                except ValueError as error:
+                    validation_feedback = str(error)
+                    format_rejections += 1
+                    if format_rejections >= 3:
+                        stop_reason = "command_validation_failed"
+                        break
+                    continue
                 if not harp_whippet.enabled(session) and harp_whippet.is_query(command):
                     format_rejections += 1
                     validation_feedback = "Whippet is disabled for this session. Use another installed AD analysis tool."
@@ -1934,7 +1980,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     continue
                 # Approval cannot make a command executable by the terminal transport.
                 # Ask the worker to repair its format before offering tactical review.
-                format_issue = command_format_issue(command)
+                format_issue = command_format_issue(command) or harp_strategy.shell_issue(command)
                 if format_issue:
                     format_rejections += 1
                     validation_feedback = format_issue
@@ -1954,8 +2000,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 if normalized in seen and not unbridled:
                     issue = ((issue + " ") if issue else "") + "This exact command was already run in this session."
                 if issue is None:
-                    marker = "HARP_SYNTAX_" + uuid.uuid4().hex
-                    syntax_command = "sh -n <<'" + marker + "'\n" + command + "\n" + marker
+                    syntax_command = harp_strategy.syntax_probe(command)
                     syntax = terminal.run(syntax_command, 5, live=False)
                     append_event(run_dir, {"type": "local_command_check", "step": step,
                                            "result": syntax})
@@ -1985,6 +2030,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             session["local_steps"] += 1
             index += 1
             session["observations"].append({"origin": "local", **result})
+            new_evidence += record_terminal_evidence(run_dir, session, result)
             append_event(run_dir, {"type": "local_terminal", "step": step, "result": result})
             harp_artifacts.capture_flags_from_result(run_dir, result)
             if isinstance(action.get("artifact"), dict):
@@ -1995,21 +2041,27 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             digest = hashlib.sha256(result["output"].encode()).hexdigest()
             repeated_output = repeated_output + 1 if digest == previous_hash else 0
             previous_hash = digest
-            failures = failures + 1 if result["exit_code"] != 0 or not result["output"].strip() else 0
+            result_status = harp_strategy.result_state(result)
+            monitoring_steps = monitoring_steps + 1 if result_status == "monitoring" else 0
+            failures = failures + 1 if result_status == "error" else 0
             save_session(run_dir, session)
             if all(flag["found"] for flag in harp_artifacts.flag_status(run_dir).values()):
                 stop_reason = "flags_captured"
                 break
-            if (null_auth_objective(objective) and result["exit_code"] != 0 and
-                    re.search(r"NT_STATUS_ACCESS_DENIED|STATUS_LOGON_FAILURE|NT_STATUS_LOGON_FAILURE",
-                              result["output"], re.I)):
-                stop_reason = "null_auth_denied"
-                break
+            # Denials and protocol errors are per-operation findings. They do not
+            # invalidate authentication or stop independent capabilities in a task.
             if repeated_output >= 2 and not unbridled:
                 stop_reason = "repeated_output"
                 break
             if failures >= 3 and not unbridled:
                 stop_reason = "three_unproductive_commands"
+                break
+            if monitoring_steps >= 3 and not unbridled:
+                stop_reason = "monitoring_stalled"
+                session["oracle_help_request"] = (
+                    "Three monitoring commands produced no new target evidence. Review the job's "
+                    "errors, elapsed time and expected completion before continuing; do not expand "
+                    "candidate lists or count log growth as tested coverage. The background job may still be running.")
                 break
     except Exception:
         if stop_reason == "step_budget":
@@ -2022,7 +2074,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
         session["last_delegate_stop"] = stop_reason
         save_session(run_dir, session)
         append_event(run_dir, {"type": "delegation_stopped", "reason": stop_reason,
-                               "local_steps": session["local_steps"]})
+                               "local_steps": session["local_steps"], "new_evidence": new_evidence})
     harp_artifacts.maybe_mark_flag_success(run_dir)
     if not quiet:
         print("Delegation stopped:", stop_reason)

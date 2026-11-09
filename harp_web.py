@@ -40,6 +40,7 @@ import harp_replay
 import harp_costs
 import harp_dependencies
 import harp_research
+import harp_evidence
 import harp_snapshots
 
 
@@ -504,6 +505,9 @@ class HARPWebState:
         summary = {**harp.summarize(state), **harp_costs.cost_summary(state, draft_config())}
         if harp_research.enabled(state):
             summary["research_usage"] = harp_research.metrics(path)
+        summary["research_status"] = harp_research.activity_status(
+            state, harp_research.load(path)["calls"] if harp_research.enabled(state) else [])
+        summary["capability_evidence"] = harp_evidence.context(state)
         return {"id": session_id, "summary": summary,
                 "success_viewed": (path / "success-viewed.json").is_file(),
                 "started_epoch": state["started_epoch"],

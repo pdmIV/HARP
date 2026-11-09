@@ -357,7 +357,7 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(state["local_steps"], 0)
             run.assert_not_called()
 
-    def test_unlimited_budget_skips_step_and_model_call_caps_but_still_stops(self):
+    def test_unlimited_budget_keeps_delegation_review_boundary(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
             self.make_session(path)
@@ -381,9 +381,9 @@ class HarpTests(unittest.TestCase):
                  patch.object(harp, "api_chat", side_effect=model_reply):
                 harp.delegate(path, "Inspect target", 1, quiet=True, unlimited_budget=True)
             saved = harp.load_session(path)
-            self.assertEqual(saved["local_steps"], 2)
-            self.assertEqual(len(saved["local_calls"]), 3)
-            self.assertEqual(saved["last_delegate_stop"], "local_done")
+            self.assertEqual(saved["local_steps"], 1)
+            self.assertEqual(len(saved["local_calls"]), 1)
+            self.assertEqual(saved["last_delegate_stop"], "step_budget")
 
     def test_proxy_api_failure_is_not_reported_as_step_budget(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -861,7 +861,7 @@ class HarpTests(unittest.TestCase):
         self.assertIsNone(harp.local_command_issue(
             "smbclient -U named //10.10.10.5/HR -c 'ls'", target, objective, [], checks="essential"))
 
-    def test_null_smb_access_denied_returns_control_after_one_step(self):
+    def test_null_smb_resource_denial_is_a_finding_not_an_authentication_stop(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
             self.make_session(path)
@@ -878,11 +878,11 @@ class HarpTests(unittest.TestCase):
             with patch.object(harp, "terminal_for", return_value=terminal), \
                  patch.object(harp, "model_context_tokens", return_value=8192), \
                  patch.object(harp, "count_chat_tokens", return_value=300), \
-                 patch.object(harp, "api_chat", return_value=reply):
+                 patch.object(harp, "api_chat", side_effect=[reply, '{"thought":"Record denied share","done":true,"finding":"Share access denied"}']):
                 harp.delegate(path, "List //target/HR using null authentication", 3, quiet=True)
             state = harp.load_session(path)
             self.assertEqual(state["local_steps"], 1)
-            self.assertEqual(state["last_delegate_stop"], "null_auth_denied")
+            self.assertEqual(state["last_delegate_stop"], "local_done")
 
     def test_rejected_local_command_is_not_executed(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
