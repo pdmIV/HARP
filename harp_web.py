@@ -396,7 +396,7 @@ class HARPWebState:
             proxy_provider = proxy_input.get("provider", cfg["local"].get("provider", "unsloth"))
             if proxy_provider == "unsloth":
                 build_launch_args(studio)
-            for key in ("target", "runtime", "wsl_distro", "wsl_user", "network", "network_policy", "scan_ports", "objective",
+            for key in ("target", "htb_vpn_ip", "runtime", "wsl_distro", "wsl_user", "network", "network_policy", "scan_ports", "objective",
                         "container_memory", "container_cpus", "max_steps", "command_timeout_seconds", "whippet_enabled"):
                 if key in payload:
                     cfg[key] = payload[key]

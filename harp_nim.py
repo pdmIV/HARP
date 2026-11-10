@@ -204,7 +204,13 @@ def assisted_objective(decision: dict, plan: str) -> str:
     if implementation:
         if not objective:
             raise ValueError("Oracle implementation requires a bounded objective")
-        implementation = harp_strategy.prepare_command(implementation, decision.get("shell", "sh"))
+        shell = decision.get("shell", "sh")
+        # The implementation is delegated as instructions, not executed here.
+        # Preserve Bash-only code by selecting its required interpreter instead
+        # of spending oracle retries on a missing or mistaken shell field.
+        if shell == "sh" and harp_strategy.shell_issue(implementation):
+            shell = "bash"
+        implementation = harp_strategy.prepare_command(implementation, shell)
         issue = harp_strategy.shell_issue(implementation)
         if issue:
             raise ValueError(issue)
@@ -439,6 +445,7 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
                     "Return one complete JSON object only, without prose or markdown. "
                     "Keep all model-authored prose in English. "
                     "Use boolean stop and a string plan. Omit unused optional fields. "
+                    'For Bash implementation code, include "shell":"bash"; HARP can also select Bash automatically. '
                     "Encode quotes/backslashes/newlines inside strings. "
                     "Use the retained evidence to choose a bounded action. Validation error: " + str(error)[:500]}]
                 harp.append_event(run_dir, {"type": "oracle_format_retry", "attempt": attempt + 2})
@@ -481,6 +488,8 @@ def run(run_dir: Path) -> None:
             if item.get("kind") in {"credential", "document", "image", "other"} and item.get("evidence_backed")
         ][-8:]
         context = {"target": session["target"], "objective": session["config"]["objective"],
+                   "htb_vpn_ip": session["config"].get("htb_vpn_ip", ""),
+                   "network_policy": session["config"].get("network_policy", "internal_lab"),
                    "workspace": session.get("workspace", "/workspace"),
                    "authorized_scope": session["config"].get("authorized_scope", []),
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
@@ -557,6 +566,9 @@ def run(run_dir: Path) -> None:
                 "that bounded check as the next objective before planning escalation or a pivot. "
                 "Keep collector output, captures, scripts and reports under workspace from the context. "
                 "Pass that exact workspace path in delegated instructions; do not assume /home/kali. "
+                "For VPN reverse callbacks, use htb_vpn_ip from context as the operator's advertised VPN "
+                "address when set; it is not an authorized target. Never guess from a container, WSL, "
+                "or LAN interface. If unset in VPN mode, first delegate verification of the correct callback address. "
                 "When a relevant image has been downloaded into the session Kali workspace and "
                 "proxy_image_input_available is true, delegate reading that exact file using read_image. "
                 "The proxy can also preserve relevant evidence using capture_file. Preserved image bytes "
@@ -568,7 +580,8 @@ def run(run_dir: Path) -> None:
                 "and credential_test for observed online password candidates. "
                 "Include check describing the hypothesis, scoped fact, exact evidence references and "
                 "expected_positive/expected_negative observations that would change the next decision. "
-                "For Bash implementation code add shell:bash; default shell is sh. "
+                'For Bash implementation code add "shell":"bash"; HARP also selects Bash automatically '
+                "when Bash-only syntax is present. POSIX code defaults to sh. "
                 "Omit unused optional fields rather than filling them with null or placeholder objects. "
                 "Assess task complexity before delegating. For complex payload crafting, delicate "
                 "quoting, protocol-specific code, or debugging beyond the proxy's likely capability, "
@@ -626,16 +639,31 @@ def run(run_dir: Path) -> None:
                 current = harp.load_session(run_dir)
                 current["strategy_feedback"] = {"error": issue, "next": "Use scoped observations and unknown prerequisites to choose a discriminating check."}
                 current["strategy_rejections"] = current.get("strategy_rejections", 0) + 1
-                harp.save_session(run_dir, current)
                 public_decision = {key: decision[key] for key in
                     ("plan", "objective", "check", "credential_test", "implementation", "oracle_command", "shell") if key in decision}
                 harp.append_event(run_dir, {"type": "oracle_strategy_rejected", "reason": issue, "decision": public_decision})
                 if current["strategy_rejections"] >= 3:
+                    if (not current.get("strategy_recovery_attempted") and harp_research.enabled(current)
+                            and harp_research.opportunity(current)
+                            and research_turns < harp_research.MAX_ORACLE_TURNS):
+                        current["strategy_recovery_attempted"] = True
+                        current["strategy_feedback"]["next"] = (
+                            "Step back from the rejected plan. Review the exposed capability and unknown "
+                            "prerequisites. If a missing public fact could change the next action, return one "
+                            "focused research action now; otherwise give a corrected, evidence-backed local "
+                            "check. Do not repeat the same invalid evidence quote or invent a version.")
+                        harp.save_session(run_dir, current)
+                        harp.append_event(run_dir, {"type": "oracle_strategy_recovery",
+                                                   "reason": "research_opportunity_after_rejections"})
+                        continue
+                    harp.save_session(run_dir, current)
                     harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "strategy_no_progress"})
                     return
+                harp.save_session(run_dir, current)
                 continue
             current = harp.load_session(run_dir)
             current.pop("strategy_feedback", None)
+            current.pop("strategy_recovery_attempted", None)
             current["strategy_rejections"] = 0
             harp.save_session(run_dir, current)
             session = current

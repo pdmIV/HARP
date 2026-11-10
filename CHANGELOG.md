@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add a saved HTB VPN callback IPv4 field, expose it to both models, and permit that exact listener address in command checks without expanding the authorized target scope.
+- Automatically select Bash for oracle-authored implementations containing Bash-only syntax, avoiding invalid-reply retries caused by a missing shell field.
+
+- Give a hosted oracle one bounded step-back turn after repeated strategy validation failures when an enabled research opportunity remains, allowing a focused search or a corrected local check before stopping.
+- Accept exact terminal evidence quotes after removing ANSI color codes, and allow an evidence-backed local capability check without a mandatory research justification. This prevents valid hosted-oracle plans from exhausting strategy retries before execution.
+- Clarify that enum4linux-ng's random username is a comparison control, not an authenticated guest principal.
+
 - Retain source-linked scoped capabilities and prerequisites in oracle/proxy context, the dashboard and replay. Resource denials no longer become global anonymous-authentication stops.
 - Require evidence-cited discriminating checks for new hosted sessions; bound repeated fingerprinting and retain unknown/not-observable facts without blocking other hypotheses. Capability-directed research review remains conditional on the saved search toggle.
 - Fix negative credential wording and empty metadata false positives; retain rejected public decisions for auditing. Add explicit Bash wrappers with matching syntax checks.

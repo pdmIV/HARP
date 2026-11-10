@@ -1,5 +1,6 @@
 {
   "target": "REPLACE_WITH_AUTHORIZED_TARGET_IP",
+  "htb_vpn_ip": "",
   "runtime": "wsl",
   "wsl_distro": "kali-linux",
   "wsl_user": "kali",

@@ -106,12 +106,24 @@ Cannot connect: NT_STATUS_ACCESS_DENIED
     def test_research_review_is_modular_and_can_prefer_a_local_discriminating_check(self):
         session = state()
         decision = {"check": check()}
-        self.assertIsNotNone(harp_research.review_issue(decision, session))
+        self.assertIsNone(harp_research.review_issue(decision, session))
         decision["check"]["research_decision"] = "Validate a source prerequisite with one local check"
         self.assertIsNone(harp_research.review_issue(decision, session))
+        decision["check"]["research_decision"] = ""
+        self.assertIsNotNone(harp_research.review_issue(decision, session))
         session["config"]["oracle"]["web_search_enabled"] = False
         self.assertIsNone(harp_research.opportunity(session))
         self.assertIsNone(harp_research.review_issue({"check": check()}, session))
+
+    def test_evidence_quote_matches_terminal_text_after_ansi_color_removal(self):
+        session = state()
+        session["observations"][0]["output"] = ("\x1b[94m[*] Testing share QUEUE\x1b[0m\n"
+                                                "\x1b[92m[+] Mapping: OK\x1b[0m")
+        item = check()
+        item["evidence"] = [{"observation": 1, "quote": "[*] Testing share QUEUE\n[+] Mapping: OK"}]
+        self.assertIsNone(evidence.check_issue({"check": item}, session))
+        item["evidence"][0]["quote"] = "[*] Testing share QUEUE\n[+] Mapping: DENIED"
+        self.assertIn("exact retained terminal", evidence.check_issue({"check": item}, session))
 
     def test_shell_selection_preserves_scope_and_checks_the_selected_interpreter(self):
         script = 'printf sample | cat\nrc=${PIPESTATUS[0]}\nexit "$rc"'

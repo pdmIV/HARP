@@ -1123,6 +1123,29 @@ class HarpTests(unittest.TestCase):
             path.write_text(json.dumps(config))
             self.assertEqual(harp.load_config(path)["target"], "10.10.11.123")
 
+    def test_htb_vpn_callback_ip_is_saved_and_not_a_target_scope_expansion(self):
+        config = json.loads(Path("harp.htb.example.json").read_text())
+        config["target"] = "10.10.11.123"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp) / "harp.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            state = object.__new__(harp_web.HARPWebState)
+            state.lock = threading.RLock()
+            with patch.object(harp_web, "CONFIG", path):
+                saved = state.save_config({"htb_vpn_ip": "10.10.14.42"})
+            self.assertEqual(saved["htb_vpn_ip"], "10.10.14.42")
+            self.assertEqual(harp.load_config(path)["htb_vpn_ip"], "10.10.14.42")
+            self.assertIsNone(harp.command_scope_issue("nc -lvnp 4444 -s 10.10.14.42",
+                config["target"], [], htb_vpn_ip=saved["htb_vpn_ip"]))
+            self.assertIsNotNone(harp.command_scope_issue("nmap 10.10.14.43",
+                config["target"], [], htb_vpn_ip=saved["htb_vpn_ip"]))
+            self.assertIn("10.10.14.42", harp.system_prompt({"config": saved}))
+            for value in ("127.0.0.1", "10.10.14.0/24", "not-an-ip", 42):
+                config["htb_vpn_ip"] = value
+                path.write_text(json.dumps(config), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    harp.load_config(path)
+
     def test_local_request_disables_unsloth_host_tools(self):
         model = json.loads(Path("harp.example.json").read_text())["local"]
         model["model"] = "test-model"

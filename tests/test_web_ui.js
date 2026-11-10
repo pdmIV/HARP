@@ -80,6 +80,7 @@ nodes.get("runtimeSelect").value = "docker";
 nodes.get("runtimeSelect").handlers.change();
 assert.equal(nodes.get("networkPolicy").disabled, false);
 assert.match(html, /option value="native">Native Kali Linux/);
+assert.match(html, /id="htbVpnIp"/);
 console.log("Runtime UI checks passed: native selection, direct network policy, Docker policy editing.");
 
 (async () => {

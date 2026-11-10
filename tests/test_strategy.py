@@ -14,6 +14,35 @@ import test_harp as fixtures
 
 
 class StrategyTests(unittest.TestCase):
+    def test_strategy_rejections_offer_one_bounded_research_recovery(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.session(path, search=True)
+            decisions = iter([
+                {"plan": "Check a capability", "objective": "Run one local check", "stop": False}
+                for _ in range(3)
+            ] + [
+                {"plan": "Research missing prerequisite", "objective": "", "stop": False,
+                 "research": {"query": "Example service printing advisory prerequisites",
+                              "reason": "The local check needs a public configuration fact"}},
+                {"plan": "Review complete", "objective": "", "stop": True},
+            ])
+            contexts = []
+            def chat(config, body, **kwargs):
+                contexts.append(json.loads(body["messages"][1]["content"]))
+                return {"choices": [{"message": {"content": json.dumps(next(decisions))}}]}
+            with patch.object(harp_zai, "chat", side_effect=chat), \
+                 patch.object(harp_nim.harp_evidence, "check_issue", side_effect=["Invalid evidence"] * 3 + [None]), \
+                 patch.object(harp_research, "opportunity", return_value={"capabilities": [{"operation": "printer.submit"}]}), \
+                 patch.object(harp_research, "search_api", return_value={"search_result": []}) as search, \
+                 patch.object(harp, "delegate") as delegate:
+                harp_nim.run(path)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertEqual(sum(x["type"] == "oracle_strategy_recovery" for x in events), 1)
+            self.assertIn("Step back", contexts[3]["strategy_feedback"]["next"])
+            search.assert_called_once()
+            delegate.assert_not_called()
+
     def session(self, path, search=False):
         fixtures.HarpTests.make_session(self, path)
         state = harp.load_session(path)

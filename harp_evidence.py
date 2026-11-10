@@ -198,7 +198,7 @@ def reference_issue(references, session):
             index, quote = ref.get("observation"), ref.get("quote")
             if (type(index) is not int or not 1 <= index <= len(session.get("observations", [])) or
                     not isinstance(quote, str) or not quote or len(quote) > 1500 or
-                    quote not in session["observations"][index - 1].get("output", "")):
+                    quote not in clean(session["observations"][index - 1].get("output", ""))):
                 return "Check evidence must quote an exact retained terminal observation."
     return None
 

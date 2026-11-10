@@ -97,6 +97,16 @@ Encode newlines, quotes and backslashes correctly inside the JSON command string
 
 def system_prompt(session: dict) -> str:
     prompt = SYSTEM + "\n" + harp_whippet.SMB_TOOL_GUIDANCE + "\n" + harp_strategy.WORKER_GUIDANCE
+    session_config = session.get("config", {})
+    if session_config.get("htb_vpn_ip"):
+        prompt += (f"\nThe configured HTB VPN callback IP is {session['config']['htb_vpn_ip']}; "
+                   "the context's htb_vpn_ip is the same operator tun0 address. "
+                   "Use it as the advertised destination for reverse callbacks, not as a target. "
+                   "Do not substitute a Kali container, WSL, or LAN interface address. "
+                   "Verify that the listener is reachable from the selected Kali runtime.")
+    elif session_config.get("network_policy") == "vpn_bridge":
+        prompt += ("\nNo HTB VPN callback IP is configured. Do not guess a callback address "
+                   "from a local container, WSL, or LAN interface; request oracle help if one is needed.")
     prompt += ("\nPreserve relevant downloaded image evidence using a standalone JSON action "
                '{"capture_file":{"path":"absolute Kali workspace file","title":"evidence label"},"done":false}. '
                "The file must be inside this session's workspace. Omit command, artifact and all other actions; "
@@ -187,12 +197,13 @@ def checked_authorized_scope(entries: list[str] | None) -> list[str]:
 
 
 def command_scope_issue(command: str, target: str, authorized_scope: list[str] | None = None,
-                        objective: str = "", observations: list[dict] | None = None) -> str | None:
+                        objective: str = "", observations: list[dict] | None = None,
+                        htb_vpn_ip: str = "") -> str | None:
     """Allow an evidence-backed private pivot only when the oracle names it in this task."""
     networks = [ipaddress.ip_network(entry, strict=False)
                 for entry in checked_authorized_scope(authorized_scope)]
     for value in re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", command):
-        if value in (target, "127.0.0.1", "0.0.0.0"):
+        if value in (target, htb_vpn_ip, "127.0.0.1", "0.0.0.0"):
             continue
         try:
             address = ipaddress.ip_address(value)
@@ -215,6 +226,20 @@ def load_config(path: Path) -> dict:
     if not isinstance(cfg.get("whippet_enabled", True), bool):
         raise ValueError("whippet_enabled must be true or false")
     checked_name(cfg["target"], "target")
+    callback_ip = cfg.get("htb_vpn_ip", "")
+    if not isinstance(callback_ip, str):
+        raise ValueError("HTB VPN callback IP must be an IPv4 address or empty")
+    callback_ip = callback_ip.strip()
+    if callback_ip:
+        try:
+            address = ipaddress.IPv4Address(callback_ip)
+        except ipaddress.AddressValueError as error:
+            raise ValueError("HTB VPN callback IP must be one exact IPv4 address") from error
+        if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified or address.is_reserved:
+            raise ValueError("HTB VPN callback IP cannot be a local or special address")
+        cfg["htb_vpn_ip"] = str(address)
+    else:
+        cfg["htb_vpn_ip"] = ""
     cfg["authorized_scope"] = checked_authorized_scope(cfg.get("authorized_scope"))
     runtime = cfg.get("runtime", "docker")
     if runtime not in ("docker", "wsl", "native"):
@@ -999,7 +1024,8 @@ def command_format_issue(command: str) -> str | None:
 def local_command_issue(command: str, target: str, objective: str,
                         observations: list[dict] | None = None,
                         checks: str = "strict",
-                        authorized_scope: list[str] | None = None) -> str | None:
+                        authorized_scope: list[str] | None = None,
+                        htb_vpn_ip: str = "") -> str | None:
     issue = command_format_issue(command)
     if issue:
         return issue
@@ -1013,7 +1039,7 @@ def local_command_issue(command: str, target: str, objective: str,
         return "Command is empty."
     if "sudo" in parts:
         return "Do not invoke sudo in a proxy command; request root approval with needs_root if essential."
-    scope_issue = command_scope_issue(command, target, authorized_scope, objective, observations)
+    scope_issue = command_scope_issue(command, target, authorized_scope, objective, observations, htb_vpn_ip)
     if scope_issue:
         return scope_issue
     smb_tools = {"smbclient", "nxc", "netexec", "crackmapexec", "cme", "rpcclient"}
@@ -1614,7 +1640,8 @@ def direct_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     if session.get("mode", "hybrid") == "local-only":
         raise RuntimeError("Direct oracle terminal commands are disabled in proxy-only mode")
     issue = command_scope_issue(command, session["target"], session["config"].get("authorized_scope"),
-                                latest_oracle_plan(run_dir), session.get("observations", []))
+                                latest_oracle_plan(run_dir), session.get("observations", []),
+                                session["config"].get("htb_vpn_ip", ""))
     if issue:
         raise ValueError(issue)
     terminal = terminal_for(session)
@@ -1643,7 +1670,8 @@ def root_exec(run_dir: Path, command: str, *, quiet: bool = False) -> None:
     if session.get("mode", "hybrid") == "local-only" and command != session.get("pending_root_command"):
         raise RuntimeError("In proxy-only mode, approve only the proxy model's pending root command")
     issue = command_scope_issue(command, session["target"], session["config"].get("authorized_scope"),
-                                latest_oracle_plan(run_dir), session.get("observations", []))
+                                latest_oracle_plan(run_dir), session.get("observations", []),
+                                session["config"].get("htb_vpn_ip", ""))
     if issue:
         raise ValueError(issue)
     terminal = terminal_for(session)
@@ -1733,6 +1761,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             flags = harp_artifacts.flag_status(run_dir)
             context = {
                 "target": session["target"], "target_os": "unknown until verified",
+                "htb_vpn_ip": cfg.get("htb_vpn_ip", ""),
+                "network_policy": cfg.get("network_policy", "internal_lab"),
                 "authorized_scope": cfg.get("authorized_scope", []),
                 "delegated_objective": objective, "recon": session["recon"],
                 "workspace": session.get("workspace", "/workspace"),
@@ -1996,7 +2026,8 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 checks = cfg["local"].get("command_checks", "essential" if cfg["local"].get("provider") == "zai" else "strict")
                 issue = local_command_issue(command, session["target"], objective,
                                             session["observations"], checks=checks,
-                                            authorized_scope=cfg.get("authorized_scope"))
+                                            authorized_scope=cfg.get("authorized_scope"),
+                                            htb_vpn_ip=cfg.get("htb_vpn_ip", ""))
                 if normalized in seen and not unbridled:
                     issue = ((issue + " ") if issue else "") + "This exact command was already run in this session."
                 if issue is None:
@@ -2190,6 +2221,7 @@ def summarize(session: dict) -> dict:
             memory_mib.append(float(match.group(1)) * {"K": 1 / 1024, "M": 1, "G": 1024}[match.group(2)])
     return {
         "status": session["status"], "mode": session.get("mode", "hybrid"), "target": session["target"],
+        "htb_vpn_ip": session.get("config", {}).get("htb_vpn_ip", ""),
         "termination_reason": session.get("termination_reason"),
         "cleanup_error": session.get("cleanup_error"),
         "recon_stage": session.get("recon_stage"),

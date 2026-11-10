@@ -139,6 +139,7 @@ def start_session(mode: str = "hybrid", fresh_recon: bool = False) -> str:
 def inspect_session(session: str) -> str:
     state = harp.load_session(run_path(session))
     return json.dumps({"summary": harp.summarize(state), "recon": state["recon"],
+                       "htb_vpn_ip": state.get("config", {}).get("htb_vpn_ip", ""),
                        "capability_evidence": harp_evidence.context(state),
                        "planning_guidance": harp_strategy.GUIDANCE,
                        "allowed_check_actions": harp_evidence.allowed_actions(state),

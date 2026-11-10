@@ -25,9 +25,9 @@ different path before guessing credentials. Use observed products, versions and
 capabilities to ask a focused question about advisories and prerequisites. If a precise
 version is unavailable, research reachable functionality and behavioral prerequisites
 instead of requiring a package banner. The research_opportunity card identifies
-observed capabilities worth investigating. When it is present, choose research or
-provide check.research_decision, a short reason why a cached source or local check is
-more useful now. Research is available, not mandatory for every turn. Verify source
+observed capabilities worth investigating. When it is present, consider research
+when a missing public fact could change the next action. A bounded local check may
+proceed without a separate research justification. Verify source
 applicability against target evidence and distinguish unsupported hypotheses from facts.
 To research, return your normal plan plus research:{"query":"focused product/version,
 CVE or documentation question","reason":"missing fact and how it changes the next step"},
@@ -72,8 +72,8 @@ def review_issue(decision, session):
         return None
     check = decision.get("check") or {}
     reason = check.get("research_decision")
-    if not isinstance(reason, str) or not reason.strip() or len(reason) > 500:
-        return "An exposed capability warrants research review: choose research or give check.research_decision explaining why a local check or retained source is better."
+    if reason is not None and (not isinstance(reason, str) or not reason.strip() or len(reason) > 500):
+        return "check.research_decision must be a short reason when supplied."
     return None
 
 

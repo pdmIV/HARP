@@ -13,6 +13,8 @@ Use **Configuration → Configuration snapshots** to export saved settings from 
 | API Keys | Encrypted imports for OpenAI, Z.AI, NVIDIA NIM, and Unsloth |
 | Configuration | Authorized target, Kali runtime, network, scan ports, Whippet, and resource limits |
 
+For HTB reverse connections, enter the IPv4 address assigned to your VPN `tun0` interface in **Configuration → HTB VPN IP for callbacks (tun0)**. Save before starting a new session. HARP passes this address to the oracle and proxy as the callback destination and permits that exact address in their command checks. It does not add the address to the authorized target scope or create a listener/route. Leave it empty when no VPN callback address is available; the models are instructed not to guess a LAN or container address.
+
 Save model changes with **Save oracle** or **Save proxy**. Save target/runtime changes with **Save configuration**. Settings apply to new sessions; existing sessions retain their recorded configuration. The sidebar shows selections for new sessions.
 
 ## Whippet experiment toggle

@@ -1,5 +1,6 @@
 {
   "target": "REPLACE_WITH_AUTHORIZED_TARGET_IP",
+  "htb_vpn_ip": "",
   "runtime": "native",
   "network": "harp_vpn",
   "network_policy": "vpn_bridge",

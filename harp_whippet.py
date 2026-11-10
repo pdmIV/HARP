@@ -12,6 +12,9 @@ Use legacy enum4linux only if enum4linux-ng is unavailable or an observed limita
 requires that fallback; state the reason. They have different CLIs: check the chosen
 tool's help rather than copying flags between them. Keep queries bounded to the
 objective, and do not repeat completed startup probes merely to use another tool.
+An enum4linux-ng "Random Username" is a negative control for comparison, not a
+verified guest account or a credential candidate. Use an explicitly observed
+principal and authentication result before treating a session as authenticated.
 """
 
 

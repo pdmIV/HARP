@@ -1,5 +1,6 @@
 {
   "target": "target",
+  "htb_vpn_ip": "",
   "network": "harp_lab",
   "network_policy": "internal_lab",
   "scan_ports": "8000",

@@ -243,8 +243,23 @@ class ZAITests(unittest.TestCase):
             with self.subTest(finish=finish), self.assertRaises(error):
                 harp_zai.streamed_completion(io.BytesIO(wire.encode()))
 
+    def test_oracle_implementation_selects_bash_for_bash_only_syntax(self):
+        script = "set -o pipefail\nprintf '%s\\n' ready | cat"
+        for declared in ({}, {"shell": "sh"}):
+            decision = {"objective": "Run the prepared check", "implementation": script, **declared}
+            objective = harp_nim.assisted_objective(decision, "Run a bounded check")
+            self.assertIn("/bin/bash <<'HARP_BASH_", objective)
+            self.assertIn(script, objective)
+        posix = harp_nim.assisted_objective({"objective": "Run the prepared check",
+                                             "implementation": "printf ready"}, "Run a bounded check")
+        self.assertNotIn("HARP_BASH_", posix)
+        with self.assertRaisesRegex(ValueError, 'shell must be'):
+            harp_nim.assisted_objective({"objective": "Run the prepared check",
+                                          "implementation": script, "shell": "python"}, "Run a bounded check")
+
     def test_oracle_handoff_keeps_implementation_and_expands_evidence(self):
         cfg = json.loads(Path("harp.example.json").read_text())
+        cfg["htb_vpn_ip"] = "10.10.14.42"
         cfg["oracle"] = {**self.config(), "max_cycles": 2, "steps_per_cycle": 1,
                          "evidence_depth": "compact"}
         implementation = "Exact implementation: " + "A" * 5000
@@ -278,6 +293,7 @@ class ZAITests(unittest.TestCase):
             self.assertEqual(len(delegated), 1)
             self.assertIn(implementation, delegated[0])
             first_context = json.loads(chat.call_args_list[0].args[1]["messages"][1]["content"])
+            self.assertEqual(first_context["htb_vpn_ip"], "10.10.14.42")
             self.assertEqual(first_context["oracle_help_request"], "Need protocol framing")
             self.assertEqual(len(first_context["observations"]), 8)
             self.assertGreater(len(first_context["observations"][0]["output"]), 1200)
