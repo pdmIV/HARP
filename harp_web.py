@@ -243,7 +243,8 @@ def _cached_sidebar_row(directory: str, version: tuple) -> dict:
 def latest_activity(run_dir: Path) -> dict:
     path = run_dir / "events.jsonl"
     if not path.is_file():
-        return {"oracle_plan": None, "local_action": None, "delegated_objective": None, "oracle_stopped": None}
+        return {"oracle_plan": None, "local_action": None, "delegated_objective": None, "oracle_stopped": None,
+                "local_model_progress": None}
     return dict(_cached_latest_activity(str(run_dir), file_version(path)))
 
 
@@ -254,6 +255,7 @@ def _cached_latest_activity(directory: str, version: tuple) -> dict:
     local = None
     objective = None
     oracle_stopped = None
+    local_model_progress = None
     path = run_dir / "events.jsonl"
     if path.is_file():
         with path.open("r", encoding="utf-8", errors="replace") as stream:
@@ -271,10 +273,16 @@ def _cached_latest_activity(directory: str, version: tuple) -> dict:
                     oracle_stopped = event.get("reason") or event.get("error") or "error"
                 elif kind == "local_action":
                     local = event.get("action")
+                    local_model_progress = None
+                elif kind == "local_model_progress":
+                    local_model_progress = event
+                elif kind == "delegation_stopped":
+                    local_model_progress = None
                 elif kind == "delegation":
                     objective = event.get("objective")
+                    local_model_progress = None
     return {"oracle_plan": plan, "local_action": local, "delegated_objective": objective,
-            "oracle_stopped": oracle_stopped}
+            "oracle_stopped": oracle_stopped, "local_model_progress": local_model_progress}
 
 
 def pending_approval(run_dir: Path, state: dict) -> dict | None:

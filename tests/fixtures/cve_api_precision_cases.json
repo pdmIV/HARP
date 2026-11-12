@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "notes": "Focused comparison, not a replacement for the main matrix. Original misses remain strict assertions. Candidate IDs are evaluation labels and are never discovery inputs. Narrower mechanism controls are explicitly separate queries, not automatic follow-ups to positive results.",
+  "cases": [
+    {
+      "id": "original_samba_printer_share",
+      "input": {"product": "Samba", "feature": "printer share", "alternatives": ["anonymous print spool", "print job submission"]},
+      "expect": "hit",
+      "expected_cves": ["CVE-2026-4480"],
+      "provenance": "20261112-191458-81bef9: successful API response but expected advisory absent in both rounds"
+    },
+    {
+      "id": "samba_processing_capability",
+      "input": {"product": "Samba", "feature": "print"},
+      "expect": "hit",
+      "expected_cves": ["CVE-2026-4480"],
+      "provenance": "Same capture: zero-result relaxation to Samba print found the expected advisory at rank 1 twice"
+    },
+    {
+      "id": "samba_configuration_mechanism",
+      "input": {"product": "Samba", "feature": "print command"},
+      "expect": "hit",
+      "expected_cves": ["CVE-2026-4480"],
+      "provenance": "Operator-confirmed control; source terminology: https://www.samba.org/samba/security/CVE-2026-4480.html"
+    },
+    {
+      "id": "original_openssh_signal_handling",
+      "input": {"product": "OpenSSH", "feature": "signal handling", "alternatives": ["race condition"]},
+      "expect": "hit",
+      "expected_cves": ["CVE-2024-6387"],
+      "provenance": "Same capture returned the related CVE-2024-6409 rather than the expected ID twice; original assertion retained"
+    },
+    {
+      "id": "openssh_signal_handler",
+      "input": {"product": "OpenSSH", "feature": "signal handler"},
+      "expect": "hit",
+      "expected_cves": ["CVE-2024-6387"],
+      "provenance": "Mechanism wording comparison; live retrieval not yet verified"
+    },
+    {
+      "id": "openssh_race_condition",
+      "input": {"product": "OpenSSH", "feature": "race condition"},
+      "expect": "hit",
+      "expected_cves": ["CVE-2024-6387"],
+      "provenance": "Previously supplied alternative tested independently, without a Boolean expression or automatic positive-result refinement"
+    }
+  ]
+}

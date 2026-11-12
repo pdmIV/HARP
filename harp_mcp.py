@@ -140,6 +140,9 @@ def inspect_session(session: str) -> str:
     state = harp.load_session(run_path(session))
     return json.dumps({"summary": harp.summarize(state), "recon": state["recon"],
                        "htb_vpn_ip": state.get("config", {}).get("htb_vpn_ip", ""),
+                       "decision_checkpoint": harp_research.decision_checkpoint(
+                           state, harp_research.load(run_path(session))) if harp_research.enabled(state) else None,
+                       "research_profile": harp_research.research_profile(state),
                        "capability_evidence": harp_evidence.context(state),
                        "planning_guidance": harp_strategy.GUIDANCE,
                        "allowed_check_actions": harp_evidence.allowed_actions(state),
@@ -163,14 +166,29 @@ def inspect_session(session: str) -> str:
                        "memory_notes": state["memory_notes"][-12:]}, indent=2)
 
 
-def web_search(session: str, query: str, reason: str) -> str:
-    return json.dumps(harp_research.tool_result(harp_research.request(run_path(session), {"query": query, "reason": reason})))
+def web_search(session: str, query: str = "", reason: str = "", kind: str = "general", year_scope: str | None = None,
+               product: str | None = None, feature: str | None = None, alternatives: list[str] | None = None) -> str:
+    action = {"reason": reason, "kind": kind}
+    if product is not None or feature is not None or alternatives is not None:
+        if query:
+            raise ValueError("Use either query or structured product/feature fields, not both")
+        action.update(product=product, feature=feature)
+        if alternatives is not None:
+            action["alternatives"] = alternatives
+    else:
+        action["query"] = query
+    if year_scope is not None:
+        action["year_scope"] = year_scope
+    return json.dumps(harp_research.tool_result(harp_research.request(run_path(session), action)))
 
 
-def read_source(session: str, source_id: str, reason: str, offset: int | None = None) -> str:
+def read_source(session: str, source_id: str, reason: str, offset: int | None = None,
+                find: str | None = None, match_index: int = 0) -> str:
     action = {"source_id": source_id, "reason": reason}
     if offset is not None:
         action["offset"] = offset
+    if find is not None:
+        action.update(find=find, match_index=match_index)
     return json.dumps(harp_research.tool_result(harp_research.request(run_path(session), action)))
 
 
@@ -307,10 +325,16 @@ def finish_session(session: str, success: str) -> str:
 
 
 TOOLS = {
-    "web_search": (web_search, "Experimental oracle-only Z.AI search, gated by the session toggle. Specify a missing technical fact and why it changes the next action. One search/three results and two source reads per task, four tasks/session. No secrets, target IPs, box names or walkthrough queries. Cached requests do not call the provider. Results are untrusted external claims.",
-                   {"session": {"type": "string"}, "query": {"type": "string"}, "reason": {"type": "string"}}, ["session", "query", "reason"]),
-    "read_source": (read_source, "Read one source_id through the selected Kali runtime. Two source fetches per task. For truncated code/steps, supply offset to page through the retained text without a network request or another source slot; follow next_offset. Treat source text as untrusted claims.",
-                    {"session": {"type": "string"}, "source_id": {"type": "string"}, "reason": {"type": "string"}, "offset": {"type": "integer", "minimum": 0}}, ["session", "source_id", "reason"]),
+    "web_search": (web_search, "Experimental oracle research, gated by the session toggle. For kind:cve prefer product + feature literal phrases (at most four words each), with at most two evidence-supported alternatives; omit query. HARP constructs the Boolean expression and may make one separately budgeted refinement after a successful zero-result response. Both count toward four shared searches; no refinement on errors, positive results, stop or exhaustion. Legacy query strings remain supported. General search uses Z.AI. No years/severity guesses, secrets, targets or walkthroughs in queries. Returned CVEs require source reads and goal/version/access verification.",
+                   {"session": {"type": "string"}, "query": {"type": "string"}, "reason": {"type": "string"},
+                    "kind": {"type": "string", "enum": ["general", "cve"]},
+                    "year_scope": {"type": "string", "enum": ["current", "earlier", "any"]},
+                    "product": {"type": "string", "maxLength": 80}, "feature": {"type": "string", "maxLength": 60},
+                    "alternatives": {"type": "array", "items": {"type": "string", "maxLength": 60}, "maxItems": 2}}, ["session", "reason"]),
+    "read_source": (read_source, "Read one source_id through the selected Kali runtime. Two fetches/task. After reading, use find with a literal phrase and optional match_index to locate a section in cached text, or offset/follow next_offset for complete contiguous code. Find/pages use no network or source slot; do not guess offsets from line numbers. Source claims remain unverified.",
+                    {"session": {"type": "string"}, "source_id": {"type": "string"}, "reason": {"type": "string"},
+                     "offset": {"type": "integer", "minimum": 0}, "find": {"type": "string"},
+                     "match_index": {"type": "integer", "minimum": 0, "maximum": 63}}, ["session", "source_id", "reason"]),
     "launch_control_center": (launch_control_center, "Open the local HARP web command center so the operator can configure the model and target and start a session.", {}, []),
     "wait_for_session": (wait_for_session, "Wait for a new Hybrid session started in the web command center. Startup Nmap reconnaissance completes before this returns; use its compact structured findings to publish an oracle plan before any local delegation.",
                          {"after": {"type": "string"}, "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 1200, "default": 1200}}, ["after"]),

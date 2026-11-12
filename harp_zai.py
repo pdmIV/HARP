@@ -3,6 +3,8 @@
 import json
 import math
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 import urllib.error
@@ -16,6 +18,11 @@ import harp_effort
 BASE = "https://api.z.ai/api/paas/v4"
 MODELS = ("glm-5.3", "glm-5.3-flash")
 MAX_REQUEST_SECONDS = 1800
+PROXY_FIRST_OUTPUT_SECONDS = 120
+STREAM_IDLE_SECONDS = 60
+PROXY_REQUEST_SECONDS = 600
+PROGRESS_INTERVAL_SECONDS = 5
+WATCH_INTERVAL_SECONDS = 0.25
 
 
 def validate(config: dict) -> None:
@@ -71,7 +78,7 @@ def response_body(config: dict, body: dict) -> dict:
     return payload
 
 
-def streamed_completion(response, *, cancelled=None) -> dict:
+def streamed_completion(response, *, cancelled=None, progress=None) -> dict:
     """Assemble one complete SSE reply; never expose a partial action to HARP."""
     content, reasoning = [], []
     finish_reason, usage = None, {}
@@ -103,6 +110,8 @@ def streamed_completion(response, *, cancelled=None) -> dict:
                 for key, parts in (("content", content), ("reasoning_content", reasoning)):
                     if isinstance(delta.get(key), str):
                         parts.append(delta[key])
+                        if delta[key] and progress:
+                            progress(key, len(delta[key]))
                 if choice.get("finish_reason") is not None:
                     finish_reason = choice["finish_reason"]
         except (ValueError, TypeError, AttributeError):
@@ -128,24 +137,112 @@ def streamed_completion(response, *, cancelled=None) -> dict:
     raise ConnectionError("Z.AI stream was interrupted; no model action was accepted")
 
 
-def chat(config: dict, body: dict, *, cancelled=None) -> dict:
+def chat(config: dict, body: dict, *, cancelled=None, on_progress=None) -> dict:
+    """Watch actual model output independently of blocking HTTP reads/heartbeats."""
     payload = response_body(config, body)
     req = urllib.request.Request(BASE + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": "Bearer " + key(), "Content-Type": "application/json",
                  "Accept": "text/event-stream"})
+    oracle = body.get("harp_role") == "oracle"
+    first_limit = (harp_effort.read_timeout_seconds(payload["reasoning_effort"])
+                   if oracle else PROXY_FIRST_OUTPUT_SECONDS)
+    total_limit = MAX_REQUEST_SECONDS if oracle else PROXY_REQUEST_SECONDS
+    started = time.monotonic()
+    lock = threading.Lock()
+    aborted = threading.Event()
+    result = queue.Queue(maxsize=1)
+    state = {"phase": "waiting", "reasoning_chars": 0, "content_chars": 0,
+             "last_output": None, "response": None}
+
+    def progress(kind, count):
+        with lock:
+            state["phase"] = "reasoning" if kind == "reasoning_content" else "responding"
+            state["reasoning_chars" if kind == "reasoning_content" else "content_chars"] += count
+            state["last_output"] = time.monotonic()
+
+    def receive():
+        try:
+            # The watchdog also covers connecting and fallback JSON reads. The
+            # socket timeout bounds abandoned readers if closing a response blocks.
+            with urllib.request.urlopen(req, timeout=max(first_limit, STREAM_IDLE_SECONDS)) as response:
+                with lock:
+                    state["response"] = response
+                if aborted.is_set():
+                    return
+                content_type = getattr(response, "headers", {}).get("Content-Type", "")
+                data = (streamed_completion(response, cancelled=aborted.is_set, progress=progress)
+                        if "text/event-stream" in content_type else json.load(response))
+                if data.get("error") or not data.get("choices"):
+                    raise RuntimeError("Z.AI returned no completion; no model action was accepted")
+            result.put((data, None))
+        except urllib.error.HTTPError as error:
+            # Never expose provider bodies, which can echo secrets/evidence.
+            result.put((None, RuntimeError(f"Z.AI returned HTTP {error.code}")))
+        except Exception as error:
+            result.put((None, error))
+
+    def report(phase=None, reason=None):
+        if on_progress:
+            with lock:
+                now = time.monotonic()
+                event = {"phase": phase or state["phase"],
+                         "reasoning_chars": state["reasoning_chars"], "content_chars": state["content_chars"],
+                         "seconds": round(now - started, 2),
+                         "idle_seconds": round(now - (state["last_output"] if state["last_output"] is not None else started), 2)}
+            if reason:
+                event["reason"] = reason
+            if phase in ("cancelled", "timed_out", "failed"):
+                event["usage_unknown"] = True
+            on_progress(event)
+
+    report()
+    if cancelled and cancelled():
+        report("cancelled")
+        raise InterruptedError("Model request stopped by operator")
+    threading.Thread(target=receive, name="harp-zai-reader", daemon=True).start()
+    last_report, last_phase = started, "waiting"
     try:
-        with urllib.request.urlopen(req, timeout=harp_effort.read_timeout_seconds(payload["reasoning_effort"])) as response:
-            # Retain compatibility if a gateway returns a complete JSON response.
-            content_type = getattr(response, "headers", {}).get("Content-Type", "")
-            data = (streamed_completion(response, cancelled=cancelled)
-                    if "text/event-stream" in content_type else json.load(response))
-    except urllib.error.HTTPError as error:
-        # Provider error bodies can echo credentials or target evidence.
-        raise RuntimeError(f"Z.AI returned HTTP {error.code}") from None
-    if data.get("error") or not data.get("choices"):
-        raise RuntimeError("Z.AI returned no completion; no model action was accepted")
-    return data
+        while True:
+            if cancelled and cancelled():
+                report("cancelled")
+                raise InterruptedError("Model request stopped by operator")
+            now = time.monotonic()
+            with lock:
+                last_output, phase = state["last_output"], state["phase"]
+            reason = ("request_deadline" if now - started >= total_limit else
+                      "first_output_timeout" if last_output is None and now - started >= first_limit else
+                      "stream_idle_timeout" if last_output is not None and now - last_output >= STREAM_IDLE_SECONDS else None)
+            if reason:
+                report("timed_out", reason)
+                raise TimeoutError(f"Z.AI {reason}; no model action was accepted")
+            if phase != last_phase or now - last_report >= PROGRESS_INTERVAL_SECONDS:
+                report()
+                last_report, last_phase = now, phase
+            try:
+                data, error = result.get(timeout=WATCH_INTERVAL_SECONDS)
+            except queue.Empty:
+                continue
+            # Stop/deadline checks must also apply to a reply received while waiting.
+            if cancelled and cancelled():
+                report("cancelled")
+                raise InterruptedError("Model request stopped by operator")
+            if error:
+                report("failed", "transport_error")
+                raise error
+            if time.monotonic() - started >= total_limit:
+                report("timed_out", "request_deadline")
+                raise TimeoutError("Z.AI request_deadline; no model action was accepted")
+            report("completed")
+            return data
+    finally:
+        aborted.set()
+        with lock:
+            response = state["response"]
+        # HTTPResponse.close can wait on a blocked readline lock. Never let it
+        # block cancellation or the watchdog on the orchestration thread.
+        if response is not None:
+            threading.Thread(target=response.close, name="harp-zai-close", daemon=True).start()
 
 
 def usage_metrics(config: dict, usage: dict) -> dict:

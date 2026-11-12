@@ -29,6 +29,77 @@
         "status": "confirmed"
       }
     ],
+    "forbidden_observations": [],
+    "expected_checkpoint": "research_before_payload"
+  },
+  {
+    "id": "printer_exposed_verify_submission_first",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "smbclient -L //192.0.2.10 -N",
+          "output": "QUEUE Printer Reception printer",
+          "exit_code": 0
+        }
+      ]
+    },
+    "expected_checkpoint": "local_prerequisite_check",
+    "acceptable_actions": [
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.exposed",
+        "status": "confirmed"
+      }
+    ],
+    "forbidden_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ]
+  },
+  {
+    "id": "compound_guest_print_triggers_research_before_payload",
+    "session": {
+      "target": "192.0.2.10",
+      "planning_protocol": 2,
+      "status": "active",
+      "recon": [],
+      "config": {
+        "oracle": {
+          "web_search_enabled": true
+        }
+      },
+      "observations": [
+        {
+          "command": "TARGET=192.0.2.10\necho \"===== print job =====\"\nsmbclient \"//$TARGET/QUEUE\" -N -c \"lcd /tmp; print sample.txt; queue\"",
+          "output": "===== print job =====\nputting file sample.txt as sample.txt",
+          "exit_code": 0
+        }
+      ]
+    },
+    "expected_checkpoint": "research_before_payload",
+    "acceptable_actions": [
+      "research",
+      "validate_hypothesis"
+    ],
+    "required_observations": [
+      {
+        "operation": "printer.submit",
+        "status": "confirmed"
+      }
+    ],
     "forbidden_observations": []
   },
   {

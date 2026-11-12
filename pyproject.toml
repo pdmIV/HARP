@@ -31,7 +31,7 @@ harp-ai = "harp_cli:main"
 packages = ["harp_data", "scripts"]
 include-package-data = false
 py-modules = [
-    "harp", "harp_artifacts", "harp_cli", "harp_costs", "harp_dependencies",
+    "harp", "harp_artifacts", "harp_cli", "harp_costs", "harp_cve", "harp_dependencies",
     "harp_effort", "harp_evidence", "harp_gui", "harp_mcp", "harp_nim", "harp_openai",
     "harp_paths", "harp_replay", "harp_research", "harp_resources", "harp_secret",
     "harp_session_archive", "harp_snapshots", "harp_strategy", "harp_version", "harp_web",

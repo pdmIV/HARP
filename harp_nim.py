@@ -26,7 +26,8 @@ BASE = "https://integrate.api.nvidia.com/v1"
 RECOVERABLE_STOPS = {"three_unproductive_commands", "null_auth_denied", "repeated_command",
                      "repeated_output", "missing_command", "invalid_replies",
                      "command_validation_failed", "repeated_or_excessive_memory_query",
-                     "oracle_requested", "whippet_query_rejected", "monitoring_stalled", "model_call_budget"}
+                     "oracle_requested", "whippet_query_rejected", "monitoring_stalled", "model_call_budget",
+                     "proxy_timeout"}
 FATAL_STOPS = {"operator_stop", "root_requested", "invalid_root_request", "whippet_batch_error"}
 
 
@@ -205,15 +206,9 @@ def assisted_objective(decision: dict, plan: str) -> str:
         if not objective:
             raise ValueError("Oracle implementation requires a bounded objective")
         shell = decision.get("shell", "sh")
-        # The implementation is delegated as instructions, not executed here.
-        # Preserve Bash-only code by selecting its required interpreter instead
-        # of spending oracle retries on a missing or mistaken shell field.
-        if shell == "sh" and harp_strategy.shell_issue(implementation):
-            shell = "bash"
+        # Preserve the selected interpreter. Text patterns are not proof that
+        # valid sh code requires Bash; the proxy checks the actual shell parser.
         implementation = harp_strategy.prepare_command(implementation, shell)
-        issue = harp_strategy.shell_issue(implementation)
-        if issue:
-            raise ValueError(issue)
         objective += "\n\nOracle-authored implementation instructions:\n" + implementation
     return objective
 
@@ -453,6 +448,26 @@ def oracle_decision(run_dir: Path, cfg: dict, effort: str, effort_source: str,
     return None
 
 
+def record_decision_checkpoint(run_dir, checkpoint, decision, research_state):
+    """Persist a checkpoint only when the chosen action is accepted for execution."""
+    if not checkpoint or (checkpoint["phase"] == "apply_source" and "research" in decision):
+        return harp.load_session(run_dir)
+    current = harp.load_session(run_dir)
+    choice = harp_research.record_checkpoint_choice(current, checkpoint, decision)
+    application = None
+    if checkpoint["phase"] == "apply_source" and not decision.get("stop"):
+        application = harp_research.source_application(decision, research_state)
+        current["last_source_application"] = application
+    harp.save_session(run_dir, current)
+    harp.append_event(run_dir, {"type": "oracle_decision_checkpoint_choice", **choice})
+    if application:
+        harp.append_event(run_dir, {"type": "oracle_source_application",
+                                    "status": application["status"],
+                                    "source_ids": application.get("source_ids", []),
+                                    "reason": application.get("reason", "")})
+    return current
+
+
 def run(run_dir: Path) -> None:
     session = harp.load_session(run_dir)
     cfg = session["config"].get("oracle", {})
@@ -493,6 +508,7 @@ def run(run_dir: Path) -> None:
                    "workspace": session.get("workspace", "/workspace"),
                    "authorized_scope": session["config"].get("authorized_scope", []),
                    "recon": session.get("recon", []), "http_probes": session.get("http_probes", []),
+                   "recon_coverage": harp.recon_coverage(session, run_dir),
                    "smb_probes": compact_smb_probes(session.get("smb_probes", [])),
                    "seclists": session.get("seclists"),
                    "whippet_enabled": harp_whippet.enabled(session),
@@ -508,15 +524,27 @@ def run(run_dir: Path) -> None:
                    "capability_evidence": harp_evidence.context(session),
                    "planning_protocol": session.get("planning_protocol", 1),
                    "allowed_check_actions": harp_evidence.allowed_actions(session),
+                   "last_check_outcome": (session.get("assessment_history") or [{}])[-1].get("observed_outcome"),
+                   "last_source_application": session.get("last_source_application"),
                    "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                    for name in ("user.txt", "root.txt")}, "cycle": used_cycles + 1}
+        checkpoint = None
         if probe_feedback:
             context["probe_feedback"] = probe_feedback
         if harp_research.enabled(session):
+            research_state = harp_research.load(run_dir)
             context["unverified_research"] = harp_research.context(run_dir, session)
             context["research_feedback"] = session.get("oracle_research_feedback")
+            context["candidate_review_feedback"] = session.get("candidate_review_feedback")
             context["research_turns_remaining"] = max(0, harp_research.MAX_ORACLE_TURNS - research_turns)
             context["research_opportunity"] = harp_research.opportunity(session)
+            checkpoint = harp_research.decision_checkpoint(session, research_state)
+            context["decision_checkpoint"] = checkpoint
+            if checkpoint and session.get("last_research_checkpoint_id") != checkpoint["id"]:
+                session["last_research_checkpoint_id"] = checkpoint["id"]
+                harp.save_session(run_dir, session)
+                harp.append_event(run_dir, {"type": "oracle_decision_checkpoint", "id": checkpoint["id"],
+                                            "phase": checkpoint["phase"], "priority": checkpoint["priority"]})
         if harp_whippet.relevant(session):
             context["whippet"] = session.get("whippet")
             context["whippet_query_history"] = harp_whippet.query_history(session)
@@ -546,7 +574,7 @@ def run(run_dir: Path) -> None:
                 return harp_openai.chat(request_cfg, {**body, "harp_role": "oracle"})
             if cfg.get("provider") == "zai":
                 import harp_zai
-                return harp_zai.chat(request_cfg, body, cancelled=lambda:
+                return harp_zai.chat(request_cfg, {**body, "harp_role": "oracle"}, cancelled=lambda:
                     any((run_dir / name).exists() for name in (".stop_session", ".stop_local")))
             return request(path, body)
 
@@ -580,6 +608,17 @@ def run(run_dir: Path) -> None:
                 "and credential_test for observed online password candidates. "
                 "Include check describing the hypothesis, scoped fact, exact evidence references and "
                 "expected_positive/expected_negative observations that would change the next decision. "
+                "When decision_checkpoint is present, resolve it before speculative payload construction: "
+                "choose one focused research action or one bounded local prerequisite check. If choosing "
+                "the local check, state briefly in check.research_decision why it is more useful now. "
+                "The checkpoint does not prohibit a justified local action. For an apply_source checkpoint, "
+                "identify the source_id, controlled input, execution sink, configuration prerequisites, "
+                'and one observable test in check.research_basis using {"source_ids":["ID"], '
+                '"controlled_input":"...","execution_sink":"...",'
+                '"configuration_prerequisites":["..."],"observable_test":"..."}. '
+                "Treat source claims as unverified until "
+                "target evidence confirms the prerequisite. An error or failed callback setup is not a "
+                "negative target result. "
                 'For Bash implementation code add "shell":"bash"; HARP also selects Bash automatically '
                 "when Bash-only syntax is present. POSIX code defaults to sh. "
                 "Omit unused optional fields rather than filling them with null or placeholder objects. "
@@ -667,6 +706,16 @@ def run(run_dir: Path) -> None:
             current["strategy_rejections"] = 0
             harp.save_session(run_dir, current)
             session = current
+        if harp_research.enabled(session):
+            review_errors = harp_research.record_workflow_review(run_dir, decision)
+            if review_errors:
+                current = harp.load_session(run_dir)
+                current["candidate_review_feedback"] = review_errors[:3]
+                harp.save_session(run_dir, current)
+            elif session.get("candidate_review_feedback"):
+                current = harp.load_session(run_dir)
+                current.pop("candidate_review_feedback", None)
+                harp.save_session(run_dir, current)
         if "research" in decision:
             if plan:
                 harp.append_event(run_dir, {"type": "oracle_plan", "plan": plan})
@@ -682,19 +731,25 @@ def run(run_dir: Path) -> None:
                 if decision.get("objective") or decision.get("implementation") or decision.get("oracle_command") or decision.get("stop") is not False:
                     raise ValueError("Research must be a standalone oracle action with stop=false and empty objective")
                 action = decision["research"]
-                identity = ("query:" + " ".join(str(action["query"]).casefold().split()) if isinstance(action, dict) and "query" in action
-                            else "source:" + str(action.get("source_id")) + ":" + str(action.get("offset")) if isinstance(action, dict) else "invalid")
-                if identity in research_seen:
+                if not isinstance(action, dict):
+                    raise ValueError("Research must be an object containing one search or source-read action")
+                identity = harp_research.action_key(action)
+                is_search = "query" in action or "product" in action
+                if is_search and identity in research_seen:
                     raise ValueError("Repeated oracle research action; use the preserved results")
-                research_seen.add(identity)
-                current = harp.load_session(run_dir)
+                selection = harp_research.query_selection(decision, harp_research.load(run_dir))
+                result = harp_research.request(run_dir, decision["research"])
+                if is_search:
+                    research_seen.add(identity)
+                current = record_decision_checkpoint(run_dir, checkpoint, decision, harp_research.load(run_dir))
                 harp_evidence.record_check(current, decision.get("check"))
                 harp.save_session(run_dir, current)
                 if decision.get("check"):
                     harp.append_event(run_dir, {"type": "oracle_check", "check": decision["check"]})
-                result = harp_research.request(run_dir, decision["research"])
+                if selection:
+                    harp_research.record_workflow_review(run_dir, {"check": {}}, selection=selection)
                 if result.get("error"):
-                    feedback = {"error": result["error"], "next": "Do not retry this failed source/search; continue with evidence or report a specific blocker"}
+                    feedback = {"error": result["error"], "next": "This is a research/provider failure, not negative target evidence. Do not retry it. Before speculative payloads, consider an explicit general advisory/mechanism query within remaining budgets, a discriminating local prerequisite check, or report the blocker. No automatic fallback."}
             except (ValueError, RuntimeError) as error:
                 feedback = {"error": str(error)[:500], "next": "Research request rejected, not the assessment. Use cached evidence, choose a valid bounded action, or report the missing prerequisite"}
                 harp.append_event(run_dir, {"type": "research_rejected", "detail": feedback["error"]})
@@ -717,6 +772,8 @@ def run(run_dir: Path) -> None:
         if plan:
             harp.append_event(run_dir, {"type": "oracle_plan", "plan": plan})
         if decision.get("stop"):
+            record_decision_checkpoint(run_dir, checkpoint, decision,
+                                       research_state if checkpoint else None)
             harp.append_event(run_dir, {"type": "oracle_nim_stopped", "reason": "model_stop"})
             return
         if oracle_command:
@@ -733,7 +790,8 @@ def run(run_dir: Path) -> None:
                 continue
             probe_feedback = None
             oracle_probes.add(oracle_command)
-            current = harp.load_session(run_dir)
+            current = record_decision_checkpoint(run_dir, checkpoint, decision,
+                                                 research_state if checkpoint else None)
             for row in current["observations"]:
                 harp_evidence.progress(current, row)
             before_probe_evidence = set(harp_evidence.sync(current)["seen"])
@@ -770,6 +828,8 @@ def run(run_dir: Path) -> None:
             return
         probe_feedback = None
         prior.add(objective)
+        session = record_decision_checkpoint(run_dir, checkpoint, decision,
+                                             research_state if checkpoint else None)
         harp_evidence.record_check(session, decision.get("check"))
         if decision.get("check"):
             harp.append_event(run_dir, {"type": "oracle_check", "check": decision["check"]})

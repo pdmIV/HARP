@@ -19,6 +19,7 @@
   let budgetSessionId = "";
   let currentFilter = "all";
   let artifactSignature = "";
+  let attackSurfaceSignature = "";
   let pendingSnapshot = null;
   let snapshotRecoveryId = "";
   let snapshotBusy = false;
@@ -455,10 +456,11 @@
     currentPage = name;
     document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.dataset.panel === name));
     document.querySelectorAll(".nav-item").forEach(item => item.classList.toggle("active", item.dataset.page === name));
-    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", model: "Proxy model", oracle: "Oracle model", keys: "API Keys", settings: "Configuration"})[name];
+    $("pageCrumb").textContent = ({overview: "Overview", verbose: "Verbose", flags: "Flags", artifacts: "Artifacts", "attack-surface": "Attack Surface", model: "Proxy model", oracle: "Oracle model", keys: "API Keys", settings: "Configuration"})[name];
     if (name === "verbose") renderVerbose();
     if (name === "flags") acknowledgeFlags();
     if (name === "artifacts") renderArtifacts(true);
+    if (name === "attack-surface") renderAttackSurface();
   }
 
   function renderSessions() {
@@ -753,11 +755,19 @@
     if (kind === "recon_cache_error") return ["Recon save failed", event.error || "The run can continue, but its findings were not cached", ""];
     if (kind === "recon_failed") return ["Reconnaissance failed", event.error || "Startup failed", ""];
     if (kind === "recon_cancelled") return ["Reconnaissance stopped", "Stopped after the current command", ""];
+    if (kind === "research_query_refined") return ["CVE query refined", "Zero results; one broader feature query uses another search slot", event.query || ""];
+    if (kind === "research_refinement_skipped") return ["CVE refinement skipped", (event.reason || "budget exhausted").replaceAll("_", " "), ""];
     if (kind === "oracle_research_turn") return ["Oracle research allowance", `Research turn ${event.count} / 16; execution cycles preserved`, ""];
+    if (kind === "oracle_decision_checkpoint") return ["Oracle decision checkpoint", `Review ${event.phase?.replaceAll("_", " ") || "new capability"} before the next action`, ""];
+    if (kind === "oracle_decision_checkpoint_choice") return ["Oracle checkpoint choice", `${event.choice?.replaceAll("_", " ") || "unknown"} · ${event.phase?.replaceAll("_", " ") || "capability"}`, event.research_decision || ""];
+    if (kind === "oracle_source_application") return ["Public source applied to a test", event.status || "unknown", event.reason || (event.source_ids || []).join(", ")];
     if (kind.startsWith("research_")) return [kind === "research_rejected" ? "Research request returned to oracle" : kind === "research_cache_hit" ? "Research cache reused" : kind === "research_started" ? "Oracle research started" : "Oracle research completed",
       `${event.operation || ""} ${event.status || ""}${event.seconds != null ? ` · ${event.seconds}s` : ""}`, event.detail || (event.result ? JSON.stringify(event.result, null, 2) : event.reason || event.source_id || event.task_id || "")];
     if (kind === "oracle_effort_selected") return ["Oracle reasoning effort", `${event.effort} / ${event.source} / cycle ${event.cycle}`, ""];
     if (kind === "proxy_effort_recommendation") return ["Proxy effort recommendation", event.effort, ""];
+    if (kind === "local_model_progress") return ["Proxy model stream",
+      `${event.phase.replaceAll("_", " ")} · ${event.seconds}s elapsed · ${event.idle_seconds}s since model output`,
+      `${event.reasoning_chars} reasoning characters · ${event.content_chars} response characters${event.reason ? " · " + event.reason.replaceAll("_", " ") : ""}`];
     if (kind === "oracle_plan") return ["Oracle plan", event.plan, ""];
     if (kind === "oracle_strategy_rejected") return ["Strategy returned to oracle", event.reason, ""];
     if (kind === "oracle_check") return ["Next discriminating check", `${event.check?.hypothesis || ""} · ${event.check?.fact || ""}`, `Positive: ${event.check?.expected_positive || ""}\nNegative: ${event.check?.expected_negative || ""}`];
@@ -851,12 +861,13 @@
 
   function appendEvents(events) {
     appendVerbose(events);
+    const activityEvents = events.filter(event => event.type !== "local_model_progress" &&
+      event.type !== "terminal_output" && !(event.type === "local_command_check" && event.result?.exit_code === 0));
+    if (!activityEvents.length) return;
     const feed = $("activityFeed");
-    if (events.length && feed.querySelector(".empty-state")) feed.replaceChildren();
+    if (feed.querySelector(".empty-state")) feed.replaceChildren();
     const nearBottom = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 80;
-    for (const event of events) {
-      if (event.type === "terminal_output") continue;
-      if (event.type === "local_command_check" && event.result?.exit_code === 0) continue;
+    for (const event of activityEvents) {
       const category = eventCategory(event);
       const [title, description, command] = eventInfo(event);
       const row = el("div", `event ${category}`);
@@ -875,6 +886,88 @@
     }
     while (feed.children.length > 350) feed.firstChild.remove();
     if (nearBottom) feed.scrollTop = feed.scrollHeight;
+  }
+
+  function renderAttackSurface(force = false) {
+    const evidence = selected?.summary?.capability_evidence || {};
+    const services = selected?.recon || [];
+    const signature = JSON.stringify([selected?.id, selected?.summary?.target, services,
+      evidence.revision, evidence.facts, evidence.prerequisites, evidence.omitted]);
+    if (!force && signature === attackSurfaceSignature) return;
+    attackSurfaceSignature = signature;
+    const technologies = $("attackTechnologies");
+    const capabilities = $("attackCapabilities");
+    const prerequisites = $("attackPrerequisites");
+    technologies.replaceChildren();
+    capabilities.replaceChildren();
+    prerequisites.replaceChildren();
+    const omitted = $("attackOmitted");
+    omitted.classList.add("hidden");
+    if (!selected) {
+      $("attackSummary").textContent = "Select a session to view its attack surface.";
+      technologies.append(el("p", "muted-text", "No session selected."));
+      capabilities.append(el("p", "muted-text", "No session selected."));
+      prerequisites.append(el("p", "muted-text", "No session selected."));
+      return;
+    }
+    const facts = (evidence.facts || []).filter(row => !["server.product", "server.version"].includes(row.operation));
+    const checks = evidence.prerequisites || [];
+    $("attackSummary").textContent = `${selected.summary.target || "Selected target"} · ${services.length} service${services.length === 1 ? "" : "s"} · ${facts.length} scoped finding${facts.length === 1 ? "" : "s"} · ${checks.length} prerequisite${checks.length === 1 ? "" : "s"}`;
+    for (const service of [...services].sort((a, b) => Number(a.port) - Number(b.port))) {
+      const card = el("article", "attack-technology");
+      card.dataset.serviceKey = `${service.protocol || "tcp"}:${service.port}`;
+      const head = el("div", "attack-technology-head");
+      head.append(el("code", "attack-port", `${service.port}/${service.protocol || "tcp"}`),
+                  el("span", "attack-service", service.service || "Unknown service"));
+      card.append(head, el("strong", "", service.product || "Product not identified"),
+                  el("small", "", service.version ? `Version ${service.version}` : "Version not reported"));
+      technologies.append(card);
+    }
+    if (!services.length) technologies.append(el("p", "muted-text", "No open services recorded yet."));
+    const names = {"session.authenticate": "Authentication", "share.map": "Share access",
+      "share.list": "Share listing", "printer.exposed": "Printer exposed",
+      "printer.submit": "Print job accepted", "printer.queue": "Print queue",
+      "file.read": "File read", "file.write": "File write", "http.request": "HTTP request",
+      "protocol.connection": "Connection", "protocol.signing": "Protocol signing",
+      "tool.execution": "Local tool"};
+    for (const row of facts) {
+      const card = el("article", "attack-finding");
+      const head = el("div", "attack-finding-head");
+      const title = el("div", "");
+      title.append(el("strong", "", names[row.operation] || row.operation.replaceAll(".", " ")),
+                   el("code", "attack-operation", row.operation));
+      head.append(title, el("span", `attack-state ${row.status || "unknown"}`,
+                             (row.status || "unknown").replaceAll("_", " ")));
+      const scope = el("div", "attack-scope");
+      scope.append(el("span", "", `Host: ${row.host || "unspecified"}`),
+                   el("span", "", `Resource: ${row.resource || "unspecified"}`),
+                   el("span", "", `Principal: ${row.principal || "unknown"}`));
+      card.append(head, scope, el("small", "attack-source",
+        row.source === "recon" ? `Reconnaissance #${row.recon}` : `Terminal observation #${row.observation || "?"}`));
+      if (row.value) card.append(el("p", "attack-value", row.value));
+      if (row.quote) {
+        const proof = el("details", "attack-proof");
+        proof.append(el("summary", "", "Evidence excerpt"), el("pre", "", row.quote));
+        card.append(proof);
+      }
+      capabilities.append(card);
+    }
+    if (!facts.length) capabilities.append(el("p", "muted-text", "No scoped capability observations yet."));
+    if (evidence.omitted > 0) {
+      omitted.textContent = `${evidence.omitted} older observation${evidence.omitted === 1 ? "" : "s"} omitted from this summary; review Verbose activity for the full terminal record.`;
+      omitted.classList.remove("hidden");
+    }
+    for (const row of checks) {
+      const card = el("article", "attack-prerequisite");
+      const head = el("div", "attack-finding-head");
+      head.append(el("strong", "", row.fact || "Unspecified prerequisite"),
+                  el("span", `attack-state ${row.state || "unknown"}`,
+                     (row.state || "unknown").replaceAll("_", " ")));
+      card.append(head, el("p", "", `${row.host || "Selected target"} · ${row.resource || "service"} · ${row.principal || "unknown principal"}`));
+      if (row.meaning) card.append(el("small", "attack-source", row.meaning));
+      prerequisites.append(card);
+    }
+    if (!checks.length) prerequisites.append(el("p", "muted-text", "No prerequisite checks recorded yet."));
   }
 
   function renderSummary() {
@@ -899,7 +992,7 @@
       $("resumeOracle").classList.add("hidden");
       $("unlimitedBudgetRow").classList.add("hidden");
       $("researchStatus").textContent = "Research: no session selected.";
-      $("capabilityFacts").replaceChildren();
+      renderAttackSurface();
       renderElapsed();
       return;
     }
@@ -916,22 +1009,9 @@
       requested: "Request in progress", completed: "Last request completed", failed: "Last request failed",
       interrupted: "Request interrupted"};
     const researchUsage = sum.research_usage;
-    $("researchStatus").textContent = `Research: ${researchLabels[sum.research_status] || "Status unavailable"}${researchUsage ? ` · ${researchUsage.search_requests} searches · ${researchUsage.source_requests} source reads · ${researchUsage.failed_requests} failures` : ""}`;
+    $("researchStatus").textContent = `Research: ${researchLabels[sum.research_status] || "Status unavailable"}${researchUsage ? ` · ${researchUsage.search_requests} searches · ${researchUsage.source_reads ?? researchUsage.source_requests} source reads · ${researchUsage.failed_requests} failures` : ""}`;
     const flagCount = Object.values(selected.flags || {}).filter(x => x.found).length;
-    const evidence = sum.capability_evidence || {};
-    const facts = $("capabilityFacts");
-    facts.replaceChildren();
-    for (const row of (evidence.facts || [])) {
-      const item = el("p", "capability-fact");
-      item.textContent = `${row.principal} · ${row.host}/${row.resource} · ${row.operation}: ${row.status} (${row.source === "recon" ? `recon ${row.recon}` : `observation ${row.observation}`})`;
-      facts.append(item);
-    }
-    for (const row of (evidence.prerequisites || [])) {
-      const item = el("p", "capability-fact");
-      item.textContent = `${row.fact} · ${row.resource}: ${row.state.replaceAll("_", " ")}`;
-      facts.append(item);
-    }
-    if (!facts.children.length) facts.textContent = "No scoped observations yet.";
+    renderAttackSurface();
     $("metricFlags").textContent = `${flagCount} / 2`;
     $("metricOutcome").textContent = sum.status === "recon" ? "Scanning" : sum.success === "yes" ? (flagCount === 2 ? "Success" : "Other result") : sum.termination_reason === "host_interrupted" ? "Interrupted" : sum.success === "no" ? "No" : "Pending";
     $("metricOutcomeNote").textContent = sum.status === "recon" ? "Reconnaissance in progress" : sum.termination_reason === "host_interrupted" && sum.success !== "yes" ? (sum.cleanup_error ? "Recovery needs runtime cleanup" : "Recovered after host interruption") : sum.success === "yes" && flagCount < 2 ? "No flag pair recorded" : sum.time_to_success_seconds != null ? `In ${formatDuration(sum.time_to_success_active_seconds ?? sum.time_to_success_seconds)} active time` : sum.human_intervention_at ? "Human tactical help recorded" : "Before human tactical help";

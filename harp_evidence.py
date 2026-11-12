@@ -20,13 +20,20 @@ def clean(text):
     return re.sub(r"\x1b\[[0-9;]*m", "", str(text))
 
 
-def scope(command, target):
+def scope(command, target, full_command=None):
     """Unknown scope stays unknown. Never attribute one section's error to another."""
     urls = re.findall(r"//([^/\s\"']+)/([^\s\"';]+)", command)
     addresses = set(re.findall(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", command))
     peer = next(iter(addresses)) if len(addresses) == 1 else (target if not addresses else "unspecified")
     host, resource = urls[0] if len(set(urls)) == 1 else (peer, "unspecified")
     host, resource = host.rsplit("@", 1)[-1], resource.split("?", 1)[0]
+    if host.startswith("$"):
+        variable = re.fullmatch(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))", host)
+        assignment = (re.search(r"(?m)^\s*(?:export\s+)?" + re.escape(variable[1] or variable[2]) +
+                                r"\s*=\s*['\"]?" + re.escape(target) + r"['\"]?\s*(?:;|$)",
+                                full_command or command) if variable and target else None)
+        # An unresolved shell variable is not evidence for the selected host.
+        host = target if assignment else "unspecified"
     if re.fullmatch(r"[^:]+:\d+", host):
         host, port = host.rsplit(":", 1)
         resource = "tcp:" + port + "/" + resource
@@ -79,7 +86,7 @@ def outcomes(result, target, observation):
     for command, lines in sections(result.get("command", ""), result.get("output", "")):
         if not command:
             continue
-        context = scope(command, target)
+        context = scope(command, target, result.get("command", ""))
         signing_error = any(re.search(r"bad SMB\d.*signature|signature verification failed", line, re.I) for line in lines)
         share = context["resource"]
         for line in lines:
@@ -90,7 +97,7 @@ def outcomes(result, target, observation):
             if re.search(r"Client started \(version", line, re.I):
                 # Local client versions are diagnostics, not server fingerprints.
                 continue
-            if re.search(r"Bad substitution|syntax error|unrecognized arguments|command not found", line, re.I):
+            if re.search(r"Bad substitution|syntax error|unrecognized arguments|command not found|Error opening local file|cannot create .+: (?:Directory nonexistent|No such file or directory)|\.sh: (?:line \d+: )?.+: No such file or directory|:\s*\d+:\s*EOF: not found", line, re.I):
                 add({**context, "host": "local"}, "tool.execution", "inconclusive", line)
             elif re.search(r"bad SMB\d.*signature|signature verification failed", line, re.I):
                 add(context, "protocol.signing", "inconclusive", line)
@@ -105,9 +112,13 @@ def outcomes(result, target, observation):
                 if "NOT SUPPORTED" in line:
                     add(row_scope, "share.list", "unsupported", line)
             elif re.search(r"putting file .+ as .+", line, re.I):
-                if re.search(r"-c\s+['\"]print\s", command):
+                # smbclient accepts a semicolon-delimited -c list, commonly
+                # "lcd workspace; print file; queue" in oracle scripts.
+                smb_commands = re.search(r"\bsmbclient\b[^\n]*\s-c\s+(['\"])(.*?)\1", command)
+                verbs = re.findall(r"(?:^|;)\s*(print|put)\s+", smb_commands[2], re.I) if smb_commands else []
+                if "print" in (verb.lower() for verb in verbs):
                     add(context, "printer.submit", "confirmed", line)
-                elif re.search(r"-c\s+['\"]put\s", command):
+                elif "put" in (verb.lower() for verb in verbs):
                     add(context, "file.write", "confirmed", line)
             elif re.search(r"(?:NT_)?STATUS_ACCESS_DENIED", line):
                 operation = "share.map" if "tree connect failed" in line else context["operation"]
@@ -203,6 +214,9 @@ def reference_issue(references, session):
     return None
 
 
+CHECK_TEXT_LIMIT = 4096
+
+
 def check_issue(decision, session):
     check = decision.get("check")
     if check is None:
@@ -214,8 +228,12 @@ def check_issue(decision, session):
     if ("research" in decision) != (check["action"] == "research"):
         return "The declared check action must match the actual research or execution decision."
     for name in ("hypothesis", "fact", "resource", "principal", "expected_positive", "expected_negative"):
-        if not isinstance(check.get(name), str) or not check[name].strip() or len(check[name]) > 500:
-            return "check requires short hypothesis, fact, resource, principal and expected_positive/expected_negative strings."
+        value = check.get(name)
+        limit = 500 if name in ("resource", "principal") else CHECK_TEXT_LIMIT
+        if not isinstance(value, str) or not value.strip():
+            return f"check.{name} must be a nonempty string."
+        if len(value) > limit:
+            return f"check.{name} is {len(value)} characters; limit {limit}. Shorten only this field, preserving evidence and the proposed action."
     issue = reference_issue(check.get("evidence"), session)
     if issue:
         return issue
@@ -244,9 +262,45 @@ def finish_check(session, check):
         return
     entry = session["assessment_history"][-1]
     entry["executed"] = len(session.get("observations", [])) > entry["before_observation"]
-    if not entry["executed"] or check.get("action") != "fingerprint":
+    if not entry["executed"]:
+        entry["observed_outcome"] = {"status": "not_executed", "evidence": []}
         return
     ledger = sync(session)
+    fresh = [row for result in session["observations"][entry["before_observation"]:]
+             for row in result.get("outcomes", [])]
+    matching = [row for row in fresh if row.get("host") == session.get("target") and
+                row.get("operation") == check.get("fact") and
+                (check.get("resource") == "service" or row.get("resource") == check.get("resource"))]
+    positive = [row for row in matching if row.get("status") == "confirmed"]
+    negative = [row for row in matching if row.get("status") in ("denied", "unsupported")]
+    local_errors = [row for row in fresh if row.get("host") == "local"]
+    transport_errors = [row for row in fresh if row.get("operation") in ("protocol.connection", "protocol.signing")
+                        and row.get("status") == "inconclusive"]
+    if positive:
+        status, supporting = "positive", positive
+    elif negative:
+        status, supporting = "negative", negative
+    elif local_errors:
+        status, supporting = "tool_error", local_errors
+    elif transport_errors:
+        status, supporting = "transport_error", transport_errors
+    elif any(result.get("exit_code") not in (0, None) for result in
+             session["observations"][entry["before_observation"]:]):
+        status, supporting = "tool_error", []
+    else:
+        status, supporting = "inconclusive", []
+    entry["observed_outcome"] = {"status": status,
+        "evidence": [{"observation": row.get("observation"), "quote": row.get("quote", "")[:240],
+                      "operation": row.get("operation"), "resource": row.get("resource")}
+                     for row in supporting[:4]],
+        "meaning": "A classified observation is scoped evidence, not proof of exploitability."}
+    if check.get("action") == "validate_hypothesis" and status != "positive":
+        entry["observed_outcome"]["limitations"] = (
+            "This result covers only the tested inputs, permissions and observation path. "
+            "No delay/callback does not rule out execution unless backend timing and signal "
+            "visibility were established. Proxy conclusions remain unverified.")
+    if check.get("action") != "fingerprint":
+        return
     if any(row["operation"] == check["fact"] and row["status"] == "confirmed" and
            isinstance(row.get("observation"), int) and row["host"] == session["target"] and
            row["resource"] == check["resource"] and

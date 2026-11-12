@@ -1,6 +1,9 @@
 """Synthetic regression tests. No model, runtime, network or box-specific solution."""
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +17,82 @@ import test_harp as fixtures
 
 
 class StrategyTests(unittest.TestCase):
+    def test_syntax_probes_follow_real_shell_support_without_running_the_body(self):
+        shell = shutil.which("sh")
+        if not shell and os.name == "nt" and shutil.which("git"):
+            candidate = Path(shutil.which("git")).parent.parent / "usr/bin/sh.exe"
+            shell = str(candidate) if candidate.is_file() else None
+        if not shell:
+            self.skipTest("A local sh is unavailable for synthetic parser tests")
+        env = {**os.environ, "PATH": str(Path(shell).parent) + os.pathsep + os.environ.get("PATH", "")}
+        def execute(script):
+            return subprocess.run([shell], input=script, text=True, encoding="utf-8", capture_output=True, env=env, timeout=5)
+        if os.name == "nt" and execute(":").returncode in (0xC0000142, 0xC0000135):
+            self.skipTest("The local sh cannot initialize its Windows runtime")
+        self.assertEqual(execute(strategy.syntax_probe('printf "%s" "[[ literal ]]"')).returncode, 0)
+        self.assertNotEqual(execute(strategy.syntax_probe("if then")).returncode, 0)
+        supported = execute('unset HARP_ARRAY_CHECK; : "${HARP_ARRAY_CHECK[0]-}"').returncode == 0
+        result = execute(strategy.syntax_probe('printf HARP_BODY_MUST_NOT_RUN; echo "${ARR[0]}"'))
+        self.assertEqual(result.returncode == 0, supported)
+        self.assertNotIn("HARP_BODY_MUST_NOT_RUN", result.stdout)
+
+    def test_preflight_checks_active_expansions_without_vetoing_literal_text(self):
+        for command in ('echo "${PIPESTATUS[0]}"', 'echo ${ARR[@]}',
+                        'cat <<TEXT\n${ARR[0]}\nTEXT', 'echo "$(echo ${ARR[0]})"'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(strategy.shell_preflight(command)["array_expansion"])
+                self.assertTrue(strategy.syntax_probe(command).startswith("sh -c"))
+                self.assertTrue(strategy.syntax_probe(strategy.prepare_command(command, "bash")).startswith("bash -n"))
+        for command in ("printf '%s' '${ARR[0]}'", '# ${ARR[0]}\necho ready',
+                        r'echo "\${ARR[0]}"', "cat <<'TEXT'\n${ARR[0]}\nTEXT",
+                        'echo "$(printf \'%s\' \'${ARR[0]}\')"',
+                        'printf "%s" "[[ ready ]]"', 'PIPESTATUS=ready; echo "$PIPESTATUS"'):
+            with self.subTest(command=command):
+                self.assertIsNone(strategy.shell_preflight(command)["array_expansion"])
+                self.assertTrue(strategy.syntax_probe(command).startswith("sh -n"))
+
+    def test_generated_helpers_need_distinct_nested_heredoc_delimiters(self):
+        bad = "cat >helper.sh <<'EOF'\n#!/bin/bash\ncat <<EOF\ntext\nEOF\necho tail\nEOF\nbash helper.sh"
+        self.assertIn("heredoc", strategy.shell_preflight(bad)["issue"])
+        self.assertIn("heredoc", strategy.shell_preflight(strategy.prepare_command(bad, "bash"))["issue"])
+        good = "cat >helper.sh <<'OUTER'\n#!/bin/bash\ncat <<INNER\ntext\nINNER\necho tail\nOUTER\nbash helper.sh"
+        self.assertIsNone(strategy.shell_preflight(good)["issue"])
+        self.assertIsNone(strategy.shell_preflight("cat <<'TEXT'\ncat <<TEXT\nTEXT")["issue"])
+
+    def test_local_setup_errors_with_zero_final_status_do_not_count_as_progress(self):
+        for output in ('Error opening local file /tmp/input',
+                       '/bin/sh: 32: cannot create /tmp/input/part: Directory nonexistent',
+                       '/tmp/helper.sh: line 30: /tmp/input/part: No such file or directory',
+                       '/proc/self/fd/3: 4: Bad substitution'):
+            result = {"command": "cat /tmp/probe.log", "exit_code": 0, "output": output}
+            with self.subTest(output=output):
+                self.assertIsNotNone(strategy.execution_feedback(result))
+                self.assertEqual(strategy.result_state(result), "error")
+
+    def test_array_patterns_provide_bash_repair_hints(self):
+        for command in ('AUTH=(-N)', 'AUTH+=(-N)', 'AUTH[0]=(-N)',
+                        'printf "%s\\n" "${AUTH[@]}"', 'echo ${AUTH[*]}',
+                        'echo "${AUTH[0]}"'):
+            with self.subTest(command=command):
+                self.assertIn('shell:"bash"', strategy.shell_issue(command))
+                wrapped = strategy.prepare_command(command, "bash")
+                self.assertIsNone(strategy.shell_issue(wrapped))
+                self.assertTrue(strategy.syntax_probe(wrapped).startswith("bash -n"))
+                # Terminal.run validates the probe's outer shell, not its data.
+                self.assertIsNone(strategy.shell_issue(strategy.syntax_probe(command)))
+                self.assertIsNone(strategy.shell_issue(strategy.syntax_probe(wrapped)))
+
+    def test_array_text_in_literals_and_quoted_heredocs_is_data(self):
+        for command in ("printf '%s' 'AUTH=(-N) ${AUTH[@]}'",
+                        'printf "%s" "AUTH=(-N)"',
+                        r'printf "%s" "\${AUTH[@]}"',
+                        "cat <<'SCRIPT' >helper.sh\nAUTH=(-N)\nSCRIPT\n/bin/bash helper.sh",
+                        "cat <<-'SCRIPT'\n\tAUTH=(-N)\n\tSCRIPT",
+                        'AUTH=-N\nprintf "%s" "$AUTH"'):
+            with self.subTest(command=command):
+                self.assertIsNone(strategy.shell_issue(command))
+        self.assertIsNotNone(strategy.shell_issue("cat <<'TEXT'\nAUTH=(-N)\nTEXT\nAUTH=(-U)"))
+
     def test_strategy_rejections_offer_one_bounded_research_recovery(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)

@@ -21,6 +21,12 @@ expected_positive, expected_negative}. Use a stable fact/resource/principal acro
 equivalent tools; for a repeated check state retry_reason explaining changed evidence
 or a specific transport limitation. Record only a concise test rationale, not private
 reasoning. The capability ledger contains observed output, not verified exploitability.
+Aim for concise check text (about 500 characters per descriptive field); the accepted
+limit is 4096 for hypothesis, fact, expected outcomes and research_decision. Preserve
+the chosen action when correcting an oversized field. Resource/principal limits are 500.
+recon_coverage records the startup scan's actual port range and completion separately
+from its short list of open services. Reuse completed full TCP coverage; an unchanged
+target with few open ports does not justify assuming the initial scan was a quick scan.
 Do not use generic online password lists simply because an account was enumerated,
 wordlists are installed, or no lockout was reported. No-lockout is a rate/lockout
 constraint, not evidence for a weak password. Increasing a failed list is not a new
@@ -38,6 +44,16 @@ tested command's exit status when piping output to a logger. Authentication fail
 are evidence against candidates, and transport errors do not prove tested coverage.
 Background-job polling is not new target evidence. Hand back to the oracle when a
 job repeatedly yields only counters, failed authentication or transport errors.
+For a timing/callback test, establish how the server-side operation produces the
+measured signal. Distinguish submission/acknowledgement time from backend completion;
+asynchronous processing can invalidate that measurement. Verify callback reachability
+before interpreting silence. Without a verified observation path, report no signal
+for the tested inputs and leave the wider mechanism inconclusive. Do not promote a
+proxy's negative conclusion into a proven absence of vulnerability. UDP open|filtered
+is inconclusive, not a confirmed service or proof of absence. A client upload message
+does not establish the server's internal spool filename, shell quoting or execution.
+Choose one discriminating next check and state its limitations; avoid bundling unrelated
+enumeration or writing elaborate code before resolving the decisive prerequisite.
 """
 
 IMPLEMENTATION_MARKER = "\n\nOracle-authored implementation instructions:\n"
@@ -58,6 +74,19 @@ Prefer one operation per command. For a compound script print literal === headin
 and each operation's exit code. Capture output to a file, save rc=$? immediately,
 then display it. Never use a final echo, cat or tee exit code as the probe's status.
 Access denied is scoped to its resource and operation; preserve other working capabilities.
+Report measured outcomes and tool errors separately from interpretations. No timing
+delay/callback alone does not rule out an asynchronous or otherwise unobserved backend.
+When reading saved output, reuse already-visible complete sections. Check the reported
+file length and range before requesting another slice; do not reread overlapping
+sections or request ranges past EOF merely to obtain a final summary.
+For generated scripts use distinct outer and inner heredoc delimiters. Create and
+syntax-check the helper before launching it. Keep local staging filenames simple;
+pass an unusual remote filename separately through the tool's filename argument.
+A slash is a path separator, even inside a quoted Unix filename. Before upload,
+verify the exact local file exists. A failed creation/upload is a tool error, not
+a negative target test. Do not poll a probe whose required input was never sent.
+Use recon_coverage to reuse completed startup scans. Repeat only for a stated
+coverage gap, changed route/access, or a recorded scan/transport failure.
 """
 
 
@@ -119,6 +148,8 @@ def poll_command(command):
 
 def result_state(result):
     """Return useful/monitoring/error status without treating counters as evidence."""
+    if execution_feedback(result):
+        return "error"
     scoped = result.get("outcomes", [])
     if scoped and all(row.get("host") != "local" and row.get("status") in
                       ("confirmed", "denied", "unsupported") for row in scoped):
@@ -137,6 +168,16 @@ def result_state(result):
     if poll_command(str(result.get("command", ""))):
         return "monitoring"
     return "evidence"
+
+
+def execution_feedback(result):
+    """Retain local prerequisite failures even when a trailing command exits zero."""
+    output = str(result.get("output", ""))
+    if re.search(r"(?im)(?:^|\n)(?:[^\n]*:\s*\d+:\s*)?(?:Bad substitution|[^\n]*: Bad substitution)\s*$", output):
+        return 'The command hit a runtime shell substitution error. Correct the expansion or explicitly select shell:"bash"; a successful -n check does not test expansion support.'
+    if re.search(r"(?im)^(?:Error opening local file\b|[^\n]*cannot create [^\n]*: (?:Directory nonexistent|No such file or directory)|[^\n]*\.sh: (?:line \d+: )?[^\n]*: No such file or directory|[^\n]*:\s*\d+:\s*EOF: not found)", output):
+        return "A local helper/input prerequisite failed. Use distinct heredoc delimiters and safe local staging paths; verify the exact input file exists before uploading. Fix this before polling or interpreting callback silence as a target result."
+    return None
 
 
 def evidence_fingerprint(result):
@@ -168,15 +209,96 @@ def prepare_command(command, shell="sh"):
 
 
 def shell_issue(command):
+    """Offer a repair hint after parser failure, never veto execution by pattern."""
     if re.match(r"\s*(?:/bin/)?bash\s", command):
         return None
-    # A quoted script written by cat is data; its declared interpreter executes
-    # it later. Single-quoted CLI arguments likewise do not expand in this shell.
-    executable = re.sub(r"(?m)(\bcat[^\n]*<<\s*(['\"])(\w+)\2[^\n]*\n)[\s\S]*?^\3\s*$", r"\1\3", command)
-    executable = re.sub(r"'[^']*'", "''", executable)
-    if re.search(r"\$\{?PIPESTATUS\b|\[\[|\bdeclare\s+-[aA]|\bset\s+-[^\n;]*\bpipefail\b", executable):
-        return 'Bash syntax is not valid for the default /bin/sh runtime. Set shell:"bash" or use POSIX exit-code handling.'
+    # Quoted heredoc bodies are data for the receiving command (including our
+    # syntax probe), not executable syntax in the outer shell. Single-quoted
+    # arguments and escaped characters likewise do not expand in this shell.
+    executable = re.sub(r"(?m)(<<-?\s*(['\"])(\w+)\2[^\n]*\n)[\s\S]*?^\t*\3[ \t]*$", r"\1\3", command)
+    executable = re.sub(r"'[^']*'|\\[^\n]", "''", executable)
+    # Array assignments must be unquoted, while array expansions also execute
+    # inside double quotes. sh -n alone does not catch bad array substitutions.
+    unquoted = re.sub(r'"(?:\\.|[^"\\])*"', '""', executable)
+    if (re.search(r"\$\{?PIPESTATUS\b|\[\[|\bdeclare\s+-[aA]|\bset\s+-[^\n;]*\bpipefail\b|\$\{[A-Za-z_]\w*\[[^\]\n]*\]", executable)
+            or re.search(r"\b[A-Za-z_]\w*(?:\[[^\]\n]*\])?\+?=\s*\(", unquoted)):
+        return 'Possible Bash-specific syntax. If Bash is intended, set shell:"bash" in the command action; otherwise correct the sh command.'
     return None
+
+
+def shell_preflight(command):
+    """Inspect active expansions and shell-script heredocs, not literal arguments.
+
+    This is deliberately a narrow preflight, not a replacement shell parser.
+    Expansion support is tested against the runtime shell by syntax_probe.
+    """
+    wrapped = re.fullmatch(r"/bin/bash <<'(HARP_BASH_[A-Za-z0-9_]+)'\n([\s\S]*)\n\1", command)
+    if wrapped:
+        result = shell_preflight(wrapped[2])
+        return {**result, "array_expansion": None}  # Bash owns these expansions.
+    quote, frames, pending = None, [], []
+    array, issue, index, line_start = None, None, 0, 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char == "#" and quote is None and (index == 0 or command[index - 1] in " \t\n;|&()"):
+            index = command.find("\n", index)
+            if index < 0:
+                break
+            continue
+        if char == "'" and quote is None:
+            quote = "'"
+        elif char == '"':
+            quote = None if quote == '"' else '"'
+        elif command.startswith("$(", index):
+            frames.append([quote, 1])
+            quote = None
+            index += 2
+            continue
+        elif frames and quote is None and char in "()":
+            frames[-1][1] += 1 if char == "(" else -1
+            if frames[-1][1] == 0:
+                quote = frames.pop()[0]
+        elif command.startswith("${", index):
+            found = re.match(r"\$\{[A-Za-z_]\w*\[[^\]\n]+\][^}\n]*\}", command[index:])
+            if found:
+                array = array or found[0]
+        elif quote is None and command.startswith("<<", index):
+            found = re.match(r"<<(-?)[ \t]*(['\"]?)([A-Za-z_]\w*)\2", command[index:])
+            if found:
+                pending.append((found[3], bool(found[2]), bool(found[1]), command[line_start:index]))
+                index += len(found[0])
+                continue
+        if char == "\n":
+            index += 1
+            for marker, quoted, tabs, header in pending:
+                end = re.search(r"(?m)^" + (r"\t*" if tabs else "") + re.escape(marker) + r"$", command[index:])
+                body = command[index:index + end.start()] if end else command[index:]
+                shell_script = bool(re.search(r"\.sh(?:['\"]|\s|$)", header) or re.match(r"#![^\n]*\b(?:ba|da|k|z)?sh\b", body))
+                if shell_script:
+                    # Reusing the outer delimiter closes the file-writing heredoc
+                    # at the inner terminator; the rest runs in the wrong shell.
+                    if re.search(r"(?m)^\s*cat\b[^\n]*<<-?\s*['\"]?" + re.escape(marker) + r"(?:['\"]|\s|$)", body):
+                        issue = "Generated shell script reuses its outer heredoc delimiter. Use distinct outer and inner delimiters, then syntax-check the saved helper before launching it."
+                if not quoted:
+                    found = re.search(r"(?<!\\)\$\{[A-Za-z_]\w*\[[^\]\n]+\][^}\n]*\}", body)
+                    if found:
+                        array = array or found[0]
+                index = index + end.end() if end else len(command)
+                if index < len(command) and command[index] == "\n":
+                    index += 1
+            pending = []
+            line_start = index
+            continue
+        index += 1
+    return {"array_expansion": array, "issue": issue}
 
 
 def syntax_probe(command):
@@ -185,4 +307,10 @@ def syntax_probe(command):
     marker = "HARP_SYNTAX_" + hashlib.sha256(body.encode()).hexdigest()[:16]
     while marker in body:
         marker += "X"
-    return shell + " -n <<'" + marker + "'\n" + body + "\n" + marker
+    probe = shell + " -n <<'" + marker + "'\n" + body + "\n" + marker
+    if shell == "sh" and shell_preflight(command)["array_expansion"]:
+        # Only expand a fixed, unset local variable. Never execute the user's
+        # command to validate it. Some /bin/sh implementations support arrays;
+        # let the selected runtime determine that instead of vetoing by regex.
+        probe = 'sh -c \'unset HARP_ARRAY_CHECK; : "${HARP_ARRAY_CHECK[0]-}"\' &&\n' + probe
+    return probe

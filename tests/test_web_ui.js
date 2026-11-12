@@ -29,7 +29,7 @@ const document = {
 };
 const source = fs.readFileSync("web/app.js", "utf8").replace(
   /  poll\(\);\s+setInterval\(poll, 1300\);\s+setInterval\(renderElapsed, 1000\);/,
-  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, renderStartStop, switchSession, cacheCompletedSession, poll, renderDependencies, fillConfig, configPayload, renderSelections, renderSummary, renderElapsed, renderReplay, seekReplay, tickReplay, post, setStartPending(value) { startPending = value; }, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
+  "globalThis.ui = {interfaceSettings, applyInterfaceSettings, previewSettingsFile, restoreSettings, exportSettings, clearSnapshotPreview, renderArtifacts, SessionViewCache, sessionCache, prefetchRecentSessions, renderSessions, renderStartStop, switchSession, cacheCompletedSession, poll, renderDependencies, fillConfig, configPayload, renderSelections, renderSummary, renderElapsed, appendEvents, renderVerbose, renderReplay, seekReplay, tickReplay, post, setStartPending(value) { startPending = value; }, setSessions(value) { sessions = value; }, setReplay(value) { replay = value; }, setSelected(value) { selected = value; }};"
 );
 assert(source.includes("globalThis.ui"), "Could not isolate UI rendering from network startup");
 const storage = {getItem: () => null, setItem() {}};
@@ -50,6 +50,30 @@ const state = {
 context.ui.setSelected(state);
 context.ui.renderSummary();
 assert.equal(nodes.get("successDialog").opens, 0);
+state.activity.local_model_progress = {phase: "reasoning", seconds: 12, idle_seconds: 1,
+  reasoning_chars: 250, content_chars: 0};
+state.activity.local_action = {thought: "Reviewing the submitted results"};
+context.ui.renderSummary();
+assert.equal(nodes.get("localAction").textContent, "Reviewing the submitted results");
+state.activity.local_model_progress = {phase: "waiting", seconds: 15, idle_seconds: 15,
+  reasoning_chars: 0, content_chars: 0};
+context.ui.renderSummary();
+assert.equal(nodes.get("localAction").textContent, "Reviewing the submitted results");
+const activitySizeBeforeStream = nodes.get("activityFeed").children.length;
+const streamEvents = ["waiting", "reasoning", "responding", "completed", "timed_out", "failed", "cancelled"]
+  .map(phase => ({type: "local_model_progress", phase, seconds: 15, idle_seconds: 1,
+    reasoning_chars: 250, content_chars: 10}));
+context.ui.appendEvents(streamEvents);
+assert.equal(nodes.get("activityFeed").children.length, activitySizeBeforeStream,
+  "Stream events must stay out of the main activity feed");
+nodes.get("verboseFilter").value = "all";
+context.ui.renderVerbose();
+assert.equal(nodes.get("verboseFeed").children.length, streamEvents.length);
+assert.equal(nodes.get("verboseFeed").children[0].children[0].children[1].textContent, "Proxy model stream");
+delete state.activity.local_model_progress;
+delete state.activity.local_action;
+context.ui.renderSummary();
+assert.equal(nodes.get("localAction").textContent, "Awaiting a delegated objective.");
 state.artifacts.push({id: "user", kind: "flag", title: "user.txt", value: "a".repeat(32)});
 state.flags["user.txt"] = {found: true, artifact_id: "user"};
 context.ui.renderSummary();
@@ -132,13 +156,19 @@ console.log("Runtime UI checks passed: native selection, direct network policy, 
 
 // A rewind must clear future flags/artifacts, and replay must never send a POST.
 const initial = {seconds: 0, event: null, summary: {status: "recon", success: "unknown"}, activity: {}, flags: {}, artifacts: [], recon: []};
-const final = {seconds: 75, event: null, summary: {...state.summary}, activity: {}, flags: {...state.flags}, artifacts: [...state.artifacts], recon: []};
+const final = {seconds: 75, event: null,
+  summary: {...state.summary, capability_evidence: {facts: [{host: "lab", principal: "anonymous",
+    resource: "QUEUE", operation: "printer.submit", status: "confirmed", observation: 2}], prerequisites: []}},
+  activity: {}, flags: {...state.flags}, artifacts: [...state.artifacts],
+  recon: [{port: 445, protocol: "tcp", service: "microsoft-ds"}]};
 const playback = {id: "test", loading: false, playing: false, seconds: 0, index: -1, duration_seconds: 75,
   session: {id: "test", started_epoch: state.started_epoch}, frames: [initial, final], lastTick: 1000};
 context.ui.setReplay(playback);
 context.ui.seekReplay(75);
 assert.equal(nodes.get("metricFlags").textContent, "2 / 2");
 assert.equal(nodes.get("sessionState").textContent, "RECORDED REPLAY");
+assert.equal(nodes.get("attackTechnologies").children.length, 1);
+assert.equal(nodes.get("attackCapabilities").children[0].children[0].children[0].children[0].textContent, "Print job accepted");
 assert.equal(nodes.get("runManual").disabled, true);
 assert.equal(nodes.get("startSession").disabled, true);
 assert.throws(() => context.ui.post("/api/sessions/test/terminal", {}), /Exit recorded replay/);
@@ -146,6 +176,8 @@ context.ui.seekReplay(0);
 assert.equal(nodes.get("metricFlags").textContent, "0 / 2");
 assert.equal(nodes.get("metricElapsed").textContent, "00:00:00");
 assert.equal(nodes.get("userFlagValue").textContent, "Awaiting capture");
+assert.equal(nodes.get("attackTechnologies").children[0].textContent, "No open services recorded yet.");
+assert.equal(nodes.get("attackCapabilities").children[0].textContent, "No scoped capability observations yet.");
 assert.equal(nodes.get("successDialog").open, false);
 playback.playing = true;
 playback.lastTick = 0;
@@ -237,16 +269,34 @@ for (const [status, label] of [["disabled", "Disabled"], ["enabled_unused", "no 
 state.summary.research_usage = {search_requests: 1, source_requests: 2, failed_requests: 0};
 context.ui.renderSummary();
 assert(nodes.get("researchStatus").textContent.includes("1 searches · 2 source reads · 0 failures"));
+state.summary.research_usage = {search_requests: 1, source_requests: 0, source_reads: 2, failed_requests: 0};
+context.ui.renderSummary();
+assert(nodes.get("researchStatus").textContent.includes("2 source reads"), "Cached CVE reads must count without a source fetch");
 delete state.summary.research_usage;
 console.log("Research activity checks passed: unused, active, completed, failed and interrupted sessions.");
-state.summary.capability_evidence = {facts: [{host: "lab", principal: "anonymous", resource: "QUEUE",
-  operation: "printer.submit", status: "confirmed", source: "terminal", observation: 3}],
-  prerequisites: [{fact: "server.version", resource: "service", state: "not_observable"}]};
+assert(/data-page="artifacts"[\s\S]*?data-page="attack-surface"[\s\S]*?data-page="oracle"/.test(html),
+  "Attack Surface must be directly below Artifacts in the sidebar");
+assert(!html.includes('id="capabilityFacts"'), "Capability evidence must leave the Overview page");
+state.recon = [{port: 445, protocol: "tcp", service: "microsoft-ds", product: "Sample Server", version: "2.1"},
+  {port: 80, protocol: "tcp", service: "http", product: "", version: ""}];
+state.summary.capability_evidence = {revision: 2, facts: [{host: "lab", principal: "anonymous", resource: "QUEUE",
+  operation: "printer.submit", status: "confirmed", source: "terminal", observation: 3, quote: "putting file sample.txt"},
+  {host: "lab", principal: "unknown", resource: "tcp:445", operation: "server.product", status: "confirmed", source: "recon", recon: 1}],
+  prerequisites: [{fact: "server.version", resource: "service", state: "not_observable"}], omitted: 2};
 context.ui.renderSummary();
-assert(nodes.get("capabilityFacts").children[0].textContent.includes("printer.submit: confirmed"));
-assert(nodes.get("capabilityFacts").children[1].textContent.includes("not observable"));
+assert.equal(nodes.get("attackTechnologies").children.length, 2);
+assert.equal(nodes.get("attackTechnologies").children[0].children[0].children[0].textContent, "80/tcp");
+assert.equal(nodes.get("attackTechnologies").children[1].children[1].textContent, "Sample Server");
+assert.equal(nodes.get("attackCapabilities").children.length, 1, "Service fingerprints belong in the inventory");
+assert.equal(nodes.get("attackCapabilities").children[0].children[0].children[0].children[0].textContent, "Print job accepted");
+assert.equal(nodes.get("attackCapabilities").children[0].children[0].children[1].textContent, "confirmed");
+assert.equal(nodes.get("attackPrerequisites").children[0].children[0].children[1].textContent, "not observable");
+assert(nodes.get("attackOmitted").textContent.includes("2 older observations"));
+state.recon = [];
 delete state.summary.capability_evidence;
-console.log("Capability UI checks passed: scoped outcomes and unavailable prerequisites.");
+context.ui.renderSummary();
+assert.equal(nodes.get("attackCapabilities").children[0].textContent, "No scoped capability observations yet.");
+console.log("Attack Surface UI checks passed: navigation, inventory, scoped outcomes, prerequisites, and empty state.");
 
 const whippetConfig = JSON.parse(fs.readFileSync("harp.example.json", "utf8"));
 assert(/id="whippetEnabled"[^>]*\bchecked/.test(html), "Whippet should appear enabled before configuration loads");

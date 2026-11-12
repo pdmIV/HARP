@@ -2,6 +2,8 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -58,7 +60,7 @@ class ZAITests(unittest.TestCase):
         for effort, expected in (("low", 240), ("high", 600), ("max", 1200)):
             with self.subTest(effort=effort), patch.object(harp_zai, "key", return_value="key"), \
                  patch.object(harp_zai.urllib.request, "urlopen", return_value=io.StringIO(json.dumps(reply))) as send:
-                harp_zai.chat({**self.config(), "reasoning_effort": effort}, {"messages": []})
+                harp_zai.chat({**self.config(), "reasoning_effort": effort}, {"messages": [], "harp_role": "oracle"})
                 self.assertEqual(send.call_args.kwargs["timeout"], expected)
 
     def test_oracle_uses_zai(self):
@@ -212,12 +214,135 @@ class ZAITests(unittest.TestCase):
         response.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
         ledger = []
         with patch.object(harp_zai, "key", return_value="key"), \
-             patch.object(harp_zai.urllib.request, "urlopen", return_value=response), \
-             patch.object(harp_zai.time, "monotonic", side_effect=[0, 0] + [300] * 100):
+             patch.object(harp_zai.urllib.request, "urlopen", return_value=response):
             self.assertEqual(harp.api_chat(self.config(), "system", "evidence", ledger), '{"done":true}')
         self.assertEqual(ledger[0]["completion_tokens"], 20)
         self.assertEqual(ledger[0]["cached_input_tokens"], 60)
         self.assertEqual(ledger[0]["finish_reason"], "stop")
+
+    def watched_stream(self, lines, *, cancelled=None, **limits):
+        """Exercise real blocking reads with short watchdog limits, no network."""
+        release = threading.Event()
+        class Response:
+            headers = {"Content-Type": "text/event-stream"}
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+            def close(self): release.set()
+            def __iter__(self): return lines(release)
+        progress = []
+        with patch.object(harp_zai, "key", return_value="key"), \
+             patch.object(harp_zai.urllib.request, "urlopen", return_value=Response()), \
+             patch.multiple(harp_zai, WATCH_INTERVAL_SECONDS=0.005,
+                            PROGRESS_INTERVAL_SECONDS=0.01, **limits):
+            try:
+                return harp_zai.chat(self.config(), {"messages": []}, cancelled=cancelled,
+                                     on_progress=progress.append), progress
+            finally:
+                self.last_progress = progress
+                release.set()
+
+    @staticmethod
+    def delta(kind, value):
+        return ("data: " + json.dumps({"choices": [{"index": 0, "delta": {kind: value}}]}) + "\n\n").encode()
+
+    def test_first_output_watchdog_ignores_heartbeats(self):
+        def lines(release):
+            while not release.wait(0.005):
+                yield b": heartbeat\n"
+                yield b"\n"
+        with self.assertRaisesRegex(TimeoutError, "first_output_timeout"):
+            self.watched_stream(lines, PROXY_FIRST_OUTPUT_SECONDS=0.08)
+        self.assertEqual(self.last_progress[-1]["reason"], "first_output_timeout")
+        self.assertEqual(self.last_progress[-1]["reasoning_chars"], 0)
+
+    def test_idle_watchdog_rejects_partial_action_despite_heartbeats(self):
+        def lines(release):
+            yield self.delta("content", '{"command":"id"}')
+            yield b"\n"
+            while not release.wait(0.005):
+                yield b": heartbeat\n\n"
+        with self.assertRaisesRegex(TimeoutError, "stream_idle_timeout"):
+            self.watched_stream(lines, STREAM_IDLE_SECONDS=0.08)
+        self.assertGreater(self.last_progress[-1]["content_chars"], 0)
+        self.assertNotIn("command", json.dumps(self.last_progress))
+
+    def test_active_reasoning_outlives_first_output_limit_and_reports_counts_only(self):
+        def lines(release):
+            for _ in range(6):
+                yield self.delta("reasoning_content", "private reasoning")
+                yield b"\n"
+                release.wait(0.025)
+            yield self.delta("content", '{"done":true}')
+            yield b"\n"
+            yield b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+            yield b"\n"
+            yield b"data: [DONE]\n\n"
+            yield b"\n"
+        data, progress = self.watched_stream(lines, PROXY_FIRST_OUTPUT_SECONDS=0.08,
+                                             STREAM_IDLE_SECONDS=0.1, PROXY_REQUEST_SECONDS=1)
+        self.assertEqual(data["choices"][0]["message"]["content"], '{"done":true}')
+        self.assertTrue(any(row["phase"] == "reasoning" for row in progress))
+        self.assertGreater(progress[-1]["reasoning_chars"], 0)
+        self.assertGreater(progress[-1]["seconds"], 0.08)
+        self.assertNotIn("private reasoning", json.dumps(progress))
+
+    def test_active_reasoning_still_has_absolute_deadline(self):
+        def lines(release):
+            while not release.is_set():
+                yield self.delta("reasoning_content", "thinking")
+                yield b"\n"
+                release.wait(0.005)
+        with self.assertRaisesRegex(TimeoutError, "request_deadline"):
+            self.watched_stream(lines, PROXY_REQUEST_SECONDS=0.08)
+
+    def test_cancel_and_deadline_work_while_reader_is_blocked(self):
+        def lines(release):
+            release.wait(2)
+            yield self.delta("content", '{"command":"id"}')
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                started = time.monotonic()
+                with self.assertRaises(InterruptedError if cancel else TimeoutError):
+                    self.watched_stream(lines, cancelled=lambda: cancel and time.monotonic() - started > 0.05,
+                                         PROXY_FIRST_OUTPUT_SECONDS=0.15)
+                self.assertLess(time.monotonic() - started, 1)
+
+    def test_connection_wait_is_bounded_before_headers_arrive(self):
+        release = threading.Event()
+        def connect(*_args, **_kwargs):
+            release.wait(2)
+            raise ConnectionError("abandoned connection")
+        with patch.object(harp_zai, "key", return_value="key"), \
+             patch.object(harp_zai.urllib.request, "urlopen", side_effect=connect), \
+             patch.object(harp_zai, "PROXY_FIRST_OUTPUT_SECONDS", 0.05), \
+             patch.object(harp_zai, "WATCH_INTERVAL_SECONDS", 0.005):
+            try:
+                with self.assertRaisesRegex(TimeoutError, "first_output_timeout"):
+                    harp_zai.chat(self.config(), {"messages": []})
+            finally:
+                release.set()
+
+    def test_watchdog_does_not_wait_for_response_close(self):
+        release = threading.Event()
+        class Response:
+            headers = {"Content-Type": "text/event-stream"}
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+            def close(self): release.wait(2)
+            def __iter__(self):
+                release.wait(2)
+                return iter(())
+        with patch.object(harp_zai, "key", return_value="key"), \
+             patch.object(harp_zai.urllib.request, "urlopen", return_value=Response()), \
+             patch.object(harp_zai, "PROXY_FIRST_OUTPUT_SECONDS", 0.05), \
+             patch.object(harp_zai, "WATCH_INTERVAL_SECONDS", 0.005):
+            started = time.monotonic()
+            try:
+                with self.assertRaisesRegex(TimeoutError, "first_output_timeout"):
+                    harp_zai.chat(self.config(), {"messages": []})
+                self.assertLess(time.monotonic() - started, 1)
+            finally:
+                release.set()
 
     def test_incomplete_or_cancelled_stream_never_returns_partial_action(self):
         first = 'data: ' + json.dumps({"choices": [{"delta": {"content": '{"command":"id"}'}}]}) + '\n\n'
@@ -243,16 +368,15 @@ class ZAITests(unittest.TestCase):
             with self.subTest(finish=finish), self.assertRaises(error):
                 harp_zai.streamed_completion(io.BytesIO(wire.encode()))
 
-    def test_oracle_implementation_selects_bash_for_bash_only_syntax(self):
-        script = "set -o pipefail\nprintf '%s\\n' ready | cat"
-        for declared in ({}, {"shell": "sh"}):
-            decision = {"objective": "Run the prepared check", "implementation": script, **declared}
-            objective = harp_nim.assisted_objective(decision, "Run a bounded check")
-            self.assertIn("/bin/bash <<'HARP_BASH_", objective)
-            self.assertIn(script, objective)
-        posix = harp_nim.assisted_objective({"objective": "Run the prepared check",
-                                             "implementation": "printf ready"}, "Run a bounded check")
-        self.assertNotIn("HARP_BASH_", posix)
+    def test_oracle_implementation_preserves_selected_interpreter(self):
+        script = 'printf "%s\\n" "[[ status ]]"'
+        for script in (script, "AUTH=(-N)"):
+            for declared in ({}, {"shell": "sh"}, {"shell": "bash"}):
+                with self.subTest(script=script, declared=declared):
+                    decision = {"objective": "Run the prepared check", "implementation": script, **declared}
+                    objective = harp_nim.assisted_objective(decision, "Run a bounded check")
+                    self.assertEqual("/bin/bash <<'HARP_BASH_" in objective, declared.get("shell") == "bash")
+                    self.assertIn(script, objective)
         with self.assertRaisesRegex(ValueError, 'shell must be'):
             harp_nim.assisted_objective({"objective": "Run the prepared check",
                                           "implementation": script, "shell": "python"}, "Run a bounded check")

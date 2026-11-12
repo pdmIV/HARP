@@ -421,7 +421,7 @@ class KaliTerminal:
         return terminal
 
     def run(self, command: str, timeout: int, *, live: bool = True, as_root: bool = False) -> dict:
-        issue = command_format_issue(command) or harp_strategy.shell_issue(command)
+        issue = command_format_issue(command)
         if issue:
             raise ValueError(issue)
         if self.recon_mode and self.event_dir and (self.event_dir / ".stop_session").exists():
@@ -899,7 +899,8 @@ def fit_context(model: dict, context: dict, budget: int, system: str = SYSTEM) -
     raise RuntimeError("Proxy prompt exceeds the context budget even after compaction")
 
 
-def api_chat(model: dict, system: str, user: str | list[dict], ledger: list[dict]) -> str:
+def api_chat(model: dict, system: str, user: str | list[dict], ledger: list[dict], *,
+             cancelled=None, on_progress=None) -> str:
     key = local_api_key(model)
     if model["model"].startswith("REPLACE_"):
         raise RuntimeError("Set the model ID in harp.json")
@@ -919,7 +920,8 @@ def api_chat(model: dict, system: str, user: str | list[dict], ledger: list[dict
             data = harp_openai.chat(model, chat_body(model, system, user))
         elif model.get("provider") == "zai":
             import harp_zai
-            data = harp_zai.chat(model, chat_body(model, system, user))
+            data = harp_zai.chat(model, chat_body(model, system, user),
+                                 cancelled=cancelled, on_progress=on_progress)
         else:
             effort = chat_body(model, system, user).get("reasoning_effort", model.get("reasoning_effort"))
             with urllib.request.urlopen(request, timeout=harp_effort.read_timeout_seconds(effort)) as response:
@@ -1175,6 +1177,51 @@ def recon_hostnames_from_events(run_dir: Path) -> list[str]:
     return sorted(names)
 
 
+def recon_coverage(session: dict, run_dir: Path | None = None) -> dict:
+    """Preserve scan coverage independently of the open-port service summary."""
+    if isinstance(session.get("recon_coverage"), dict):
+        coverage = session["recon_coverage"]
+        if coverage.get("host") != session.get("target"):
+            return {**coverage, "host": session.get("target"), "source_host": coverage.get("host"),
+                    "full_tcp_completed": False,
+                    "guidance": "These sweeps belong to a prior address. Hostname-matched cache reuse does not prove full TCP coverage at this address; verify any needed coverage gap."}
+        return coverage
+    sweeps = []
+    if run_dir is not None and (run_dir / "events.jsonl").is_file():
+        with (run_dir / "events.jsonl").open(encoding="utf-8") as events:
+            for line in events:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "recon_finished":
+                    break
+                if event.get("type") not in ("port_discovery", "deeper_port_discovery"):
+                    continue
+                result = event.get("result") or {}
+                try:
+                    root = ET.fromstring(result.get("output", ""))
+                except ET.ParseError:
+                    continue
+                finished = root.find("runstats/finished")
+                hosts = root.findall("host")
+                complete = (result.get("exit_code") == 0 and finished is not None and
+                            finished.get("exit") == "success" and bool(hosts) and
+                            not any(host.get("timedout") == "true" for host in hosts))
+                for scan in root.findall("scaninfo"):
+                    if scan.get("protocol") != "tcp":
+                        continue
+                    sweeps.append({"protocol": "tcp", "ports": scan.get("services", "unknown"),
+                        "full_range": scan.get("numservices") == "65535",
+                        "status": "completed" if complete else "incomplete",
+                        "source_event": event["type"], "at": event.get("at")})
+    return {"host": session.get("target"), "sweeps": sweeps,
+            "full_tcp_completed": any(s["full_range"] and s["status"] == "completed" for s in sweeps),
+            "open_tcp_ports": sorted({r["port"] for r in session.get("recon", [])
+                                      if r.get("protocol", "tcp") == "tcp" and type(r.get("port")) is int}),
+            "guidance": "Reuse completed coverage. A new sweep needs a specific coverage gap, changed route/access or prior scan failure; few open ports do not mean only a quick scan ran."}
+
+
 def recon_snapshot(session: dict, source_session: str, run_dir: Path | None = None) -> dict:
     names = session.get("recon_hostnames")
     if names is None and run_dir is not None:
@@ -1182,6 +1229,7 @@ def recon_snapshot(session: dict, source_session: str, run_dir: Path | None = No
     return {"schema": 1, "profile": recon_profile(session["config"]),
             "source_session": source_session, "captured_at": session.get("recon_finished_epoch"),
             "hostnames": names or [],
+            "recon_coverage": recon_coverage(session, run_dir),
             "recon": session["recon"], "http_probes": session.get("http_probes", []),
             "smb_probes": session.get("smb_probes", [])}
 
@@ -1195,6 +1243,11 @@ def valid_recon_snapshot(snapshot: dict, cfg: dict) -> bool:
             and isinstance(snapshot.get("hostnames", []), list)
             and all(isinstance(name, str) for name in snapshot.get("hostnames", []))
             and isinstance(snapshot.get("recon"), list)
+            and bool(snapshot["recon"])
+            and all(isinstance(item, dict) and type(item.get("port")) is int
+                    and 1 <= item["port"] <= 65535
+                    and item.get("protocol", "tcp") in ("tcp", "udp")
+                    for item in snapshot["recon"])
             and isinstance(snapshot.get("http_probes"), list)
             and isinstance(snapshot.get("smb_probes"), list))
 
@@ -1347,6 +1400,7 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
                 smb_probes = snapshot["smb_probes"]
                 source_target = snapshot.get("source_target", cfg["target"])
             session.update(status="active", recon=snapshot["recon"],
+                           recon_coverage=snapshot.get("recon_coverage"),
                            http_probes=http_probes, smb_probes=smb_probes,
                            recon_stage="Reused", recon_source_session=snapshot["source_session"],
                            recon_source_target=source_target,
@@ -1452,6 +1506,12 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
             findings.extend(missing)
             append_event(run_dir, {"type": "recon_fallback", "reason": "version_scan_filtered",
                                    "findings": missing})
+        if (run_dir / ".stop_session").exists():
+            raise RuntimeError("Reconnaissance stopped by operator")
+        if not findings:
+            raise RuntimeError("Reconnaissance found no open services. Check target availability, "
+                               "the selected runtime's VPN/route, and scan coverage before starting "
+                               "another session. Empty reconnaissance will not be cached or sent to the oracle.")
         append_note(run_dir, "Deterministic reconnaissance", json.dumps(findings, indent=2))
         terminal.recon_stage = "HTTP probes"
         http_probes = deterministic_http_probes(terminal, cfg["target"], findings, run_dir)
@@ -1470,13 +1530,14 @@ def start_session(cfg: dict, output_root: Path, mode: str = "hybrid", *, fresh_r
                        recon_finished_epoch=time.time(),
                        kali_image_id=(None if isinstance(terminal, WslTerminal) else
                                       docker("inspect", "--format", "{{.Image}}", terminal.name)))
+        session["recon_coverage"] = recon_coverage(session, run_dir)
         terminal.recon_mode = False
         append_event(run_dir, {"type": "recon_finished", "seconds": round(
             session["recon_finished_epoch"] - started_epoch, 2), "services": len(findings)})
         ensure_whippet(run_dir, session, terminal)
         save_session(run_dir, session)
         try:
-            save_recon_snapshot(output_root, cfg, recon_snapshot(session, run_dir.name))
+            save_recon_snapshot(output_root, cfg, recon_snapshot(session, run_dir.name, run_dir))
         except OSError as error:
             append_event(run_dir, {"type": "recon_cache_error", "error": str(error)[:200]})
         print("Structured findings:", json.dumps(findings))
@@ -1765,6 +1826,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 "network_policy": cfg.get("network_policy", "internal_lab"),
                 "authorized_scope": cfg.get("authorized_scope", []),
                 "delegated_objective": objective, "recon": session["recon"],
+                "recon_coverage": recon_coverage(session, run_dir),
                 "workspace": session.get("workspace", "/workspace"),
                 "flags_found": {name: bool(flags.get(name, {}).get("found"))
                                 for name in harp_artifacts.FLAG_NAMES},
@@ -1809,10 +1871,24 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             try:
                 request_user = ([{"type": "text", "text": fitted_user}, pending_image]
                                 if pending_image else fitted_user)
-                reply = api_chat(action_model, prompt, request_user, session["local_calls"])
+                stream_options = {}
+                if action_model.get("provider") == "zai":
+                    stream_options = {"cancelled": lambda: stop_file.is_file() or session_stop_file.is_file(),
+                                      "on_progress": lambda event: append_event(run_dir, {
+                                          "type": "local_model_progress", "step": step, **event})}
+                reply = api_chat(action_model, prompt, request_user, session["local_calls"], **stream_options)
                 if pending_image:
                     session["local_calls"][-1].update(image_artifact_id=image_evidence["artifact_id"],
                                                      image_token_reserve=image_reserve)
+            except InterruptedError:
+                stop_reason = "operator_stop"
+                break
+            except TimeoutError:
+                stop_reason = "proxy_timeout"
+                session["oracle_help_request"] = (
+                    "The proxy model request timed out before a complete action was accepted. "
+                    "No command from that request ran. Review retained evidence before continuing.")
+                break
             except Exception:
                 stop_reason = "proxy_api_error"
                 raise
@@ -1932,7 +2008,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                 if isinstance(command, str) and command.strip():
                     try:
                         command = harp_strategy.prepare_command(command, action.get("shell", "sh"))
-                        issue = harp_strategy.shell_issue(command)
+                        issue = command_format_issue(command)
                         if issue:
                             raise ValueError(issue)
                         stop_reason = "root_requested"
@@ -2010,10 +2086,27 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                     continue
                 # Approval cannot make a command executable by the terminal transport.
                 # Ask the worker to repair its format before offering tactical review.
-                format_issue = command_format_issue(command) or harp_strategy.shell_issue(command)
+                format_issue = command_format_issue(command) or harp_strategy.shell_preflight(command)["issue"]
                 if format_issue:
                     format_rejections += 1
                     validation_feedback = format_issue
+                    append_event(run_dir, {"type": "local_command_rejected", "step": step,
+                        "command": command, "reason": validation_feedback})
+                    save_session(run_dir, session)
+                    if format_rejections >= 3:
+                        stop_reason = "command_validation_failed"
+                        break
+                    continue
+                syntax_command = harp_strategy.syntax_probe(command)
+                syntax = terminal.run(syntax_command, 5, live=False)
+                append_event(run_dir, {"type": "local_command_check", "step": step,
+                                       "result": syntax})
+                if syntax["exit_code"] != 0:
+                    format_rejections += 1
+                    validation_feedback = "Shell syntax check failed; correct the command before execution: " + syntax["output"][:500]
+                    shell_hint = harp_strategy.shell_issue(command)
+                    if shell_hint:
+                        validation_feedback += " " + shell_hint
                     append_event(run_dir, {"type": "local_command_rejected", "step": step,
                         "command": command, "reason": validation_feedback})
                     save_session(run_dir, session)
@@ -2030,13 +2123,6 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
                                             htb_vpn_ip=cfg.get("htb_vpn_ip", ""))
                 if normalized in seen and not unbridled:
                     issue = ((issue + " ") if issue else "") + "This exact command was already run in this session."
-                if issue is None:
-                    syntax_command = harp_strategy.syntax_probe(command)
-                    syntax = terminal.run(syntax_command, 5, live=False)
-                    append_event(run_dir, {"type": "local_command_check", "step": step,
-                                           "result": syntax})
-                    if syntax["exit_code"] != 0:
-                        issue = "Shell syntax check failed: " + syntax["output"][:500]
                 if issue:
                     if issue.startswith("Do not invoke sudo"):
                         stop_reason = "root_requested"
@@ -2062,6 +2148,7 @@ def delegate(run_dir: Path, objective: str, budget: int | None = None, *, quiet:
             index += 1
             session["observations"].append({"origin": "local", **result})
             new_evidence += record_terminal_evidence(run_dir, session, result)
+            validation_feedback = harp_strategy.execution_feedback(result) or ""
             append_event(run_dir, {"type": "local_terminal", "step": step, "result": result})
             harp_artifacts.capture_flags_from_result(run_dir, result)
             if isinstance(action.get("artifact"), dict):

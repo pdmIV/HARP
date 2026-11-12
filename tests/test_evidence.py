@@ -32,6 +32,119 @@ def state():
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_modestly_long_check_fields_preserve_the_proposed_action(self):
+        session = state()
+        item = check()
+        item["fact"] = "f" * 547
+        item["research_decision"] = "r" * 578
+        proposed = {"check": item}
+        self.assertIsNone(evidence.check_issue(proposed, session))
+        self.assertIsNone(harp_research.review_issue(proposed, session))
+        self.assertEqual(len(item["fact"]), 547)
+        self.assertEqual(len(item["research_decision"]), 578)
+        item["fact"] = "f" * 4097
+        self.assertIn("check.fact is 4097 characters; limit 4096", evidence.check_issue(proposed, session))
+        item["research_decision"] = "r" * 4097
+        self.assertIn("check.research_decision is 4097", harp_research.review_issue(proposed, session))
+
+    def test_no_timing_signal_stays_inconclusive_and_keeps_observation_limits(self):
+        session = state()
+        proposed = check()
+        evidence.record_check(session, proposed)
+        session["observations"].append({"command": "measure submission round trip", "exit_code": 0,
+                                        "output": "baseline_ms=200 test_ms=150; no callback observed"})
+        evidence.finish_check(session, proposed)
+        outcome = session["assessment_history"][-1]["observed_outcome"]
+        self.assertEqual(outcome["status"], "inconclusive")
+        self.assertIn("backend timing", outcome["limitations"])
+        self.assertIn("unverified", outcome["limitations"])
+
+    def test_compound_print_script_confirms_submission_on_target(self):
+        command = '''TARGET=192.0.2.10
+echo "===== print job =====" | tee -a out
+smbclient "//$TARGET/QUEUE" -N -c "lcd /tmp; print sample.txt; queue" 2>&1 | tee -a out
+'''
+        result = {"command": command, "exit_code": 0,
+                  "output": "===== print job =====\nputting file sample.txt as sample.txt (0.1 kB/s)\n"}
+        rows = evidence.outcomes(result, "192.0.2.10", 1)
+        self.assertTrue(any(row["host"] == "192.0.2.10" and row["resource"] == "QUEUE" and
+                            row["operation"] == "printer.submit" and row["status"] == "confirmed"
+                            for row in rows))
+        unresolved = evidence.outcomes({"command": "smbclient //$OTHER/QUEUE -N -c 'print sample.txt'",
+            "exit_code": 0, "output": "putting file sample.txt as sample.txt"}, "192.0.2.10", 2)
+        self.assertEqual(unresolved[0]["host"], "unspecified")
+
+    def test_checkpoint_prompts_research_then_revisits_after_inconclusive_check(self):
+        session = state()
+        checkpoint = harp_research.decision_checkpoint(session)
+        self.assertEqual(checkpoint["preference"], "research_before_payload")
+        self.assertEqual(checkpoint["evidence"]["operation"], "printer.submit")
+        choice = harp_research.record_checkpoint_choice(session, checkpoint,
+            {"check": {"research_decision": "Verify one local prerequisite first"}})
+        self.assertEqual(choice["choice"], "local_check")
+        self.assertIsNone(harp_research.decision_checkpoint(session))
+        item = check()
+        evidence.record_check(session, item)
+        session["observations"].append({"command": "rpcclient -N 192.0.2.10 -c enumprinters",
+            "exit_code": 1, "output": "Bad SMB2 signature for message"})
+        evidence.finish_check(session, item)
+        self.assertEqual(session["assessment_history"][-1]["observed_outcome"]["status"], "transport_error")
+        revisit = harp_research.decision_checkpoint(session)
+        self.assertEqual(revisit["preference"], "research_after_inconclusive_check")
+        harp_research.record_checkpoint_choice(session, revisit, {"research": {"query": "public fact"}})
+        self.assertIsNone(harp_research.decision_checkpoint(session))
+
+    def test_confirmed_submission_supersedes_exposed_printer_checkpoint(self):
+        session = state()
+        session["observations"].insert(0, {"command": "smbclient -L //192.0.2.10 -N",
+            "exit_code": 0, "output": "QUEUE Printer Reception printer"})
+        checkpoint = harp_research.decision_checkpoint(session)
+        self.assertEqual(checkpoint["preference"], "research_before_payload")
+        harp_research.record_checkpoint_choice(session, checkpoint,
+            {"research": {"query": "public print mechanism"}})
+        self.assertIsNone(harp_research.decision_checkpoint(session))
+
+    def test_search_results_require_source_read_then_a_source_to_test_handoff(self):
+        session = state()
+        task = {"id": "task1", "results": [{"source_id": "source1", "title": "Advisory"}],
+                "source_ids": ["source1"], "reads": []}
+        research_state = {"tasks": [task], "active_task_id": "task1"}
+        checkpoint = harp_research.decision_checkpoint(session, research_state)
+        self.assertEqual(checkpoint["phase"], "read_source")
+        harp_research.record_checkpoint_choice(session, checkpoint,
+            {"research": {"source_id": "source1"}})
+        task["reads"].append({"source_id": "source1", "excerpt": "Relevant public source text"})
+        checkpoint = harp_research.decision_checkpoint(session, research_state)
+        self.assertEqual(checkpoint["phase"], "apply_source")
+        self.assertEqual(harp_research.source_application({}, research_state)["status"], "missing")
+        basis = {"source_ids": ["source1"], "controlled_input": "client metadata",
+                 "execution_sink": "configured helper", "configuration_prerequisites": ["helper enabled"],
+                 "observable_test": "one benign callback"}
+        self.assertEqual(harp_research.source_application({"check": {"research_basis": basis}},
+            research_state)["status"], "documented")
+        basis["source_ids"] = ["invented"]
+        self.assertEqual(harp_research.source_application({"check": {"research_basis": basis}},
+            research_state)["status"], "incomplete")
+        session["config"]["oracle"]["web_search_enabled"] = False
+        self.assertIsNone(harp_research.decision_checkpoint(session, research_state))
+
+    def test_check_outcomes_distinguish_target_denial_from_local_error(self):
+        session = state()
+        item = check("validate_hypothesis", "share.map")
+        item["resource"] = "DOCS"
+        evidence.record_check(session, item)
+        session["observations"].append({"command": "smbclient //192.0.2.10/DOCS -N -c 'ls'",
+            "exit_code": 1, "output": "tree connect failed: NT_STATUS_ACCESS_DENIED"})
+        evidence.finish_check(session, item)
+        outcome = session["assessment_history"][-1]["observed_outcome"]
+        self.assertEqual(outcome["status"], "negative")
+        self.assertEqual(outcome["evidence"][0]["operation"], "share.map")
+        evidence.record_check(session, item)
+        session["observations"].append({"command": "smbclient //192.0.2.10/DOCS -N -c 'ls'",
+            "exit_code": 127, "output": "smbclient: command not found"})
+        evidence.finish_check(session, item)
+        self.assertEqual(session["assessment_history"][-1]["observed_outcome"]["status"], "tool_error")
+
     def test_mixed_script_keeps_auth_permissions_print_and_protocol_errors_separate(self):
         command = """echo '=== session ==='
 enum4linux-ng -A -u '' -p '' 192.0.2.10
@@ -157,6 +270,7 @@ Cannot connect: NT_STATUS_ACCESS_DENIED
                 requests.append(context)
                 if len(requests) == 1:
                     self.assertEqual(context["research_opportunity"]["capabilities"][0]["operation"], "printer.submit")
+                    self.assertEqual(context["decision_checkpoint"]["preference"], "research_before_payload")
                     record = check("research", "feature.advisory_prerequisites")
                     decision = {"plan": "Investigate reachable functionality", "objective": "", "stop": False,
                                 "check": record, "research": {"query": "Example service guest printing advisories prerequisites",

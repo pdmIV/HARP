@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "notes": "Only public query text was copied from logs. No target identities, reasons, credentials or flags. Expected CVEs are evaluation labels, not discovery-query inputs. Historical raw queries are diagnostics rather than retrieval assertions.",
+  "cases": [
+    {
+      "id": "operator_verified_print_command",
+      "input": {"product": "Samba", "feature": "print command"},
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "hit",
+      "provenance": "Operator live test on 2026-11-11: one result, CVE-2026-4480"
+    },
+    {
+      "id": "plain_keyword_control",
+      "wire_query": "Samba print command",
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "hit",
+      "provenance": "Plain keyword baseline isolates API parsing from HARP's grouped builder"
+    },
+    {
+      "id": "latest_log_structured",
+      "input": {"product": "Samba", "feature": "printer share anonymous print", "alternatives": ["print command injection"]},
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "hit",
+      "provenance": "20261112-001249-70558f: primary request returned HTTP 502"
+    },
+    {
+      "id": "previous_log_structured",
+      "input": {"product": "Samba", "feature": "printer share", "alternatives": ["anonymous print spool", "print job submission"]},
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "hit",
+      "provenance": "20261111-144349-22d9de: older encoding returned zero results, refinement returned HTTP 502"
+    },
+    {
+      "id": "older_log_legacy_keywords",
+      "input": "Samba print job spool",
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "observe",
+      "provenance": "20261111-023054-602af0: literal keyword search returned zero results"
+    },
+    {
+      "id": "historical_wire_primary",
+      "wire_query": "\"Samba\" AND (\"printer share\" OR \"anonymous print spool\" OR \"print job submission\")",
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "observe",
+      "provenance": "Exact primary wire query from 20261111-144349-22d9de"
+    },
+    {
+      "id": "historical_wire_refinement",
+      "wire_query": "\"Samba\" AND (\"printer\" OR \"share\" OR \"anonymous\" OR \"print\" OR \"spool\" OR \"job\" OR \"submission\")",
+      "expected_cves": ["CVE-2026-4480"],
+      "expect": "observe",
+      "provenance": "Exact refinement wire query from 20261111-144349-22d9de"
+    },
+    {
+      "id": "cross_product_openssh",
+      "input": {"product": "OpenSSH", "feature": "signal handling", "alternatives": ["race condition"]},
+      "expected_cves": ["CVE-2024-6387"],
+      "expect": "hit",
+      "provenance": "Existing cross-product query evaluation fixture"
+    },
+    {
+      "id": "cross_product_log4j",
+      "input": {"product": "Apache Log4j2", "feature": "JNDI features", "alternatives": ["message lookup"]},
+      "expected_cves": ["CVE-2021-44228"],
+      "expect": "hit",
+      "provenance": "Existing cross-product query evaluation fixture"
+    },
+    {
+      "id": "negative_control",
+      "input": {"product": "HarpNonexistentProduct9f3b8a", "feature": "nonexistentmechanism9f3b8a"},
+      "expected_cves": [],
+      "expect": "empty",
+      "provenance": "Deliberately nonexistent product and mechanism"
+    }
+  ]
+}

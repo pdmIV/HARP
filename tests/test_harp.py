@@ -65,7 +65,9 @@ class HarpTests(unittest.TestCase):
                 state = harp.load_session(self.event_dir)
                 seen.append((state["status"], state["recon_started_epoch"], command))
                 return {"command": command, "exit_code": 0, "seconds": 0.1,
-                        "output": "<nmaprun></nmaprun>", "truncated": False, "as_root": False}
+                        "output": '<nmaprun><host><ports><port protocol="tcp" portid="22">'
+                                  '<state state="open"/></port></ports></host></nmaprun>',
+                        "truncated": False, "as_root": False}
 
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
              patch.object(harp, "KaliTerminal", FakeTerminal), \
@@ -338,6 +340,174 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(state["local_steps"], 0)
             self.assertIn(state["last_delegate_stop"], harp_nim.RECOVERABLE_STOPS)
 
+    def test_syntax_failure_is_repaired_without_approval_or_execution(self):
+        for bad in ("if then", "echo 'unfinished"):
+            with self.subTest(command=bad), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                self.make_session(path)
+                replies = iter([{"command": bad}, {"command": "echo repaired"}, {"done": True}])
+                contexts = []
+                def reply(model, system, user, ledger):
+                    contexts.append(json.loads(user))
+                    return json.dumps(next(replies))
+                terminal = DummyTerminal()
+                def run(command, timeout, **kwargs):
+                    result = DummyTerminal.run(terminal, command, timeout, **kwargs)
+                    if command.startswith("sh -n") and bad in command:
+                        result.update(exit_code=2, output="sh: syntax error")
+                    return result
+                with patch.object(harp, "terminal_for", return_value=terminal), \
+                     patch.object(terminal, "run", side_effect=run) as execute, \
+                     patch.object(harp, "model_context_tokens", return_value=8192), \
+                     patch.object(harp, "count_chat_tokens", return_value=300), \
+                     patch.object(harp, "review_proxy_command", return_value=(True, 0)) as review, \
+                     patch.object(harp, "api_chat", side_effect=reply):
+                    harp.delegate(path, "Inspect target", 2, quiet=True)
+                review.assert_not_called()
+                self.assertIn("Shell syntax check failed", contexts[1]["last_command_feedback"])
+                self.assertEqual(harp.load_session(path)["local_steps"], 1)
+                self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
+                self.assertEqual([c.args[0] for c in execute.call_args_list if c.kwargs.get("live") is not False],
+                                 ["echo repaired"])
+                events = [json.loads(line) for line in (path / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+                self.assertEqual(sum(event["type"] == "local_command_rejected" for event in events), 1)
+
+    def test_repeated_syntax_failures_cannot_be_overridden_by_tactical_review(self):
+        for warning in (None, "Review this action"):
+            with self.subTest(warning=warning), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                self.make_session(path)
+                terminal = DummyTerminal()
+                with patch.object(harp, "terminal_for", return_value=terminal), \
+                     patch.object(terminal, "run", return_value={"exit_code": 2, "output": "sh: syntax error"}) as execute, \
+                     patch.object(harp, "model_context_tokens", return_value=8192), \
+                     patch.object(harp, "count_chat_tokens", return_value=300), \
+                     patch.object(harp, "local_command_issue", return_value=warning), \
+                     patch.object(harp, "review_proxy_command", return_value=(True, 0)) as review, \
+                     patch.object(harp, "api_chat", return_value=json.dumps({"command": "if then"})) as chat:
+                    harp.delegate(path, "Inspect target", 2, quiet=True)
+                review.assert_not_called()
+                self.assertEqual(chat.call_count, 3)
+                self.assertEqual(execute.call_count, 3)
+                self.assertTrue(all(c.args[0].startswith("sh -n") for c in execute.call_args_list))
+                state = harp.load_session(path)
+                self.assertEqual(state["local_steps"], 0)
+                self.assertEqual(state["last_delegate_stop"], "command_validation_failed")
+
+    def test_proxy_repairs_missing_bash_selector_for_array_command(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            command = 'AUTH=(-N)\nprintf "%s\\n" "${AUTH[@]}"'
+            replies = iter([{"command": command}, {"command": command, "shell": "bash"}, {"done": True}])
+            contexts = []
+            def reply(model, system, user, ledger):
+                contexts.append(json.loads(user))
+                return json.dumps(next(replies))
+            terminal = DummyTerminal()
+            def run(command, timeout, **kwargs):
+                result = DummyTerminal.run(terminal, command, timeout, **kwargs)
+                if command.startswith(("sh -n", "sh -c")):
+                    result.update(exit_code=2, output='sh: Syntax error: "(" unexpected')
+                return result
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(terminal, "run", side_effect=run) as execute, \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command") as review, \
+                 patch.object(harp, "api_chat", side_effect=reply):
+                harp.delegate(path, "Inspect target", 2, quiet=True)
+            review.assert_not_called()
+            self.assertIn('shell:"bash"', contexts[1]["last_command_feedback"])
+            self.assertEqual(execute.call_count, 3)
+            self.assertTrue(execute.call_args_list[0].args[0].startswith("sh -c"))
+            self.assertTrue(execute.call_args_list[1].args[0].startswith("bash -n"))
+            self.assertTrue(execute.call_args_list[2].args[0].startswith("/bin/bash <<'HARP_BASH_"))
+            self.assertEqual(harp.load_session(path)["local_steps"], 1)
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
+
+    def test_parser_accepted_sh_commands_are_not_vetoed_by_bash_patterns(self):
+        commands = ('printf "%s\\n" "[[ status ]]"',
+                    '# AUTH=(-N)\nprintf ready',
+                    'PIPESTATUS=ready; printf "%s\\n" "$PIPESTATUS"',
+                    'cat <<EOF\nAUTH=(-N)\nEOF')
+        for command in commands:
+            with self.subTest(command=command), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                self.make_session(path)
+                self.assertIsNotNone(harp.harp_strategy.shell_issue(command))
+                replies = iter([{"command": command, "shell": "sh"}, {"done": True}])
+                terminal = DummyTerminal()
+                with patch.object(harp, "terminal_for", return_value=terminal), \
+                     patch.object(terminal, "run", wraps=terminal.run) as execute, \
+                     patch.object(harp, "model_context_tokens", return_value=8192), \
+                     patch.object(harp, "count_chat_tokens", return_value=300), \
+                     patch.object(harp, "review_proxy_command") as review, \
+                     patch.object(harp, "api_chat", side_effect=lambda *args: json.dumps(next(replies))):
+                    harp.delegate(path, "Inspect local output", 2, quiet=True)
+                review.assert_not_called()
+                self.assertEqual(execute.call_count, 2)
+                self.assertTrue(execute.call_args_list[0].args[0].startswith("sh -n"))
+                self.assertEqual(execute.call_args_list[1].args[0], command)
+                self.assertEqual(harp.load_session(path)["local_steps"], 1)
+                self.assertEqual(harp.load_session(path)["last_delegate_stop"], "local_done")
+
+    def test_bad_generated_script_is_repaired_before_any_execution(self):
+        bad = "cat >helper.sh <<'EOF'\n#!/bin/bash\ncat <<EOF\ntext\nEOF\necho tail\nEOF\nbash helper.sh"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            replies = iter([{"command": bad}, {"command": "echo repaired"}, {"done": True}])
+            contexts = []
+            def reply(model, system, user, ledger):
+                contexts.append(json.loads(user))
+                return json.dumps(next(replies))
+            terminal = DummyTerminal()
+            with patch.object(harp, "terminal_for", return_value=terminal), \
+                 patch.object(terminal, "run", wraps=terminal.run) as execute, \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "review_proxy_command") as review, \
+                 patch.object(harp, "api_chat", side_effect=reply):
+                harp.delegate(path, "Create one helper", 2, quiet=True)
+            review.assert_not_called()
+            self.assertEqual(execute.call_count, 2)
+            self.assertIn("distinct outer and inner", contexts[1]["last_command_feedback"])
+            self.assertEqual(harp.load_session(path)["local_steps"], 1)
+
+    def test_full_tcp_coverage_is_derived_and_survives_cache_handoff(self):
+        xml = ('<nmaprun><scaninfo protocol="tcp" numservices="65535" services="1-65535"/>'
+               '<host><status state="up"/></host><runstats><finished exit="success"/></runstats></nmaprun>')
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            session = harp.load_session(path)
+            for timed_out in (False, True):
+                output = xml.replace('<host>', '<host timedout="true">') if timed_out else xml
+                (path / "events.jsonl").write_text(json.dumps({"type": "port_discovery", "result": {
+                    "exit_code": 0, "output": output}}) + '\n' + json.dumps({"type": "recon_finished"}) + '\n', encoding="utf-8")
+                coverage = harp.recon_coverage(session, path)
+                self.assertEqual(coverage["full_tcp_completed"], not timed_out)
+                snapshot = harp.recon_snapshot(session, "synthetic", path)
+                cached = {**session, "recon_coverage": snapshot["recon_coverage"]}
+                self.assertEqual(harp.recon_coverage(cached), coverage)
+                moved = harp.recon_coverage({**cached, "target": "different-address"})
+                self.assertFalse(moved["full_tcp_completed"])
+                self.assertEqual(moved["source_host"], session["target"])
+            self.assertFalse(harp.recon_coverage(session)["full_tcp_completed"])
+
+    def test_terminal_transport_does_not_veto_literal_bash_like_text(self):
+        command = 'printf "%s\\n" "[[ status ]]"'
+        terminal = harp.KaliTerminal({})
+        terminal.print_stdout = False
+        # Substitute only the external runtime process, retaining Terminal.run.
+        with patch.object(terminal, "command_argv", return_value=[sys.executable, "-c", "print('accepted')"]) as argv:
+            result = terminal.run(command, 5, live=False)
+        argv.assert_called_once_with(command, 5, False)
+        self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["command"], command)
+        self.assertEqual(result["shell"], "sh")
+
     def test_proxy_requests_oracle_help_without_running_a_command(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
@@ -385,6 +555,50 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(len(saved["local_calls"]), 1)
             self.assertEqual(saved["last_delegate_stop"], "step_budget")
 
+    def test_proxy_timeout_returns_to_oracle_without_executing_an_action(self):
+        for error, reason in ((TimeoutError("stream idle"), "proxy_timeout"),
+                              (InterruptedError("Stopped"), "operator_stop")):
+            with self.subTest(reason=reason), tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+                path = Path(temp)
+                self.make_session(path)
+                terminal = DummyTerminal()
+                with patch.object(harp, "terminal_for", return_value=terminal), \
+                     patch.object(terminal, "run") as execute, \
+                     patch.object(harp, "model_context_tokens", return_value=8192), \
+                     patch.object(harp, "count_chat_tokens", return_value=300), \
+                     patch.object(harp, "api_chat", side_effect=error):
+                    harp.delegate(path, "Inspect one result", 1, quiet=True)
+                execute.assert_not_called()
+                saved = harp.load_session(path)
+                self.assertEqual(saved["last_delegate_stop"], reason)
+                self.assertEqual(saved["local_steps"], 0)
+                if reason == "proxy_timeout":
+                    self.assertIn("No command", saved["oracle_help_request"])
+                    self.assertIn(reason, harp_nim.RECOVERABLE_STOPS)
+
+    def test_proxy_progress_reports_counts_and_stop_cancels_pending_request(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            saved = harp.load_session(path)
+            saved["config"]["local"]["provider"] = "zai"
+            harp.save_session(path, saved)
+            def reply(*_args, cancelled, on_progress):
+                self.assertFalse(cancelled())
+                on_progress({"phase": "reasoning", "seconds": 5, "idle_seconds": 0,
+                             "reasoning_chars": 100, "content_chars": 0})
+                self.assertEqual(harp_web.latest_activity(path)["local_model_progress"]["phase"], "reasoning")
+                (path / ".stop_local").touch()
+                self.assertTrue(cancelled())
+                raise InterruptedError("Stopped")
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=reply):
+                harp.delegate(path, "Inspect one result", 1, quiet=True)
+            self.assertIsNone(harp_web.latest_activity(path)["local_model_progress"])
+            self.assertEqual(harp.load_session(path)["last_delegate_stop"], "operator_stop")
+
     def test_proxy_api_failure_is_not_reported_as_step_budget(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
             path = Path(temp)
@@ -399,6 +613,32 @@ class HarpTests(unittest.TestCase):
             self.assertEqual(saved["last_delegate_stop"], "proxy_api_error")
             events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
             self.assertEqual(events[-1]["reason"], "proxy_api_error")
+
+    def test_hosted_oracle_reviews_retained_evidence_after_proxy_timeout(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            self.make_session(path)
+            saved = harp.load_session(path)
+            saved["config"]["oracle"] = {"provider": "zai", "model": "glm-5.3", "max_cycles": 2}
+            saved["observations"] = [{"origin": "oracle", "command": "existing observation",
+                                       "exit_code": 0, "output": "retained evidence"}]
+            harp.save_session(path, saved)
+            replies = [{"choices": [{"message": {"content": json.dumps(decision)}, "finish_reason": "stop"}]}
+                       for decision in ({"plan": "Inspect one result", "objective": "Inspect result", "stop": False},
+                                        {"plan": "Provider blocked", "stop": True})]
+            with patch.object(harp, "terminal_for", return_value=DummyTerminal()), \
+                 patch.object(harp, "model_context_tokens", return_value=8192), \
+                 patch.object(harp, "count_chat_tokens", return_value=300), \
+                 patch.object(harp, "api_chat", side_effect=TimeoutError("stream idle")) as proxy, \
+                 patch("harp_zai.chat", side_effect=replies) as oracle:
+                harp_nim.run(path)
+            self.assertEqual(proxy.call_count, 1)
+            self.assertEqual(oracle.call_count, 2)
+            context = json.loads(oracle.call_args.args[1]["messages"][1]["content"])
+            self.assertIn("No command", context["oracle_help_request"])
+            self.assertEqual(len(harp.load_session(path)["observations"]), 1)
+            events = [json.loads(line) for line in (path / "events.jsonl").read_text().splitlines()]
+            self.assertTrue(any(e["type"] == "oracle_nim_recovery" and e["reason"] == "proxy_timeout" for e in events))
 
     def test_proxy_command_trims_trailing_newline_before_terminal(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
@@ -1563,7 +1803,7 @@ class HarpTests(unittest.TestCase):
                             '{"thought":"No further work","done":true,"finding":"Done"}'])
             prompts = []
 
-            def fake_chat(_model, prompt, _user, calls):
+            def fake_chat(_model, prompt, _user, calls, **_kwargs):
                 prompts.append(prompt)
                 calls.append({"prompt_tokens": 10, "completion_tokens": 10,
                               "finish_reason": "stop", "reasoning_chars": 0})

@@ -1,0 +1,29 @@
+[
+  {
+    "id": "logging_jndi",
+    "product": "Apache Log4j2",
+    "feature": "JNDI features",
+    "alternatives": ["message lookup"],
+    "expected_cves": ["CVE-2021-44228"],
+    "unrelated_cves": ["CVE-2024-6387"],
+    "source": "https://github.com/CVEProject/cvelistV5/blob/main/cves/2021/44xxx/CVE-2021-44228.json"
+  },
+  {
+    "id": "ssh_signal_handling",
+    "product": "OpenSSH",
+    "feature": "signal handling",
+    "alternatives": ["race condition"],
+    "expected_cves": ["CVE-2024-6387"],
+    "unrelated_cves": ["CVE-2021-44228"],
+    "source": "https://github.com/CVEProject/cvelistV5/blob/main/cves/2024/6xxx/CVE-2024-6387.json"
+  },
+  {
+    "id": "synthetic_document_terms",
+    "synthetic": true,
+    "product": "ExampleProduct",
+    "feature": "document spool handler",
+    "alternatives": [],
+    "expected_cves": ["CVE-2099-12345"],
+    "unrelated_cves": ["CVE-2021-44228", "CVE-2024-6387"]
+  }
+]

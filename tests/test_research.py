@@ -1,5 +1,6 @@
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import socket
 import tempfile
@@ -61,6 +62,205 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(json.loads(wire.data), {"search_engine": "search-prime", "search_query": "ExampleProduct 2.0 documentation", "count": 3})
         self.assertEqual(len(result["search_result"]), 3)
         self.assertEqual(send.call_args.kwargs["timeout"], 20)
+
+    def test_cve_searches_use_runtime_year_and_preserve_older_known_cves(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, \
+             patch.object(research, "cve_search_api", return_value=self.report()) as api, \
+             patch.object(research, "datetime") as clock:
+            clock.now.return_value = datetime(2032, 1, 2, tzinfo=timezone.utc)
+            path = Path(temp)
+            state = self.setup_session(path)
+            state["config"]["objective"] = "Obtain authorized user access"
+            state["recon"] = [{"product": "ExampleProduct", "version": "2"}]
+            harp.save_session(path, state)
+            profile = research.research_profile(state)
+            self.assertEqual(profile["current_year"], 2032)
+            self.assertEqual(profile["previous_years"], [2031, 2030, 2029])
+            self.assertEqual(profile["products"][0]["reported_version"], "2")
+            self.assertIn("user access", profile["goal"])
+            action = {"query": "ExampleProduct 2 file processing", "kind": "cve",
+                      "reason": "Find an advisory relevant to the observed capability"}
+            current = research.request(path, action)
+            self.assertEqual(api.call_args.args[0], "ExampleProduct 2 file processing")
+            self.assertEqual(current["year_scope"], "current")
+            research.request(path, action)
+            self.assertEqual(api.call_count, 1)
+            older = research.request(path, {**action, "year_scope": "earlier"})
+            self.assertEqual(older["query"], "ExampleProduct 2 file processing")
+            self.assertNotIn("2032", older["query"])
+            known = research.request(path, {**action, "query": "ExampleProduct CVE-2019-12345 prerequisites"})
+            self.assertEqual(known["year_scope"], "any")
+            self.assertNotIn("2032", known["query"])
+            self.assertEqual(research.metrics(path)["search_requests"], 2)
+            self.assertEqual(research.context(path, state)["research_profile"]["current_year"], 2032)
+
+    def test_cve_metadata_does_not_bypass_toggle_privacy_or_budget(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "cve_search_api", return_value=self.report()) as api:
+            path = Path(temp)
+            state = self.setup_session(path, False)
+            action = {"query": "ExampleProduct 2 CVEs", "kind": "cve", "reason": "Find applicable vulnerability prerequisites"}
+            self.assertIsNone(research.research_profile(state))
+            with self.assertRaisesRegex(ValueError, "disabled"):
+                research.request(path, action)
+            state["config"]["oracle"]["web_search_enabled"] = True
+            harp.save_session(path, state)
+            for bad in ({**action, "query": "10.10.10.10 vulnerabilities"}, {**action, "year_scope": "future"},
+                        {**action, "kind": "invalid"}, {**action, "kind": "general", "year_scope": "current"}):
+                with self.assertRaises(ValueError):
+                    research.request(path, bad)
+            api.assert_not_called()
+            for i in range(4):
+                research.request(path, {**action, "query": f"ExampleProduct {i} CVEs"})
+            with self.assertRaisesRegex(ValueError, "budget exhausted"):
+                research.request(path, {**action, "query": "ExampleProduct 9 CVEs", "year_scope": "earlier"})
+            self.assertEqual(api.call_count, 4)
+
+    def test_candidate_dates_and_cve_ids_are_retained_as_unverified_metadata(self):
+        report = {"search_result": [{"title": "ExampleProduct CVE-2024-12345", "link": "https://example.org/advisory",
+                                    "content": "Affected version 2.0", "publish_date": "2024-10-01"}]}
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", return_value=report):
+            path = Path(temp)
+            state = self.setup_session(path)
+            task = self.search(path)
+            result = research.tool_result(task)
+            self.assertEqual(result["results"][0]["reported_date"], "2024-10-01")
+            self.assertEqual(result["results"][0]["cve_ids"], ["CVE-2024-12345"])
+            self.assertTrue(result["external_claims_unverified"])
+            self.assertIn("CVE-2024-12345", json.dumps(research.context(path, state)))
+
+    def test_goal_access_and_version_rank_advisories_before_score(self):
+        assessment = {"cve_id": "CVE-2024-12345", "affected_versions": "ExampleProduct 2.x",
+                      "version_match": "confirmed", "severity": "medium (source score 5.3)",
+                      "required_access": "anonymous", "required_access_state": "available",
+                      "goal_impact": "Discloses a credential needed for user access", "goal_relevance": "enabling",
+                      "unmet_prerequisites": []}
+        basis = {"source_ids": ["source1"], "controlled_input": "request field", "execution_sink": "disclosure handler",
+                 "configuration_prerequisites": ["feature enabled"], "observable_test": "Check one response"}
+        state = {"tasks": [{"reads": [{"source_id": "source1", "excerpt": "CVE-2024-12345 affects this product"}]}]}
+        cases = [({}, "candidate_for_verification"),
+                 ({"severity": "critical 9.8", "goal_relevance": "none", "goal_impact": "Availability only"}, "deprioritize"),
+                 ({"severity": "critical 9.8", "required_access_state": "missing"}, "deprioritize"),
+                 ({"version_match": "contradicted"}, "deprioritize"),
+                 ({"version_match": "unknown"}, "verify_prerequisites"),
+                 ({"unmet_prerequisites": ["Feature state not observed"]}, "verify_prerequisites"),
+                 ({"cve_id": "CVE-2024-99999"}, "verify_prerequisites")]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                result = research.source_application({"check": {"research_basis": {
+                    **basis, "advisory_assessment": {**assessment, **changes}}}}, state)
+                self.assertEqual(result["advisory_assessment"]["priority"], expected)
+                self.assertTrue(result["advisory_assessment"]["model_assessment_only"])
+                self.assertTrue(result["external_claims_unverified"])
+
+    def test_cached_phrase_lookup_recovers_section_and_selects_occurrence_without_fetch(self):
+        text = "print command in contents\n" + "irrelevant paragraph\n" * 6000 + "PRINT COMMAND\n  preserve_indented_code()\n"
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", return_value=self.report()), \
+             patch.object(research, "source_fetch", return_value=self.source(text)) as fetch:
+            path = Path(temp)
+            state = self.setup_session(path)
+            task = self.search(path)
+            sid = task["source_ids"][0]
+            read = {"source_id": sid, "reason": "Read the documented processing prerequisites"}
+            research.request(path, read)
+            found = research.request(path, {**read, "find": "print command", "match_index": 1})
+            self.assertIn("  preserve_indented_code()", found["excerpt"])
+            self.assertEqual(found["matches"][1]["offset"], text.index("PRINT COMMAND"))
+            self.assertEqual(found["offset"] + len(found["excerpt"]), len(text))
+            self.assertIn("preserve_indented_code", research.context(path, state)["requested_page"]["excerpt"])
+            self.assertLessEqual(len(json.dumps(research.tool_result(found))), 6000)
+            fetch.assert_called_once()
+            self.assertEqual(research.metrics(path)["source_requests"], 1)
+            for bad in ({"find": "not present"}, {"find": "print command", "offset": 0},
+                        {"find": "print command", "match_index": -1}):
+                with self.assertRaises(ValueError):
+                    research.request(path, {**read, **bad})
+
+    def test_action_identity_distinguishes_phrase_and_occurrence(self):
+        a = {"source_id": "source1", "find": "Print command", "reason": "Find one exact source passage"}
+        self.assertEqual(research.action_key(a), research.action_key({**a, "find": "print command", "match_index": 0}))
+        self.assertNotEqual(research.action_key(a), research.action_key({**a, "match_index": 1}))
+        self.assertNotEqual(research.action_key(a), research.action_key({**a, "find": "print  command"}))
+
+    def test_cached_find_is_bounded_with_unicode_matches_and_keeps_selected_phrase(self):
+        phrase = "\u6f22" * 100
+        text = ("\u6f22" * 90 + phrase + "\n") * 10
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", return_value=self.report()), \
+             patch.object(research, "source_fetch", return_value=self.source(text)):
+            path = Path(temp)
+            self.setup_session(path)
+            sid = self.search(path)["source_ids"][0]
+            research.request(path, {"source_id": sid, "reason": "Read the complete published source"})
+            page = research.request(path, {"source_id": sid, "find": phrase, "match_index": 1,
+                                           "reason": "Read the selected exact phrase in context"})
+            self.assertIn(phrase, page["excerpt"])
+            self.assertLessEqual(len(json.dumps(page)), 4500)
+            self.assertEqual(page["next_offset"], page["offset"] + len(page["excerpt"]))
+
+    def test_hosted_cve_and_distinct_phrase_reads_complete_in_one_execution_cycle(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            session = self.setup_session(path)
+            session["config"]["oracle"]["max_cycles"] = 1
+            harp.save_session(path, session)
+            turns = []
+            def chat(cfg, body, **_kwargs):
+                context = json.loads(body["messages"][1]["content"])
+                turns.append(context)
+                if len(turns) == 1:
+                    self.assertIn("current_year", context["unverified_research"]["research_profile"])
+                    action = {"research": {"query": "ExampleProduct 2 initial access", "kind": "cve",
+                                          "reason": "Find a goal-relevant advisory for this software"}}
+                elif len(turns) == 2:
+                    sid = context["unverified_research"]["latest"]["results"][0]["source_id"]
+                    action = {"research": {"source_id": sid, "reason": "Read the vendor prerequisites"}}
+                elif len(turns) in (3, 4):
+                    sid = context["unverified_research"]["latest"]["reads"][0]["source_id"]
+                    action = {"research": {"source_id": sid, "find": "Prerequisites" if len(turns) == 3 else "Detection",
+                                          "reason": "Locate the exact section before the target test"}}
+                else:
+                    self.assertEqual(context["unverified_research"]["requested_page"]["find"], "Detection")
+                    action = {"objective": "Verify one advisory prerequisite"}
+                return {"choices": [{"message": {"content": json.dumps({
+                    "plan": "Check one applicable advisory", "objective": "", "stop": False, **action})}}]}
+            with patch.object(harp_zai, "chat", side_effect=chat), \
+                 patch.object(research, "cve_search_api", return_value=self.report()) as search, \
+                 patch.object(research, "source_fetch", return_value=self.source("Prerequisites\nfeature enabled\nDetection\nobservable response\n")) as fetch, \
+                 patch.object(harp, "delegate") as delegate:
+                harp_nim.run(path)
+            search.assert_called_once()
+            fetch.assert_called_once()
+            delegate.assert_called_once()
+            self.assertEqual(len(turns), 5)
+            self.assertEqual(harp_nim.oracle_history(path)["research_turns"], 4)
+            self.assertNotIn("research_rejected", (path / "events.jsonl").read_text())
+
+    def test_hosted_structured_refinement_needs_no_extra_model_decision(self):
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp:
+            path = Path(temp)
+            session = self.setup_session(path)
+            session["config"]["oracle"]["max_cycles"] = 1
+            harp.save_session(path, session)
+            turns = []
+            def chat(cfg, body, **_kwargs):
+                context = json.loads(body["messages"][1]["content"])
+                turns.append(context)
+                decision = {"plan": "Read one relevant advisory", "objective": "", "stop": False}
+                if len(turns) == 1:
+                    decision["research"] = {"product": "ExampleProduct", "feature": "document handler",
+                        "kind": "cve", "reason": "Identify an advisory for the observed processing feature"}
+                else:
+                    latest = context["unverified_research"]["latest"]
+                    self.assertTrue(latest["refinement_of"])
+                    self.assertEqual(context["unverified_research"]["tasks_used"], 2)
+                    decision["stop"] = True
+                return {"choices": [{"message": {"content": json.dumps(decision)}}]}
+            reports = [{"search_result": [], "results_total": 0}, {**self.report(), "results_total": 3}]
+            with patch.object(harp_zai, "chat", side_effect=chat), \
+                 patch.object(research, "cve_search_api", side_effect=reports) as official:
+                harp_nim.run(path)
+            self.assertEqual(len(turns), 2)
+            self.assertEqual(official.call_count, 2)
+            self.assertEqual(harp_nim.oracle_history(path)["research_turns"], 1)
 
     def test_durable_search_cache_and_session_budget(self):
         with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp, patch.object(research, "search_api", side_effect=lambda q: self.report()) as api:
@@ -178,7 +378,7 @@ class ResearchTests(unittest.TestCase):
             api.assert_not_called()
             task = self.search(path)
             db = research.load(path)
-            db["tasks"][0]["reads"] = [{"source_id": task["source_ids"][0], "excerpt": "漢" * 80000, "error": None}]
+            db["tasks"][0]["reads"] = [{"source_id": task["source_ids"][0], "excerpt": "æ¼¢" * 80000, "error": None}]
             research.save(path, db)
             self.assertLessEqual(len(json.dumps(research.context(path, state, limit=3000))), 3000)
 

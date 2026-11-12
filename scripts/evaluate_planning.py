@@ -16,6 +16,7 @@ import harp_strategy
 def score(case, decision):
     session = copy.deepcopy(case["session"])
     card = harp_evidence.context(session)
+    checkpoint = harp_research.decision_checkpoint(session, case.get("research_state"))
     issue = harp_evidence.check_issue(decision, session)
     if not issue:
         issue = harp_research.review_issue(decision, session)
@@ -28,12 +29,18 @@ def score(case, decision):
     retained = retained and not any(any(row["operation"] == item["operation"] and row["status"] == item["status"]
                        for row in card["facts"]) for item in case.get("forbidden_observations", []))
     appropriate = action in case["acceptable_actions"]
+    expected_checkpoint = case.get("expected_checkpoint")
+    checkpoint_matched = not expected_checkpoint or bool(checkpoint and
+        checkpoint.get("preference") == expected_checkpoint)
+    choice_explained = not (checkpoint and checkpoint.get("preference", "").startswith("research_")
+        and action != "research") or bool((decision.get("check") or {}).get("research_decision"))
     toggle = session["config"]["oracle"]["web_search_enabled"]
     respected = toggle or ("research" not in decision and action != "research")
     return {"case": case["id"], "schema_and_evidence_valid": issue is None,
             "capabilities_retained": retained, "appropriate_action": appropriate,
+            "checkpoint_matched": checkpoint_matched, "checkpoint_choice_explained": choice_explained,
             "research_toggle_respected": respected, "issue": issue,
-            "passed": issue is None and retained and appropriate and respected}
+            "passed": issue is None and retained and appropriate and respected and checkpoint_matched and choice_explained}
 
 
 def main(argv=None):
